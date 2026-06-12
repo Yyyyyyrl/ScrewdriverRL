@@ -1,6 +1,3 @@
-"""Task registrations. Importing this package registers all gym IDs.
+"""Task registry — import sub-packages to trigger gymnasium.register() calls."""
 
-NOTE: imports isaaclab — only import after the Omniverse app is launched.
-"""
-
-from . import continuous_turning  # noqa: F401
+from . import allegro  # noqa: F401
