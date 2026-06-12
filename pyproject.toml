@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screwdriver-rl"
+version = "0.1.0"
+description = "Continuous screwdriver turning with dexterous hands in Isaac Lab (teacher-student RL)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Ruilin Yan" }]
+dependencies = [
+    "torch",
+    "gymnasium",
+    "numpy",
+    "tensorboard",
+]
+
+[tool.setuptools.packages.find]
+include = ["screwdriver_rl*"]
+
+[tool.setuptools.package-data]
+screwdriver_rl = [
+    "assets/**/*.urdf",
+    "assets/**/*.stl",
+    "assets/**/*.obj",
+]
