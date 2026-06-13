@@ -27,11 +27,11 @@ from typing import Any
 import torch
 
 import isaaclab.sim as sim_utils
-import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
+from screwdriver_rl.core import rewards
 from .screwdriver_rotation_env_cfg import AllegroScrewdriverRotationEnvCfg, CurriculumPhaseCfg
 
 
@@ -272,12 +272,11 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
                 flush=True,
             )
             self._curriculum_phase = active
-            # Extend episode length for the new phase.
-            new_max = int(
-                active.episode_length_s
-                / (self.cfg.decimation * self.cfg.sim.dt)
-            )
-            self.max_episode_length = new_max
+            # Extend the episode length for the new phase.  ``max_episode_length``
+            # is a read-only property derived from ``cfg.episode_length_s``, so we
+            # update the config field and let the property recompute (with the
+            # same math.ceil the base env uses).
+            self.cfg.episode_length_s = active.episode_length_s
 
     # -----------------------------------------------------------------------
     # Step
@@ -334,7 +333,7 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
         # ---- Rotation delta ----
         raw_delta_z = self.cfg.turn_direction * (z_curr - self._prev_z)
         # Wrap to (−π, π] so coordinate resets don't produce giant deltas.
-        delta_z = torch.atan2(torch.sin(raw_delta_z), torch.cos(raw_delta_z))
+        delta_z = rewards.wrap_to_pi(raw_delta_z)
         self._prev_z = z_curr.detach().clone()
 
         # Prefer true shaft-axis spin over Euler-z (which includes precession).
@@ -343,14 +342,13 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
             if shaft_delta is not None:
                 delta_z = shaft_delta
 
-        turn_vel = delta_z / self._policy_dt
-        fwd_vel = torch.clamp(turn_vel, 0.0, self.cfg.turn_velocity_clip)
-        rev_vel = torch.clamp(-turn_vel, 0.0, self.cfg.turn_velocity_clip)
+        turn_vel, fwd_vel, rev_vel = rewards.turn_velocities(
+            delta_z, self._policy_dt, self.cfg.turn_velocity_clip
+        )
 
         # ---- Upright gate (multiplicative — see cfg for rationale) ----
         tilt_norm = torch.linalg.norm(euler[:, :2], dim=-1)
-        g_std = self.cfg.turn_upright_gate_std
-        upright_gate = torch.exp(-((tilt_norm / g_std) ** 2)) if g_std > 0.0 else torch.ones_like(tilt_norm)
+        upright_gate = rewards.upright_gate(tilt_norm, self.cfg.turn_upright_gate_std)
 
         # ---- Contact gate ----
         contact_gate = self._compute_contact_gate(phase)
@@ -561,14 +559,19 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
             env_ids=env_ids,
         )
 
-        # 2. Screwdriver body mass
-        mass_scale = torch.empty(n, device=self.device).uniform_(*dr.screwdriver_mass_range)
-        base_mass = 0.3  # kg, from URDF screwdriver_body
-        self.screwdriver.write_body_mass_to_sim(
-            (base_mass * mass_scale).unsqueeze(-1),                      # (n, 1)
-            body_ids=[self._handle_body_ids[self._handle_base_idx]],
-            env_ids=env_ids,
-        )
+        # 2. Screwdriver body mass.  This Isaac Lab release exposes no
+        #    write_body_mass_to_sim helper, so we go through the PhysX view
+        #    directly (the same idiom isaaclab.envs.mdp.events uses).  The
+        #    masses buffer lives on CPU and the setter only touches the rows
+        #    for the supplied env indices.  We randomise on the *default* mass
+        #    so repeated resets don't compound the scaling.
+        base_body_id = self._handle_body_ids[self._handle_base_idx]
+        env_ids_cpu = env_ids.detach().to("cpu")
+        mass_scale = torch.empty(len(env_ids_cpu)).uniform_(*dr.screwdriver_mass_range)
+        masses = self.screwdriver.root_physx_view.get_masses()           # (num_envs, num_bodies) on CPU
+        default_base_mass = self.screwdriver.data.default_mass[env_ids_cpu, base_body_id].to("cpu")
+        masses[env_ids_cpu, base_body_id] = default_base_mass * mass_scale
+        self.screwdriver.root_physx_view.set_masses(masses, env_ids_cpu)
 
         # 3 & 4. Finger PD gains (one scale per env, broadcast across joints)
         n_fj = len(self._finger_joint_ids)
@@ -609,17 +612,11 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
             self._prev_shaft_quat = shaft_quat.detach().clone()
             return None
 
-        delta_q = math_utils.quat_mul(shaft_quat, math_utils.quat_conjugate(self._prev_shaft_quat))
-        # Resolve quaternion double-cover so small rotations stay small.
-        delta_q = torch.where(delta_q[:, :1] < 0.0, -delta_q, delta_q)
-        axis_angle = math_utils.axis_angle_from_quat(delta_q)
-
-        z_local = torch.zeros(self.num_envs, 3, device=self.device)
-        z_local[:, 2] = 1.0
-        shaft_axis = math_utils.quat_apply(shaft_quat, z_local)
-        spin = torch.sum(axis_angle * shaft_axis, dim=-1)
+        spin = rewards.shaft_spin_delta(
+            shaft_quat, self._prev_shaft_quat, self.cfg.turn_direction
+        )
         self._prev_shaft_quat = shaft_quat.detach().clone()
-        return self.cfg.turn_direction * spin
+        return spin
 
     # -----------------------------------------------------------------------
     # Contact gate
@@ -655,9 +652,11 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
         denom = w.sum(dim=-1).clamp(min=1.0)
         avg_contact_speed = (tip_speed * w).sum(dim=-1) / denom
 
-        min_s = float(phase.turn_reward_min_fingertip_speed)
-        full_s = max(float(phase.turn_reward_full_fingertip_speed), min_s + 1e-6)
-        motion_gate = ((avg_contact_speed - min_s) / (full_s - min_s)).clamp(0.0, 1.0)
+        motion_gate = rewards.motion_gate(
+            avg_contact_speed,
+            float(phase.turn_reward_min_fingertip_speed),
+            float(phase.turn_reward_full_fingertip_speed),
+        )
 
         gate = binary_gate * motion_gate
         self.extras["eval_contact_count"] = contact_count.detach()
@@ -684,14 +683,7 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
         tip_pos = self.allegro.data.body_state_w[:, self._fingertip_body_ids, :3]
         base = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_base_idx], :3]
         top = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_cap_idx], :3]
-
-        axis = top - base                                             # (N, 3)
-        axis_len_sq = (axis ** 2).sum(-1, keepdim=True).clamp(1e-9)  # (N, 1)
-        rel = tip_pos - base.unsqueeze(1)                             # (N, F, 3)
-        t = (rel * axis.unsqueeze(1)).sum(-1, keepdim=True) / axis_len_sq.unsqueeze(1)
-        t = t.clamp(0.0, 1.0)
-        closest = base.unsqueeze(1) + t * axis.unsqueeze(1)
-        return torch.linalg.norm(tip_pos - closest, dim=-1)
+        return rewards.point_segment_distance(tip_pos, base, top)
 
     def _compute_near_reward(self, tip_dist: torch.Tensor, weight: float) -> torch.Tensor:
         """Dense fingertip proximity reward with thumb/non-thumb split.
@@ -705,24 +697,9 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
             return torch.zeros(self.num_envs, device=self.device)
 
         near = torch.exp(-tip_dist / max(self.cfg.near_reward_std, 1e-6))
-
-        non_thumb_score = None
-        if self._non_thumb_tip_idxs:
-            nt = near[:, self._non_thumb_tip_idxs]
-            k = min(self.cfg.near_reward_top_k, nt.shape[1])
-            non_thumb_score = torch.topk(nt, k=k, dim=-1).values.mean(dim=-1)
-
-        thumb_score = near[:, self._thumb_tip_idx] if self._thumb_tip_idx is not None else None
-
-        if thumb_score is not None and non_thumb_score is not None:
-            score = 0.5 * (thumb_score + non_thumb_score)
-        elif thumb_score is not None:
-            score = thumb_score
-        elif non_thumb_score is not None:
-            score = non_thumb_score
-        else:
-            score = near.mean(dim=-1)
-
+        score = rewards.near_contact_score(
+            near, self._thumb_tip_idx, self._non_thumb_tip_idxs, self.cfg.near_reward_top_k
+        )
         return weight * score
 
     def _compute_proximal_penalty(self, weight: float) -> torch.Tensor:
@@ -740,14 +717,7 @@ class AllegroScrewdriverRotationEnv(DirectRLEnv):
         prox_pos = self.allegro.data.body_state_w[:, self._proximal_body_ids, :3]
         base = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_base_idx], :3]
         top = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_cap_idx], :3]
-
-        axis = top - base
-        axis_len_sq = (axis ** 2).sum(-1, keepdim=True).clamp(1e-9)
-        rel = prox_pos - base.unsqueeze(1)
-        t = (rel * axis.unsqueeze(1)).sum(-1, keepdim=True) / axis_len_sq.unsqueeze(1)
-        t = t.clamp(0.0, 1.0)
-        closest = base.unsqueeze(1) + t * axis.unsqueeze(1)
-        d = torch.linalg.norm(prox_pos - closest, dim=-1)  # (N, n_proximal)
+        d = rewards.point_segment_distance(prox_pos, base, top)  # (N, n_proximal)
 
         # Penalty activates within 0.05 m; linear in proximity.
         penalty_threshold = 0.05

@@ -47,7 +47,33 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--num_envs", type=int, default=None)
+parser.add_argument(
+    "--max_epochs",
+    type=int,
+    default=None,
+    help="[Stage 1] Override rl_games max_epochs (useful for smoke tests / short runs).",
+)
+parser.add_argument(
+    "--save_interval_steps",
+    type=int,
+    default=2_000_000,
+    help=(
+        "[Stage 1] Target env-step interval between checkpoints. Converted to "
+        "rl_games epoch counts based on num_envs so the cadence is predictable "
+        "regardless of env count (best-saving starts at half this interval)."
+    ),
+)
 parser.add_argument("--checkpoint", type=str, default=None)
+parser.add_argument(
+    "--output",
+    type=str,
+    default=None,
+    help=(
+        "Directory for checkpoints, tensorboard logs and videos. "
+        "Defaults to runs/<task>. Stage 1 writes <output>/<run-name>/nn/*.pth; "
+        "Stage 2 writes <output>/stage2_nn/proprio_adapt.pth."
+    ),
+)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--video", action="store_true")
 parser.add_argument("--video_interval", type=int, default=2000)
@@ -57,6 +83,7 @@ parser.add_argument("--adapt_rollout_steps", type=int, default=512, help="[Stage
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
 args.enable_cameras = args.video
+args.rl_device = getattr(args, "rl_device", None) or args.device or "cuda:0"
 
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
@@ -68,23 +95,37 @@ import torch
 
 import screwdriver_rl.tasks  # noqa: F401
 
+# Import paths differ across Isaac Lab releases.  Newest first, with fallbacks
+# to the pre-rename (``isaaclab_tasks.utils.wrappers``) and the legacy
+# ``omni.isaac.lab_tasks`` layouts.
 try:
-    from omni.isaac.lab_tasks.utils import parse_env_cfg
-    from omni.isaac.lab_tasks.utils.wrappers.rl_games import (
-        RlGamesAlgoObserver, RlGamesVecEnvWrapper, RlGamesGpuEnv,
-    )
-except ImportError:
+    # Current Isaac Lab: the RL-Games wrappers live in ``isaaclab_rl``.
     from isaaclab_tasks.utils import parse_env_cfg
-    from isaaclab_tasks.utils.wrappers.rl_games import (
-        RlGamesAlgoObserver, RlGamesVecEnvWrapper,
-    )
-    from isaaclab_rl.rl_games import RlGamesGpuEnv
+    from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
+except ImportError:
+    try:
+        from isaaclab_tasks.utils import parse_env_cfg
+        from isaaclab_tasks.utils.wrappers.rl_games import (
+            RlGamesGpuEnv, RlGamesVecEnvWrapper,
+        )
+    except ImportError:  # legacy omni.isaac namespace
+        from omni.isaac.lab_tasks.utils import parse_env_cfg
+        from omni.isaac.lab_tasks.utils.wrappers.rl_games import (
+            RlGamesGpuEnv, RlGamesVecEnvWrapper,
+        )
+
+# The RL-Games algo observer was renamed ``RlGamesAlgoObserver`` ->
+# ``IsaacAlgoObserver`` and moved into rl_games itself.
+try:
+    from rl_games.common.algo_observer import IsaacAlgoObserver as RlGamesAlgoObserver
+except ImportError:  # very old Isaac Lab
+    from isaaclab_tasks.utils.wrappers.rl_games import RlGamesAlgoObserver
 
 from rl_games.common import env_configurations, vecenv
 from rl_games.torch_runner import Runner
 
 
-def _load_agent_cfg(task: str, num_envs: int, rl_device: str, seed: int) -> dict:
+def _load_agent_cfg(num_envs: int, rl_device: str, seed: int, train_dir: str) -> dict:
     cfg_path = os.path.join(
         os.path.dirname(__file__),
         "screwdriver_rl", "tasks", "allegro", "agents", "rl_games_ppo_cfg.yaml",
@@ -95,18 +136,78 @@ def _load_agent_cfg(task: str, num_envs: int, rl_device: str, seed: int) -> dict
     cfg["params"]["config"]["device"] = rl_device
     cfg["params"]["config"]["device_name"] = rl_device
     cfg["params"]["seed"] = seed
-    cfg["params"]["config"]["train_dir"] = os.path.join("runs", task)
+    cfg["params"]["config"]["train_dir"] = train_dir
+    if args.max_epochs is not None:
+        cfg["params"]["config"]["max_epochs"] = args.max_epochs
+
+    # RL-Games requires the per-epoch batch (num_actors * horizon_length) to be
+    # an exact multiple of minibatch_size.  The shipped config targets the
+    # production env count (2048); with smaller --num_envs (e.g. smoke tests)
+    # the configured minibatch can exceed the batch, which makes RL-Games stall
+    # on zero minibatches.  Shrink the minibatch to the largest divisor of the
+    # batch that does not exceed the configured value.
+    horizon = int(cfg["params"]["config"]["horizon_length"])
+    batch = num_envs * horizon
+
+    def _fit_minibatch(configured: int) -> int:
+        mb = min(int(configured), batch)
+        while mb > 1 and batch % mb != 0:
+            mb -= 1
+        return max(mb, 1)
+
+    for path in (cfg["params"]["config"], cfg["params"].get("central_value_config")):
+        if not path or "minibatch_size" not in path:
+            continue
+        fitted = _fit_minibatch(path["minibatch_size"])
+        if fitted != path["minibatch_size"]:
+            print(
+                f"[train] Adjusting minibatch_size {path['minibatch_size']} -> {fitted} "
+                f"to divide batch (num_envs={num_envs} * horizon={horizon} = {batch}).",
+                flush=True,
+            )
+            path["minibatch_size"] = fitted
+
+    # Checkpoint cadence.  RL-Games counts save_frequency / save_best_after in
+    # *epochs*, and one epoch is num_envs * horizon_length steps — so with large
+    # --num_envs the shipped 100/200-epoch gates map to tens of millions of steps
+    # before the first checkpoint.  Translate the desired env-step interval into
+    # epochs so the cadence is predictable regardless of num_envs.
+    epoch_steps = batch  # num_envs * horizon_length
+    save_freq = max(1, round(args.save_interval_steps / epoch_steps))
+    save_best_after = max(1, round(0.5 * args.save_interval_steps / epoch_steps))
+    cfg["params"]["config"]["save_frequency"] = save_freq
+    cfg["params"]["config"]["save_best_after"] = save_best_after
+    print(
+        f"[train] Checkpoint cadence: periodic every {save_freq} epochs "
+        f"(~{save_freq * epoch_steps:,} steps), best-saving after {save_best_after} epochs "
+        f"(~{save_best_after * epoch_steps:,} steps).",
+        flush=True,
+    )
     return cfg
 
 
-def _register_rl_games(env, env_cfg) -> None:
-    env_configurations.register("rlgpu", {
-        "vecenv_type": "IsaacLab",
-        "env_creator": lambda **_: RlGamesVecEnvWrapper(
-            env, env_cfg, args.rl_device, getattr(args, "clip_obs", 5.0)
-        ),
-    })
-    vecenv.register("IsaacLab", lambda name, actors, **_: RlGamesGpuEnv(name, actors))
+def _register_rl_games(env, agent_cfg: dict) -> None:
+    # The current RlGamesVecEnvWrapper signature is
+    #   (env, rl_device, clip_obs, clip_actions, obs_groups=None, concate_obs_group=True)
+    # Asymmetric actor-critic is resolved automatically: when the env exposes a
+    # "critic" observation group (i.e. env_cfg.state_space > 0), the wrapper maps
+    # it to RL-Games "states" while the actor sees "policy".
+    env_section = agent_cfg["params"].get("env", {})
+    clip_obs = float(env_section.get("clip_observations", 5.0))
+    clip_actions = float(env_section.get("clip_actions", 1.0))
+    obs_groups = env_section.get("obs_groups")
+    concate_obs_group = env_section.get("concate_obs_groups", True)
+
+    wrapped = RlGamesVecEnvWrapper(
+        env, args.rl_device, clip_obs, clip_actions, obs_groups, concate_obs_group
+    )
+    vecenv.register(
+        "IsaacRlgWrapper",
+        lambda config_name, num_actors, **kwargs: RlGamesGpuEnv(config_name, num_actors, **kwargs),
+    )
+    env_configurations.register(
+        "rlgpu", {"vecenv_type": "IsaacRlgWrapper", "env_creator": lambda **_: wrapped}
+    )
 
 
 def run_stage1(env_cfg, log_dir: str) -> None:
@@ -125,8 +226,8 @@ def run_stage1(env_cfg, log_dir: str) -> None:
             disable_logger=True,
         )
 
-    _register_rl_games(env, env_cfg)
-    agent_cfg = _load_agent_cfg(args.task, env.unwrapped.num_envs, args.rl_device, args.seed)
+    agent_cfg = _load_agent_cfg(env.unwrapped.num_envs, args.rl_device, args.seed, log_dir)
+    _register_rl_games(env, agent_cfg)
 
     if args.checkpoint:
         agent_cfg["params"]["load_checkpoint"] = True
@@ -147,6 +248,11 @@ def run_stage1(env_cfg, log_dir: str) -> None:
     runner.reset()
     runner.run({"train": True, "play": False, "sigma": None})
 
+    # Close the env before the app shuts down.  Skipping this leaves the
+    # timeline "playing", and Isaac Sim's stop handler then renders a frame
+    # during simulation_app.close(), which can deadlock on teardown.
+    env.close()
+
 
 def run_stage2(env_cfg, log_dir: str) -> None:
     if not args.checkpoint:
@@ -156,10 +262,10 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     env_cfg.state_space = env_cfg.privileged_obs_dim
 
     env = gym.make(args.task, cfg=env_cfg, render_mode=None)
-    _register_rl_games(env, env_cfg)
 
     # Build the frozen Stage 1 actor via RL-Games player.
-    agent_cfg = _load_agent_cfg(args.task, env.unwrapped.num_envs, args.rl_device, args.seed)
+    agent_cfg = _load_agent_cfg(env.unwrapped.num_envs, args.rl_device, args.seed, log_dir)
+    _register_rl_games(env, agent_cfg)
     agent_cfg["params"]["load_checkpoint"] = True
     agent_cfg["params"]["load_path"] = args.checkpoint
 
@@ -169,11 +275,17 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     player = runner.create_player()
     player.restore(args.checkpoint)
     player.init_rnn()
+    # We call player.get_action() directly on batched observations instead of
+    # going through player.run() (which is what normally sets this flag).
+    # Without it the player treats the (num_envs, obs_dim) batch as a single
+    # unbatched observation and flattens it, breaking the network input.
+    player.has_batch_dimension = True
 
     def frozen_actor(obs: torch.Tensor) -> torch.Tensor:
+        # PpoPlayerContinuous.get_action returns the action tensor directly
+        # (not a tuple); unpacking it would corrupt the batch dimension.
         with torch.no_grad():
-            action, _ = player.get_action(obs, is_deterministic=True)
-        return action
+            return player.get_action(obs, is_deterministic=True)
 
     from screwdriver_rl.algos.proprio_adapt import ProprioAdaptTrainer, AdaptTrainCfg
     adapt_cfg = AdaptTrainCfg(
@@ -203,11 +315,15 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     )
     trainer.train()
 
+    # See run_stage1: close the env before app teardown to avoid a render
+    # deadlock during simulation_app.close().
+    env.close()
+
 
 def main() -> None:
     env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
-    log_dir = os.path.join("runs", args.task)
+    log_dir = args.output or os.path.join("runs", args.task)
     os.makedirs(log_dir, exist_ok=True)
 
     if args.stage == 1:
@@ -217,7 +333,15 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import traceback
+
     try:
         main()
+    except Exception:
+        # Print the traceback *before* closing the simulator.  Isaac Sim's
+        # teardown can hang (render -> cuda.set_device) and would otherwise
+        # swallow the real error.
+        traceback.print_exc()
+        raise
     finally:
         simulation_app.close()

@@ -1,144 +1,128 @@
-"""End-to-end trainer tests on a fake env. No Isaac Sim required.
+"""Tests for the Stage-2 proprioceptive-adaptation algorithm. No Isaac Sim.
 
-The FakeEnv mimics the DirectRLEnv interface the trainers consume:
-``reset() -> (obs_dict, extras)`` and
-``step(a) -> (obs_dict, rew, terminated, timed_out, extras)``.
+Covers the adaptation network shapes, its ability to fit a supervised target,
+and the end-to-end ``ProprioAdaptTrainer`` loop driven by a fake env that mimics
+the ``DirectRLEnv`` interface the trainer consumes:
+``reset() -> (obs_dict, info)`` and
+``step(a) -> (obs_dict, rew, terminated, truncated, info)``.
 
-Run:  python tests/test_algo.py
+Run:  python tests/test_algo.py   (or  python -m pytest tests/ -q)
 """
 
 import sys
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
-import gymnasium as gym
-import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from screwdriver_rl.algo import PPO, ProprioAdapt  # noqa: E402
-from screwdriver_rl.configs import (  # noqa: E402
-    AdvanceCriteria,
-    CurriculumPhase,
-    NetworkCfg,
-    PPOTrainCfg,
-    StudentTrainCfg,
+from screwdriver_rl.algos.proprio_adapt import (  # noqa: E402
+    AdaptTrainCfg,
+    ProprioAdaptNet,
+    ProprioAdaptTrainer,
 )
 
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+DEVICE = "cpu"
 
 
 class FakeEnv:
-    """Random-dynamics stand-in with the right shapes and extras keys."""
+    """Minimal stand-in for the screwdriver env's gym interface.
 
-    def __init__(self, num_envs=16, obs_dim=24, act_dim=12, priv_dim=22, hist_len=30):
+    Produces the three observation groups the trainer reads (``policy``,
+    ``critic``, ``proprio_hist``).  The privileged ``critic`` vector is a fixed
+    linear function of the latest proprio frame (plus small noise) so the
+    adaptation network has a learnable signal rather than pure noise.
+    """
+
+    def __init__(self, num_envs=16, policy_dim=27, priv_dim=17, hist_len=30,
+                 frame_dim=24, act_dim=12, device=DEVICE):
         self.num_envs = num_envs
-        self.device = DEVICE
-        self.single_action_space = gym.spaces.Box(-1, 1, (act_dim,), dtype=np.float32)
-        self.single_observation_space = gym.spaces.Dict(
-            {"policy": gym.spaces.Box(-np.inf, np.inf, (obs_dim,), dtype=np.float32)}
-        )
-        self.cfg = SimpleNamespace(
-            privileged_obs_dim=priv_dim,
-            prop_hist_len=hist_len,
-            history_obs_dim=obs_dim,
-            reward_turn_weight=0.0,  # curriculum override target
-            dr=SimpleNamespace(obs_noise_std=0.0),
-        )
-        self._obs_dim, self._act_dim, self._priv_dim, self._hist_len = obs_dim, act_dim, priv_dim, hist_len
-        self._t = torch.zeros(num_envs, device=DEVICE)
+        self.device = device
+        self._policy_dim = policy_dim
+        self._priv_dim = priv_dim
+        self._hist_len = hist_len
+        self._frame_dim = frame_dim
+        self._act_dim = act_dim
+        # Fixed (unknown to the net) mapping latest-frame -> privileged obs.
+        self._proj = torch.randn(frame_dim, priv_dim, device=device)
 
     def _obs(self):
+        hist = torch.randn(self.num_envs, self._hist_len, self._frame_dim, device=self.device)
+        critic = hist[:, -1] @ self._proj + 0.01 * torch.randn(self.num_envs, self._priv_dim, device=self.device)
         return {
-            "policy": torch.randn(self.num_envs, self._obs_dim, device=DEVICE),
-            "critic": torch.randn(self.num_envs, self._priv_dim, device=DEVICE),
-            "proprio_hist": torch.randn(self.num_envs, self._hist_len, self._obs_dim, device=DEVICE),
+            "policy": torch.randn(self.num_envs, self._policy_dim, device=self.device),
+            "critic": critic,
+            "proprio_hist": hist,
         }
 
     def reset(self):
-        self._t.zero_()
         return self._obs(), {}
 
     def step(self, actions):
-        self._t += 1
         rew = -actions.pow(2).sum(dim=-1)
-        timed_out = self._t >= 20
-        terminated = torch.zeros_like(timed_out)
-        self._t[timed_out] = 0
-        extras = {
-            "eval_net_turns": torch.rand(self.num_envs, device=DEVICE),
-            "eval_forward_turn_velocity": torch.full((self.num_envs,), 0.5, device=DEVICE),
-            "eval_reverse_turn_velocity": torch.full((self.num_envs,), 0.1, device=DEVICE),
-            "eval_screwdriver_upright_norm": torch.full((self.num_envs,), 0.05, device=DEVICE),
-            "eval_mean_fingertip_dist": torch.full((self.num_envs,), 0.03, device=DEVICE),
-        }
-        return self._obs(), rew, terminated, timed_out, extras
+        terminated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        truncated = torch.zeros_like(terminated)
+        return self._obs(), rew, terminated, truncated, {}
 
 
-def test_ppo_trains_and_curriculum_advances():
+def test_net_output_shapes():
+    net = ProprioAdaptNet(frame_dim=24, hist_len=30, out_dim=17)
+    out = net(torch.randn(8, 30, 24))
+    assert out.shape == (8, 17), f"got {tuple(out.shape)}"
+    # Custom dims also resolve the conv-flatten size dynamically.
+    net2 = ProprioAdaptNet(frame_dim=12, hist_len=40, out_dim=9)
+    assert net2(torch.randn(4, 40, 12)).shape == (4, 9)
+
+
+def test_net_overfits_supervised_batch():
+    """The network must be able to reduce MSE on a fixed (hist -> priv) batch."""
+    torch.manual_seed(0)
+    net = ProprioAdaptNet(frame_dim=24, hist_len=30, out_dim=17)
+    proj = torch.randn(24, 17)
+    hist = torch.randn(64, 30, 24)
+    target = hist[:, -1] @ proj
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    loss_fn = torch.nn.functional.mse_loss
+
+    init_loss = loss_fn(net(hist), target).item()
+    for _ in range(200):
+        opt.zero_grad()
+        loss = loss_fn(net(hist), target)
+        loss.backward()
+        opt.step()
+    final_loss = loss_fn(net(hist), target).item()
+    assert final_loss < 0.5 * init_loss, f"loss did not drop: {init_loss:.4f} -> {final_loss:.4f}"
+
+
+def test_trainer_runs_and_saves():
     env = FakeEnv()
-    cfg = PPOTrainCfg(horizon_length=8, minibatch_size=64, mini_epochs=2, max_agent_steps=8 * 16 * 6)
-    curriculum = [
-        CurriculumPhase(
-            "p1",
-            {"reward_turn_weight": 123.0},
-            AdvanceCriteria(
-                min_phase_steps=0,
-                min_episode_length=1,
-                metric_bounds={"eval_net_turns": (">=", 0.0)},
-                min_fwd_minus_rev=0.1,
-            ),
-        ),
-        CurriculumPhase("p2", {"reward_turn_weight": 456.0}, None),
-    ]
+    actor = lambda obs: torch.zeros(obs.shape[0], 12, device=obs.device)  # noqa: E731
+    cfg = AdaptTrainCfg(
+        rollout_steps=4, num_iters=3, batch_size=32,
+        num_epochs_per_iter=2, log_interval=100,
+    )
     with tempfile.TemporaryDirectory() as tmp:
-        trainer = PPO(env, tmp, cfg=cfg, net_cfg=NetworkCfg(), curriculum=curriculum, device=DEVICE)
-        assert env.cfg.reward_turn_weight == 123.0, "phase-1 override not applied"
-        trainer.train()
-        assert env.cfg.reward_turn_weight == 456.0, "curriculum did not advance to phase 2"
-        assert trainer.agent_steps >= cfg.max_agent_steps
-
-        # checkpoint round-trip with training state
-        ckpt = str(Path(tmp) / "stage1_nn" / "last")
-        trainer.save(ckpt)
-        trainer2 = PPO(env, tmp, cfg=cfg, net_cfg=NetworkCfg(), curriculum=curriculum, device=DEVICE)
-        trainer2.restore(ckpt + ".pth")
-        assert trainer2.agent_steps == trainer.agent_steps
-        assert trainer2.phase_idx == trainer.phase_idx
-        return ckpt + ".pth"
-
-
-def test_padapt_trains_from_teacher(teacher_ckpt):
-    env = FakeEnv()
-    cfg = StudentTrainCfg(max_agent_steps=16 * 60, bc_weight=0.1)
-    with tempfile.TemporaryDirectory() as tmp:
-        student = ProprioAdapt(env, tmp, cfg=cfg, net_cfg=NetworkCfg(), device=DEVICE)
-        student.restore_from_teacher(teacher_ckpt)
-        # Only adapt_tconv should be trainable.
-        trainable = {n for n, p in student.model.named_parameters() if p.requires_grad}
-        assert trainable and all("adapt_tconv" in n for n in trainable)
-        frozen_before = student.model.actor_mlp.mlp[0].weight.clone()
-        student.train()
-        assert torch.equal(frozen_before, student.model.actor_mlp.mlp[0].weight), "actor weights moved"
+        trainer = ProprioAdaptTrainer(
+            env=env, stage1_actor_fn=actor, cfg=cfg, out_dir=tmp, device=DEVICE,
+            priv_obs_dim=17, frame_dim=24, hist_len=30,
+        )
+        ckpt = trainer.train()
+        assert Path(ckpt).exists(), "trainer did not save a checkpoint"
+        # The saved checkpoint must reload into a matching network.
+        state = torch.load(ckpt, map_location=DEVICE)
+        net = ProprioAdaptNet(frame_dim=24, hist_len=30, out_dim=17)
+        net.load_state_dict(state["net"])
 
 
 if __name__ == "__main__":
-    import shutil
-
-    keep_dir = Path(tempfile.mkdtemp())
-    try:
-        ckpt = test_ppo_trains_and_curriculum_advances()
-        # the tempdir from the ppo test is gone; save a fresh teacher ckpt for padapt
-        env = FakeEnv()
-        trainer = PPO(env, str(keep_dir), cfg=PPOTrainCfg(horizon_length=8, minibatch_size=64,
-                      mini_epochs=1, max_agent_steps=8 * 16), net_cfg=NetworkCfg(), device=DEVICE)
-        trainer.train()
-        teacher = str(keep_dir / "stage1_nn" / "final.pth")
-        print("[PASS] test_ppo_trains_and_curriculum_advances")
-        test_padapt_trains_from_teacher(teacher)
-        print("[PASS] test_padapt_trains_from_teacher")
-    finally:
-        shutil.rmtree(keep_dir, ignore_errors=True)
-    print("all algo tests passed")
+    failures = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print(f"[PASS] {name}")
+            except AssertionError as exc:
+                failures += 1
+                print(f"[FAIL] {name}: {exc}")
+    raise SystemExit(1 if failures else 0)

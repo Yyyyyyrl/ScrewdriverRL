@@ -2,6 +2,11 @@
 
 Isaac Lab training environment for **continuous in-hand screwdriver rotation** with a dexterous robot hand.  The policy must spin the screwdriver around its own axial direction while keeping it upright, using fingertip contacts only.
 
+Training follows a two-stage **RMA** (Rapid Motor Adaptation) recipe on top of RL-Games PPO:
+
+- **Stage 1 — Teacher.** An asymmetric actor-critic where the actor sees the 27-D policy observation and the critic additionally sees a 17-D privileged observation (exact screwdriver pose/velocity, friction, fingertip distances). The deployment policy is the actor alone.
+- **Stage 2 — Adaptation.** A small temporal-conv network learns to predict the privileged observation from a history of proprioception, so the policy can run without privileged sensors. See [`docs/2-stage-training.md`](docs/2-stage-training.md) for details.
+
 > **Current support:** Allegro hand (4-finger, 3-finger configuration).  The architecture is designed to extend to other hands — see [Adding a new hand](#adding-a-new-hand).
 
 ---
@@ -42,21 +47,82 @@ export SCREWDRIVER_RL_ASSET_ROOT=/path/to/your/assets
 
 ## Training
 
+### Stage 1 — Teacher (PPO with asymmetric critic)
+
 ```bash
 # Phase 1→3 curriculum, 2048 envs, headless
-python train.py \
-  --task Isaac-Allegro-Screwdriver-Rotation-Direct-v0 \
-  --num_envs 2048 \
-  --headless
+python train.py --stage 1 --num_envs 2048 --headless
 
 # Resume from a checkpoint
-python train.py \
-  --task Isaac-Allegro-Screwdriver-Rotation-Direct-v0 \
-  --checkpoint runs/Isaac-Allegro-Screwdriver-Rotation-Direct-v0/nn/allegro_screwdriver_rotation.pth \
-  --headless
+python train.py --stage 1 --headless \
+  --checkpoint runs/Isaac-Allegro-Screwdriver-Rotation-Direct-v0/<run-name>/nn/allegro_screwdriver_rotation.pth
 ```
 
-Checkpoints and tensorboard logs are saved under `runs/<task>/`.
+### Stage 2 — Adaptation (run after Stage 1 converges)
+
+```bash
+python train.py --stage 2 --headless \
+  --checkpoint runs/Isaac-Allegro-Screwdriver-Rotation-Direct-v0/<run-name>/nn/allegro_screwdriver_rotation.pth
+```
+
+### Useful flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--stage {1,2}` | `1` | Teacher PPO (1) or adaptation network (2). |
+| `--num_envs N` | task cfg (2048) | Parallel environments. |
+| `--checkpoint PATH` | — | Resume Stage 1, or the frozen teacher for Stage 2 (required). |
+| `--output DIR` | `runs/<task>` | Where checkpoints, tensorboard logs and videos are written. |
+| `--max_epochs N` | cfg (8000) | Cap RL-Games epochs (handy for smoke tests). |
+| `--seed N` | `42` | RNG seed. |
+| `--video` | off | Record training videos (`--video_interval` controls frequency). |
+
+> **Note:** the production agent config uses `minibatch_size: 8192`, which needs `num_envs × horizon_length(32) ≥ 8192` (i.e. `num_envs ≥ 256`). For smaller runs `train.py` automatically shrinks the minibatch to fit.
+
+### Output layout
+
+By default everything is written under `runs/<task>/` (override with `--output DIR`):
+
+```
+<output>/
+├── <run-name>/            # Stage 1, timestamped by RL-Games
+│   ├── nn/                #   checkpoints (.pth)
+│   └── summaries/         #   tensorboard
+└── stage2_nn/
+    └── proprio_adapt.pth  # Stage 2 adaptation network
+```
+
+---
+
+## Evaluation / playback
+
+`play.py` loads a Stage 1 checkpoint and runs the deterministic policy.
+
+```bash
+# Visual playback (opens the Isaac Sim viewport)
+python play.py --checkpoint <path-to.pth> --num_envs 16
+
+# Headless statistics over many episodes
+python play.py --checkpoint <path-to.pth> --num_envs 512 --num_episodes 20 --headless
+
+# Record an mp4
+python play.py --checkpoint <path-to.pth> --video --video_length 300
+```
+
+`--output DIR` relocates the player logs and recorded videos (default `runs/<task>/`).
+
+---
+
+## Tests
+
+Unit tests are pure PyTorch and run on CPU — **no Isaac Sim required**:
+
+```bash
+python -m pytest tests/ -q
+```
+
+- `tests/test_rewards.py` — reward, gate, distance and quaternion primitives in `screwdriver_rl/core/rewards.py`.
+- `tests/test_algo.py` — the Stage 2 adaptation network and trainer.
 
 ---
 
@@ -68,7 +134,7 @@ Training proceeds through three automatic phases based on `global_step_counter`:
 |---|---|---|---|
 | **1 — Reach & grasp** | 0 → 15 M | Learn to approach and surround the handle | Near-reward dominant; contact gate OFF; turn reward weak |
 | **2 — Contact rotation** | 15 M → 60 M | Learn to turn while maintaining fingertip contact | Contact gate ON (0.10 m); proximal penalty active; turn reward 150 |
-| **3 — Sustained fingertip rotation** | 60 M → | Polish fingertip-only style; long episodes | Contact gate tight (0.075 m); proximal penalty strong; turn reward 200 |
+| **3 — Sustained fingertip rotation** | 60 M → | Polish fingertip-only style; long episodes | Contact gate tight (0.05 m); proximal penalty strong; turn reward 200 |
 
 Phase transitions are printed to the terminal with a `═══` banner.
 
@@ -151,17 +217,27 @@ Warnings are appended inline when failure modes are detected:
 
 ```
 ScrewdriverRL/
-├── train.py                          # Training entry point
+├── train.py                          # Two-stage training entry point (--stage 1|2)
+├── play.py                           # Evaluation / playback entry point
 ├── pyproject.toml
-├── screwdriver_rl/
-│   ├── tasks/
-│   │   ├── __init__.py               # Imports all hand sub-packages
-│   │   └── allegro/
-│   │       ├── __init__.py           # Gymnasium registration
-│   │       ├── screwdriver_rotation_env_cfg.py   # All hyperparameters + justifications
-│   │       ├── screwdriver_rotation_env.py       # DirectRLEnv implementation
-│   │       └── agents/
-│   │           └── rl_games_ppo_cfg.yaml
-│   └── utils/
-│       └── logging.py                # Formatted terminal logger
+├── docs/
+│   └── 2-stage-training.md           # RMA teacher/student details
+├── tests/                            # CPU-only unit tests (no Isaac Sim)
+│   ├── test_rewards.py
+│   └── test_algo.py
+└── screwdriver_rl/
+    ├── core/
+    │   └── rewards.py                # Pure-torch reward / geometry / quaternion primitives
+    ├── algos/
+    │   └── proprio_adapt.py          # Stage 2 adaptation network + trainer
+    ├── tasks/
+    │   ├── __init__.py               # Imports all hand sub-packages
+    │   └── allegro/
+    │       ├── __init__.py           # Gymnasium registration
+    │       ├── screwdriver_rotation_env_cfg.py   # All hyperparameters + justifications
+    │       ├── screwdriver_rotation_env.py       # DirectRLEnv implementation
+    │       └── agents/
+    │           └── rl_games_ppo_cfg.yaml
+    └── utils/
+        └── logging.py                # Formatted terminal logger
 ```

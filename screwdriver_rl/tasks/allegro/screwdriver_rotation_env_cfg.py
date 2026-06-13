@@ -61,7 +61,10 @@ from isaaclab.utils import configclass
 # Override by setting the environment variable SCREWDRIVER_RL_ASSET_ROOT.
 import os as _os
 
-_DEFAULT_ASSET_ROOT = Path(__file__).resolve().parents[5] / "MFR_benchmark" / "MFR_benchmark" / "assets"
+# This file is at <root>/screwdriver_rl/tasks/allegro/ , so parents[3] is the
+# repo root and parents[4] is the directory that holds the sibling
+# MFR_benchmark checkout.
+_DEFAULT_ASSET_ROOT = Path(__file__).resolve().parents[4] / "MFR_benchmark" / "MFR_benchmark" / "assets"
 ASSET_ROOT = Path(_os.environ.get("SCREWDRIVER_RL_ASSET_ROOT", str(_DEFAULT_ASSET_ROOT)))
 
 
