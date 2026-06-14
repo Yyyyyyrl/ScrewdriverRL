@@ -1,0 +1,106 @@
+params:
+  seed: 42
+
+  env:
+    clip_observations: 5.0
+    clip_actions: 1.0
+
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  network:
+    name: actor_critic
+    separate: False
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+    mlp:
+      units: [1024, 512, 256, 128]
+      activation: elu
+      d2rl: False
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+  # Stage 1 asymmetric critic.
+  # Activated when the environment's state_space > 0 (i.e. --stage 1).
+  # The critic sees the 19-D privileged observation (exact screwdriver pose,
+  # velocity, friction, fingertip distances) while the actor only sees the
+  # 35-D policy observation.  rl_games reads both dims from the env spaces, so
+  # the network below adapts automatically.
+  central_value_config:
+    minibatch_size: 8192
+    mini_epochs: 4
+    learning_rate: 1e-4
+    lr_schedule: adaptive
+    kl_threshold: 0.016
+    grad_norm: 1.0
+    truncate_grads: True
+    e_clip: 0.2
+    network:
+      name: actor_critic
+      central_value: True
+      mlp:
+        units: [512, 256, 128]
+        activation: elu
+        initializer:
+          name: default
+        regularizer:
+          name: None
+
+  load_checkpoint: False
+  load_path: ''
+
+  config:
+    name: linker_l20_screwdriver_rotation
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+    normalize_input: True
+    normalize_value: True
+    value_bootstrap: True
+    num_actors: -1
+    reward_shaper:
+      scale_value: 0.005
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    learning_rate: 3e-4
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.016
+    score_to_win: 100000
+    max_epochs: 8000
+    save_best_after: 100
+    save_frequency: 200
+    print_stats: True
+    grad_norm: 1.0
+    entropy_coef: 0.0
+    truncate_grads: True
+    e_clip: 0.2
+    horizon_length: 32
+    minibatch_size: 8192
+    mini_epochs: 8
+    critic_coef: 4
+    clip_value: True
+    seq_length: 4
+    bounds_loss_coef: 0.0001
+
+    player:
+      deterministic: True
+      games_num: 100000
+      print_stats: True

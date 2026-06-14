@@ -93,6 +93,8 @@ class RotationTrainingLogger:
         c_gate     = m("eval_contact_gate")
         b_gate     = m("eval_binary_gate")
         mot_gate   = m("eval_motion_gate")
+        pad_fac    = m("eval_pad_gate")
+        pad_cos    = m("eval_pad_cos")
         turn_vel   = m("eval_fwd_vel")
         rev_vel    = m("eval_rev_vel")
         tip_dist   = m("eval_min_tip_dist")
@@ -138,6 +140,10 @@ class RotationTrainingLogger:
                 f"    ContactGate {_colour(c_gate, 0.2, 0.6):>14}  "
                 f"BinaryGate {_colour(b_gate, 0.2, 0.7):>14}  "
                 f"MotionGate {_colour(mot_gate, 0.2, 0.7):>14}{cont_warn}"
+            ),
+            (
+                f"    PadFactor {_colour(pad_fac, 0.2, 0.7):>14}  "
+                f"PadCos {_colour(pad_cos, 0.0, 0.5):>16}"
             ),
             (
                 f"    MinTipDist {_colour(tip_dist, 0.08, 0.035, invert=True):>13}  "
