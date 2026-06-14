@@ -14,6 +14,17 @@ python play.py --checkpoint <path> --num_envs 512 --headless --num_episodes 20
 
 # Record video to disk
 python play.py --checkpoint <path> --video --video_length 300
+
+# Clean eval that matches the trained regime (final curriculum phase, no
+# randomisation, fixed start) — use this to compare against training metrics
+python play.py --checkpoint <path> --no_domain_rand --fixed_start
+
+By default the curriculum phase is pinned to the final trained phase
+(``--eval_phase final``) so the printed reward breakdown and the termination
+thresholds match training.  Pass ``--eval_phase none`` to reproduce the old
+behaviour (phase 0).  Note: the curriculum, domain randomisation, and start
+angle change the environment and the reward *display* only — the loaded policy
+network is identical regardless of these flags.
 """
 
 from __future__ import annotations
@@ -38,6 +49,36 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--num_episodes", type=int, default=5, help="Episodes to run per env before exiting.")
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument(
+    "--eval_phase",
+    type=str,
+    default="final",
+    help=(
+        "Curriculum phase to evaluate under.  'final' (default) pins the last "
+        "phase so the reward display and termination/episode thresholds match "
+        "the trained regime; 'none' leaves the env default (phase 0, lenient "
+        "termination, phase-0 reward weights); an integer selects a specific "
+        "phase index.  This only affects logging and termination — NOT the "
+        "policy network, which is identical across phases."
+    ),
+)
+parser.add_argument(
+    "--no_domain_rand",
+    action="store_true",
+    help=(
+        "Disable per-reset domain randomisation (screwdriver damping/mass, "
+        "finger gains) and per-step observation noise, so the policy's nominal "
+        "behaviour is shown instead of worst-case randomised dynamics."
+    ),
+)
+parser.add_argument(
+    "--fixed_start",
+    action="store_true",
+    help=(
+        "Start the screwdriver at its fixed reset angle instead of a random Z "
+        "orientation, for repeatable side-by-side inspection."
+    ),
+)
 parser.add_argument(
     "--output",
     type=str,
@@ -92,13 +133,67 @@ from rl_games.common import env_configurations, vecenv
 from rl_games.torch_runner import Runner
 
 
+def _apply_eval_phase(env, phase_spec: str) -> None:
+    """Pin the curriculum phase for evaluation.
+
+    ``play.py`` starts a fresh process, so the env's ``_global_steps`` counter
+    — which drives curriculum selection — restarts at 0.  Left alone, the env
+    runs under Phase-0 reward weights and the lenient Phase-0 termination
+    threshold, not the regime the checkpoint was trained in.  Pinning the phase
+    makes the printed reward breakdown and the termination/episode thresholds
+    match the trained phase.  It does NOT change the policy network.
+    """
+    cfg = getattr(env, "cfg", None)
+    phases = getattr(cfg, "curriculum_phases", None)
+    if not phases:
+        return
+    spec = phase_spec.strip().lower()
+    if spec == "none":
+        return
+    if spec == "final":
+        idx = len(phases) - 1
+    else:
+        try:
+            idx = int(spec)
+        except ValueError:
+            print(f"[play] Unrecognised --eval_phase '{phase_spec}'; leaving env default.", flush=True)
+            return
+        if not -len(phases) <= idx < len(phases):
+            print(f"[play] --eval_phase index {idx} out of range; leaving env default.", flush=True)
+            return
+
+    target = phases[idx]
+    # Pre-set both the active phase and the step counter so the env's own
+    # ``_update_curriculum`` keeps this phase (and skips the transition banner).
+    env._curriculum_phase = target
+    env._global_steps = int(target.step_start)
+    cfg.episode_length_s = target.episode_length_s
+    print(
+        f"[play] Curriculum phase pinned to @{target.step_start:,} "
+        f"(turn_weight={target.reward_turn_weight}, "
+        f"term_threshold={target.upright_termination_threshold} rad, "
+        f"episode={target.episode_length_s}s)",
+        flush=True,
+    )
+
+
 def main() -> None:
     env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
+
+    # ---- Evaluation-time config overrides (see CLI flags) ----
+    if args.no_domain_rand and hasattr(env_cfg, "domain_rand"):
+        env_cfg.domain_rand.enabled = False
+        print("[play] Domain randomisation + observation noise: DISABLED", flush=True)
+    if args.fixed_start and hasattr(env_cfg, "randomize_obj_start"):
+        env_cfg.randomize_obj_start = False
+        print("[play] Screwdriver start angle: FIXED (no randomisation)", flush=True)
+
     log_dir = args.output or os.path.join("runs", args.task)
 
     render_mode = "rgb_array" if args.video else "human"
     env = gym.make(args.task, cfg=env_cfg, render_mode=render_mode)
+    _apply_eval_phase(env.unwrapped, args.eval_phase)
 
     if args.video:
         from gymnasium.wrappers import RecordVideo
@@ -111,10 +206,12 @@ def main() -> None:
             disable_logger=True,
         )
 
-    agent_cfg_path = os.path.join(
-        os.path.dirname(__file__),
-        "screwdriver_rl", "tasks", "allegro", "agents", "rl_games_ppo_cfg.yaml",
-    )
+    import importlib
+
+    _entry = gym.spec(args.task).kwargs["rl_games_cfg_entry_point"]
+    _module_name, _, _file_name = _entry.partition(":")
+    _agent_module = importlib.import_module(_module_name)
+    agent_cfg_path = os.path.join(os.path.dirname(_agent_module.__file__), _file_name)
     with open(agent_cfg_path) as f:
         agent_cfg = yaml.safe_load(f)
 

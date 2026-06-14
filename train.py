@@ -65,6 +65,19 @@ parser.add_argument(
 )
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument(
+    "--init_global_steps",
+    type=int,
+    default=0,
+    help=(
+        "[Stage 1] Seed the curriculum step counter so a resumed run starts in a "
+        "later phase instead of Phase 0.  The counter is process state, not saved "
+        "in the checkpoint, so a plain --checkpoint resume restarts the curriculum "
+        "at Phase 0.  To fine-tune a final-phase policy (e.g. for the anti-wobble "
+        "tweak), pass a value >= the last phase's step_start so it stays in the "
+        "final phase.  0 (default) = start from Phase 0."
+    ),
+)
+parser.add_argument(
     "--output",
     type=str,
     default=None,
@@ -125,11 +138,19 @@ from rl_games.common import env_configurations, vecenv
 from rl_games.torch_runner import Runner
 
 
+def _resolve_agent_cfg_path(task: str) -> str:
+    """Resolve the rl_games YAML for ``task`` from its gym registration, so each
+    hand uses its own ``agents/`` config instead of a hardcoded path."""
+    import importlib
+
+    entry = gym.spec(task).kwargs["rl_games_cfg_entry_point"]
+    module_name, _, file_name = entry.partition(":")
+    module = importlib.import_module(module_name)
+    return os.path.join(os.path.dirname(module.__file__), file_name)
+
+
 def _load_agent_cfg(num_envs: int, rl_device: str, seed: int, train_dir: str) -> dict:
-    cfg_path = os.path.join(
-        os.path.dirname(__file__),
-        "screwdriver_rl", "tasks", "allegro", "agents", "rl_games_ppo_cfg.yaml",
-    )
+    cfg_path = _resolve_agent_cfg_path(args.task)
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
     cfg["params"]["config"]["num_actors"] = num_envs
@@ -217,6 +238,17 @@ def run_stage1(env_cfg, log_dir: str) -> None:
     env_cfg.state_space = env_cfg.privileged_obs_dim  # 17
 
     env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.video else None)
+    if args.init_global_steps > 0:
+        # Seed the curriculum step counter (process state, not in the checkpoint)
+        # so a resumed run continues in a later phase instead of restarting at
+        # Phase 0.  ``_update_curriculum`` selects the matching phase on the first
+        # step and prints the transition banner.
+        env.unwrapped._global_steps = int(args.init_global_steps)
+        print(
+            f"[Stage 1] Curriculum step counter seeded to {args.init_global_steps:,} "
+            f"— resumes in a later phase, not Phase 0.",
+            flush=True,
+        )
     if args.video:
         from gymnasium.wrappers import RecordVideo
         env = RecordVideo(
