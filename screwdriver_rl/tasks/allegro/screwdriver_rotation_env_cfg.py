@@ -49,6 +49,60 @@ class AllegroScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     fingers: tuple[str, ...] = ("index", "middle", "thumb")
     """3-finger configuration: 1–2 fingers stabilise, 1–2 push/reposition."""
 
+    # ---- Curriculum (Allegro-tuned; see CurriculumPhaseCfg for field docs) ----
+    # The Allegro hand drives the task with 3 active fingers (index/middle/thumb),
+    # so a 2-of-N contact gate is appropriate.  These were the original base
+    # values; they now live here so each hand owns its curriculum independently.
+    curriculum_phases: list[CurriculumPhaseCfg] = field(
+        default_factory=lambda: [
+            CurriculumPhaseCfg(
+                # --- P0: learn PAD contact from the start ---
+                # The ungated ``near_reward`` (0.8) provides the "approach the
+                # handle" gradient, so we start with the contact gate ON (generous
+                # 0.10 m), a lenient SOFT pad factor, and a free-spinning handle.
+                step_start=0,
+                reward_turn_weight=120.0,
+                turn_reward_contact_distance=0.10,
+                turn_reward_min_contact_fingers=2,
+                turn_reward_min_fingertip_speed=0.0,
+                pad_facing_cos_threshold=0.0,
+                screwdriver_load_scale=0.0,
+                reward_proximal_penalty_weight=0.0,
+                near_reward_weight=0.8,
+                episode_length_s=30.0,
+                upright_termination_threshold=2.0,
+            ),
+            CurriculumPhaseCfg(
+                # --- P1: introduce the screw load and tighten the pad ---
+                step_start=40_000_000,
+                reward_turn_weight=180.0,
+                turn_reward_contact_distance=0.07,
+                turn_reward_min_contact_fingers=2,
+                turn_reward_min_fingertip_speed=0.003,
+                pad_facing_cos_threshold=0.3,
+                screwdriver_load_scale=0.5,
+                reward_proximal_penalty_weight=3.0,
+                near_reward_weight=0.3,
+                episode_length_s=50.0,
+                upright_termination_threshold=1.3,
+            ),
+            CurriculumPhaseCfg(
+                # --- P2: final — strict pad + full load ---
+                step_start=90_000_000,
+                reward_turn_weight=200.0,
+                turn_reward_contact_distance=0.05,
+                turn_reward_min_contact_fingers=2,
+                turn_reward_min_fingertip_speed=0.003,
+                pad_facing_cos_threshold=0.5,
+                screwdriver_load_scale=1.0,
+                reward_proximal_penalty_weight=5.0,
+                near_reward_weight=0.15,
+                episode_length_s=60.0,
+                upright_termination_threshold=1.0,
+            ),
+        ]
+    )
+
     # ---- RMA dims (hand-specific) ----
     privileged_obs_dim: int = 17
     """3 euler + 3 angvel + 3 rel-pos + 4 quat + 1 friction + 3 fingertip-dist."""

@@ -399,8 +399,14 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     Hand-specific."""
 
     # ------------------------------------------------------------------
-    # Curriculum phases (shared across hands; tune distances per hand)
+    # Curriculum phases (GENERIC FALLBACK — each hand owns its own)
     # ------------------------------------------------------------------
+    # This default exists so the base config is usable on its own, but every
+    # hand subclass OVERRIDES ``curriculum_phases`` with values tuned to its own
+    # finger count and geometry (e.g. ``turn_reward_min_contact_fingers`` and the
+    # per-phase contact distances differ between the 3-active-finger Allegro and
+    # the 5-finger LinkerL20).  Edit a hand's curriculum in its own cfg module,
+    # not here.
     curriculum_phases: list[CurriculumPhaseCfg] = field(
         default_factory=lambda: [
             CurriculumPhaseCfg(

@@ -9,14 +9,14 @@ RMA dims, fingertip pad axis, and the Linker articulation.
 Bring-up TODO (see the project plan):
   * ``fingertip_pad_axis_local`` is a PLACEHOLDER — recover the true value with
     ``calibrate_pad.py --task Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0``.
-  * The hand pose (``init_state.pos/rot``) and ``pregrasp_positions`` are seeded
-    from the MFR reference and must be tuned in play.py (zero action) so the five
-    fingertip pads contact the handle with the screwdriver upright.
-  * ``turn_direction`` is inherited as -1.0; confirm the sign for this LEFT hand
-    (a natural grip may drive +z) and override here if the reverse/oscillation
-    metrics show the grasp turns the other way.
-  * The per-phase contact distances are inherited from the Allegro curriculum and
-    may need re-deriving for the Linker tip geometry.
+  * The hand pose (``init_state.pos/rot``) and ``pregrasp_positions`` should be
+    confirmed in play.py (zero action) so the five fingertip pads contact the
+    handle with the screwdriver upright; re-render with ``render_posture.py``
+    after any change.
+
+This hand owns its own ``curriculum_phases`` (LinkerL20-tuned for the 5-finger,
+non-uniform geometry — see the curriculum section below) and overrides
+``turn_direction`` to +1.0 for the LEFT hand.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from isaaclab.utils import configclass
 
 from screwdriver_rl.tasks.base.screwdriver_rotation_env_cfg import (
     ASSET_ROOT,
+    CurriculumPhaseCfg,
     ScrewdriverRotationEnvCfg,
 )
 
@@ -60,6 +61,66 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     # The Linker is a LEFT hand (mirror of the right-handed Allegro), so the
     # natural grip drives the screwdriver the opposite way: +1 (vs Allegro -1).
     turn_direction: float = 1.0
+
+    # ---- Curriculum (LinkerL20-tuned; see CurriculumPhaseCfg for field docs) ----
+    # Differs from the Allegro curriculum on three geometry-driven knobs (all
+    # other per-phase values match Allegro; step boundaries unchanged):
+    #   * turn_reward_min_contact_fingers 3/3/4 (vs Allegro 2/2/2): this is a
+    #     5-finger, human-like (non-uniform) hand, so 2 contacts is too lenient —
+    #     "3" means thumb + 2 fingers, and the final phase demands 4-of-5.
+    #   * turn_reward_contact_distance 0.12/0.08/0.06 (vs 0.10/0.07/0.05): larger,
+    #     non-uniform hand whose tips sit ~0.06-0.076 m off the handle axis at
+    #     reset, so the contact gate needs more room to open early.
+    #   * reward_proximal_penalty_weight 0/2/4 (vs 0/3/5): a human-like 5-finger
+    #     wrap legitimately engages more of the finger, so a gentler ramp avoids
+    #     fighting the natural grasp while still steering toward fingertip contact.
+    # These are starting points to validate during Stage-1 retraining.
+    curriculum_phases: list[CurriculumPhaseCfg] = field(
+        default_factory=lambda: [
+            CurriculumPhaseCfg(
+                # --- P0: reach & grasp; contact gate ON but generous, no load ---
+                step_start=0,
+                reward_turn_weight=120.0,
+                turn_reward_contact_distance=0.09,
+                turn_reward_min_contact_fingers=3,
+                turn_reward_min_fingertip_speed=0.0,
+                pad_facing_cos_threshold=0.0,
+                screwdriver_load_scale=0.0,
+                reward_proximal_penalty_weight=0.0,
+                near_reward_weight=0.8,
+                episode_length_s=30.0,
+                upright_termination_threshold=2.0,
+            ),
+            CurriculumPhaseCfg(
+                # --- P1: introduce the screw load and tighten the pad ---
+                step_start=40_000_000,
+                reward_turn_weight=180.0,
+                turn_reward_contact_distance=0.07,
+                turn_reward_min_contact_fingers=3,
+                turn_reward_min_fingertip_speed=0.003,
+                pad_facing_cos_threshold=0.3,
+                screwdriver_load_scale=0.5,
+                reward_proximal_penalty_weight=2.0,
+                near_reward_weight=0.3,
+                episode_length_s=50.0,
+                upright_termination_threshold=1.3,
+            ),
+            CurriculumPhaseCfg(
+                # --- P2: final — strict pad + full load; demand 4-of-5 fingers ---
+                step_start=90_000_000,
+                reward_turn_weight=200.0,
+                turn_reward_contact_distance=0.05,
+                turn_reward_min_contact_fingers=4,
+                turn_reward_min_fingertip_speed=0.003,
+                pad_facing_cos_threshold=0.5,
+                screwdriver_load_scale=1.0,
+                reward_proximal_penalty_weight=4.0,
+                near_reward_weight=0.15,
+                episode_length_s=60.0,
+                upright_termination_threshold=1.0,
+            ),
+        ]
+    )
 
     # ---- RMA dims (hand-specific) ----
     privileged_obs_dim: int = 19
@@ -108,26 +169,29 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            # Hand x kept at the reference 0.13: at this distance the screwdriver
-            # stays upright (the four fingers sit ~0.06-0.07 m off the handle
-            # axis, close enough for the phase-0 near-reward to pull them in,
-            # without pushing the unopposed handle over).  See the measured
-            # geometry notes in the project memory; finer opposition tuning of
-            # the hand ORIENTATION is best done visually in play.py.
-            pos=(0.13, -0.045, 1.36),
+            # Hand x kept at the reference 0.13.  Measured pregrasp geometry (see
+            # render_posture.py): the four non-thumb fingertips sit at x~=-0.08 and
+            # the thumb at x~=+0.11, straddling the handle axis at x~=0 — an
+            # intentionally OPEN grip the policy closes during phase 0.  Note x is
+            # the thumb-vs-four-fingers opposition axis: translating the hand along
+            # x just unbalances it (the screwdriver, on its free universal joint,
+            # topples toward whichever side dominates), so DON'T retune reach via
+            # this position.  Closing the grip so the four fingers reach with less
+            # curl is a coupled finger+thumb re-tune best done visually in play.py.
+            pos=(0.13, -0.03, 1.36),
             rot=(0.5, -0.5, -0.5, 0.5),
             joint_pos={
                 # index / middle / ring / pinky: roll, pitch, pip, dip(=0.8917*pip)
-                "index_mcp_roll": 0.0, "index_mcp_pitch": 0.55, "index_pip": 0.9, "index_dip": 0.8025,
-                "middle_mcp_roll": 0.0, "middle_mcp_pitch": 0.55, "middle_pip": 0.9, "middle_dip": 0.8025,
-                "ring_mcp_roll": 0.0, "ring_mcp_pitch": 0.55, "ring_pip": 0.9, "ring_dip": 0.8025,
-                "pinky_mcp_roll": 0.0, "pinky_mcp_pitch": 0.55, "pinky_pip": 0.9, "pinky_dip": 0.8025,
+                "index_mcp_roll": 0.0, "index_mcp_pitch": 0.8, "index_pip": 0.9, "index_dip": 0.8025,
+                "middle_mcp_roll": 0.0, "middle_mcp_pitch": 0.8, "middle_pip": 0.9, "middle_dip": 0.8025,
+                "ring_mcp_roll": 0.0, "ring_mcp_pitch": 0.85, "ring_pip": 0.9, "ring_dip": 0.8025,
+                "pinky_mcp_roll": 0.0, "pinky_mcp_pitch": 0.85, "pinky_pip": 0.9, "pinky_dip": 0.8025,
                 # thumb: cmc_yaw, cmc_roll, cmc_pitch, mcp, ip(=1.1619*mcp).
                 # cmc_pitch and mcp backed off (0.62->0.50, 0.65->0.50) so the
                 # thumb is NOT jammed into the cap: this frees those joints (they
                 # had near-zero authority while pressed against the cap) and
                 # opens up room toward their upper limits (0.79 / 1.05).
-                "thumb_cmc_yaw": 0.24, "thumb_cmc_roll": 0.6, "thumb_cmc_pitch": 0.5,
+                "thumb_cmc_yaw": 0.24, "thumb_cmc_roll": 0.75, "thumb_cmc_pitch": 0.6,
                 "thumb_mcp": 0.5, "thumb_ip": 0.581,
             },
         ),
@@ -143,6 +207,8 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
 
     # ---- Pregrasp joint positions (INDEPENDENT joints only, semantic order) ----
     # Followers (*_dip, thumb_ip) are set at reset from these via COUPLED_JOINTS.
+    # Must stay in sync with init_state.joint_pos above: the (roll, pitch, pip)
+    # pip here drives the *_dip follower at reset via COUPLED_JOINTS.
     pregrasp_positions: dict[str, tuple[float, ...]] = field(
         default_factory=lambda: {
             "index":  (0.0, 0.55, 0.9),
