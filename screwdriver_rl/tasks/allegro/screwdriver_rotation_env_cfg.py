@@ -137,7 +137,10 @@ class AllegroScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, -0.095, 1.33),
+            # x compensated 0.0 -> -0.009 to track the shared screwdriver mount's
+            # -0.009 m x shift (see base screwdriver_cfg), keeping Allegro's
+            # hand-to-handle geometry identical.
+            pos=(-0.009, -0.095, 1.33),
             rot=(0.664463, 0.2418448, 0.2418448, 0.664463),
             joint_pos={
                 "allegro_hand_hitosashi_finger_finger_joint_0": 0.1,

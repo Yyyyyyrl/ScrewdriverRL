@@ -490,7 +490,16 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 1.205),
+            # Mount shifted -0.009 m in x (was 0.0) to reduce the LinkerL20
+            # screwdriver's settled lean from ~10deg to ~6deg WHILE KEEPING the
+            # lean toward the four fingers (-x).  Past ~-0.011 the lean flips to
+            # the thumb/palm side (+x), which is not wanted, so -0.009 sits just
+            # short of that crossover.  This base is SHARED, so each hand's
+            # init_state.pos is compensated by the SAME -0.009 m x shift to
+            # preserve its grasp geometry (Allegro: 0.0 -> -0.009; LinkerL20 hand x
+            # left at 0.13 so it gains the relative shift).  Re-derive with
+            # render_posture.py if the screwdriver asset or any hand pregrasp changes.
+            pos=(-0.009, 0.0, 1.205),
             rot=(1.0, 0.0, 0.0, 0.0),
             joint_pos={".*": 0.0},
         ),
