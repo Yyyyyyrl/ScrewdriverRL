@@ -182,10 +182,10 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             rot=(0.5, -0.5, -0.5, 0.5),
             joint_pos={
                 # index / middle / ring / pinky: roll, pitch, pip, dip(=0.8917*pip)
-                "index_mcp_roll": 0.0, "index_mcp_pitch": 0.8, "index_pip": 0.9, "index_dip": 0.8025,
+                "index_mcp_roll": 0.0, "index_mcp_pitch": 0.85, "index_pip": 0.9, "index_dip": 0.8025,
                 "middle_mcp_roll": 0.0, "middle_mcp_pitch": 0.8, "middle_pip": 0.9, "middle_dip": 0.8025,
-                "ring_mcp_roll": 0.0, "ring_mcp_pitch": 0.85, "ring_pip": 0.9, "ring_dip": 0.8025,
-                "pinky_mcp_roll": 0.0, "pinky_mcp_pitch": 0.85, "pinky_pip": 0.9, "pinky_dip": 0.8025,
+                "ring_mcp_roll": 0.0, "ring_mcp_pitch": 0.8, "ring_pip": 0.9, "ring_dip": 0.8025,
+                "pinky_mcp_roll": 0.0, "pinky_mcp_pitch": 0.8, "pinky_pip": 0.9, "pinky_dip": 0.8025,
                 # thumb: cmc_yaw, cmc_roll, cmc_pitch, mcp, ip(=1.1619*mcp).
                 # cmc_pitch and mcp backed off (0.62->0.50, 0.65->0.50) so the
                 # thumb is NOT jammed into the cap: this frees those joints (they
@@ -211,10 +211,10 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     # pip here drives the *_dip follower at reset via COUPLED_JOINTS.
     pregrasp_positions: dict[str, tuple[float, ...]] = field(
         default_factory=lambda: {
-            "index":  (0.0, 0.55, 0.9),
-            "middle": (0.0, 0.55, 0.9),
-            "ring":   (0.0, 0.55, 0.9),
-            "pinky":  (0.0, 0.55, 0.9),
-            "thumb":  (0.24, 0.6, 0.5, 0.5),
+            "index":  (0.0, 0.8, 0.9),
+            "middle": (0.0, 0.8, 0.9),
+            "ring":   (0.0, 0.85, 0.9),
+            "pinky":  (0.0, 0.85, 0.9),
+            "thumb":  (0.24, 0.75, 0.6, 0.5),
         }
     )
