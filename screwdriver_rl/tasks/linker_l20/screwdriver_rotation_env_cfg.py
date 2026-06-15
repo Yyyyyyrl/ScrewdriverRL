@@ -211,10 +211,10 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     # pip here drives the *_dip follower at reset via COUPLED_JOINTS.
     pregrasp_positions: dict[str, tuple[float, ...]] = field(
         default_factory=lambda: {
-            "index":  (0.0, 0.8, 0.9),
+            "index":  (0.0, 0.85, 0.9),
             "middle": (0.0, 0.8, 0.9),
-            "ring":   (0.0, 0.85, 0.9),
-            "pinky":  (0.0, 0.85, 0.9),
+            "ring":   (0.0, 0.8, 0.9),
+            "pinky":  (0.0, 0.8, 0.9),
             "thumb":  (0.24, 0.75, 0.6, 0.5),
         }
     )
