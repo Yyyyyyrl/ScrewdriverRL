@@ -227,8 +227,11 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         )
 
         # ---- Logging helper ----
+        # ``_current_epoch`` is written each epoch by the rl_games
+        # PhaseCheckpointObserver; the env itself has no epoch concept.
+        self._current_epoch: int = 0
         from screwdriver_rl.utils.logging import RotationTrainingLogger
-        self._logger = RotationTrainingLogger(log_interval_steps=500)
+        self._logger = RotationTrainingLogger(log_interval_steps=2000)
 
     # -----------------------------------------------------------------------
     # Scene
@@ -533,12 +536,21 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             # Contact
             "eval_mean_tip_dist":  tip_dist.mean(dim=-1).detach() if tip_dist.numel() > 0 else torch.zeros(self.num_envs, device=self.device),
             "eval_min_tip_dist":   tip_dist.min(dim=-1).values.detach() if tip_dist.numel() > 0 else torch.zeros(self.num_envs, device=self.device),
-            # Curriculum
-            "eval_curriculum_phase": torch.full((self.num_envs,), float(self._curriculum_phase.step_start), device=self.device),
+            # Curriculum — emit a human 1-indexed phase number and the total
+            # phase count so the logger can show "Phase n/total".
+            "eval_curriculum_phase": torch.full(
+                (self.num_envs,),
+                float(self.cfg.curriculum_phases.index(self._curriculum_phase) + 1),
+                device=self.device,
+            ),
+            "eval_num_phases": torch.full(
+                (self.num_envs,), float(len(self.cfg.curriculum_phases)), device=self.device
+            ),
         })
 
-        # Periodic terminal log
-        self._logger.log(self._global_steps, self.extras)
+        # Periodic terminal log.  ``_current_epoch`` is synced by the rl_games
+        # PhaseCheckpointObserver (the true epoch lives at the Runner level).
+        self._logger.log(self._global_steps, self.extras, epoch=self._current_epoch)
 
         return torch.nan_to_num(reward, nan=-1.0e6)
 

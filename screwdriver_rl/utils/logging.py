@@ -58,7 +58,7 @@ class RotationTrainingLogger:
         Actual interval may differ slightly due to batched step counting.
     """
 
-    def __init__(self, log_interval_steps: int = 500) -> None:
+    def __init__(self, log_interval_steps: int = 2000) -> None:
         self._interval = log_interval_steps
         self._last_log_step: int = 0
         self._start_time: float = time.monotonic()
@@ -69,7 +69,7 @@ class RotationTrainingLogger:
 
     # ------------------------------------------------------------------
 
-    def log(self, global_steps: int, extras: dict[str, Any]) -> None:
+    def log(self, global_steps: int, extras: dict[str, Any], epoch: int = 0) -> None:
         if global_steps - self._last_log_step < self._interval:
             return
         delta_steps = global_steps - self._last_log_step
@@ -100,6 +100,7 @@ class RotationTrainingLogger:
         rev_vel    = m("eval_rev_vel")
         tip_dist   = m("eval_min_tip_dist")
         phase      = m("eval_curriculum_phase")
+        num_phases = m("eval_num_phases")
 
         turn_rew   = m("eval_turn_reward")
         rev_cost   = m("eval_reverse_cost")
@@ -115,15 +116,23 @@ class RotationTrainingLogger:
         cont_warn = " ⚠ NO-CONTACT"    if b_gate < 0.15     else ""
         rev_warn  = " ⚠ BACKWARD"      if rev_vel > turn_vel else ""
 
-        phase_str = f"Ph@{int(phase):,}" if not isinstance(phase, float) or not phase != phase else "Ph?"
+        # ``phase``/``num_phases`` arrive as floats (env emits a 1-indexed phase
+        # number and the phase count).  NaN means the key was missing.
+        if phase == phase and num_phases == num_phases:  # not NaN
+            phase_str = f"Phase {int(phase)}/{int(num_phases)}"
+        elif phase == phase:
+            phase_str = f"Phase {int(phase)}"
+        else:
+            phase_str = "Phase ?"
 
         lines = [
             f"{_W}{'─'*72}{_N}",
             (
-                f"  {_B}Step{_N} {global_steps:>12,}  "
+                f"  {_B}Epoch{_N} {epoch:>8,}  "
+                f"{_B}Step{_N} {global_steps:>12,}  "
                 f"{_B}Elapsed{_N} {int(elapsed//3600):02d}h{int((elapsed%3600)//60):02d}m  "
-                f"{_B}SPS{_N} {sps:>8,.0f}  "
-                f"{_B}Curriculum{_N} {phase_str}"
+                f"{_B}SPS{_N} {sps:>7,.0f}  "
+                f"{_B}Curriculum{_N} {_W}{phase_str}{_N}"
             ),
             f"  {_W}Progress{_N}",
             (
@@ -158,8 +167,12 @@ class RotationTrainingLogger:
                 f"NearRew {near_rew:>9.3f}  ProxCost {prox_cost:>8.3f}"
             ),
             (
-                f"    UprightCost {up_cost:>8.3f}  ActionCost {act_cost:>7.3f}  "
-                f"TotalRew {total_rew:>9.3f}"
+                f"    UprightCost {up_cost:>8.3f}  ActionCost {act_cost:>7.3f}"
+            ),
+            f"{_W}{'─'*72}{_N}",
+            (
+                f"  {_W}TOTAL REWARD{_N} {_colour(total_rew, 0.0, 1.0):>12}"
+                f"   {_B}(mean per-step, Phase {int(phase) if phase == phase else '?'}){_N}"
             ),
         ]
         print("\n".join(lines), flush=True)

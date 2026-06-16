@@ -275,10 +275,16 @@ def run_stage1(env_cfg, log_dir: str) -> None:
         flush=True,
     )
 
-    runner = Runner(RlGamesAlgoObserver())
+    from screwdriver_rl.utils.rl_games_observer import PhaseCheckpointObserver
+    observer = PhaseCheckpointObserver(env.unwrapped)
+    runner = Runner(observer)
     runner.load(agent_cfg)
     runner.reset()
     runner.run({"train": True, "play": False, "sigma": None})
+
+    # Save the final-phase checkpoint: the last curriculum phase has no
+    # transition to trigger on, so capture it now that training has ended.
+    observer.save_final_phase()
 
     # Close the env before the app shuts down.  Skipping this leaves the
     # timeline "playing", and Isaac Sim's stop handler then renders a frame
