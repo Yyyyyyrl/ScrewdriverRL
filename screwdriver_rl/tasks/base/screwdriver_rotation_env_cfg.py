@@ -306,11 +306,13 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------
     # Screwdriver rotational load (models the resistance of driving a screw)
     # ------------------------------------------------------------------
-    screwdriver_load_torque: float = 0.02
+    screwdriver_load_torque: float = 0.045
     """Constant (Coulomb) resistive torque on the screwdriver rotation joint
-    (N·m), opposing the direction of motion.  Without it the handle spins
-    almost freely and the policy learns feeble low-torque nudging that does not
-    transfer to hardware.  Set 0.0 to recover a free-spinning handle."""
+    (N·m), opposing the direction of motion.  This is the breakaway "stiction" a
+    real screw presents: below it the handle does not rotate at all, so a
+    sub-threshold finger nudge cannot make it creep forward and farm turn reward.
+    Raised from 0.02 (where feeble low-torque nudging still spun a near-free
+    handle) to 0.045.  Set 0.0 to recover a free-spinning handle."""
 
     screwdriver_load_viscous: float = 0.0
     """Extra speed-proportional resistance (N·m·s/rad) on top of the actuator's
@@ -368,6 +370,24 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     use_axis_contact_proxy: bool = True
     """Compute fingertip distances to the handle *axis segment* (handle
     origin → cap origin) instead of the handle body origin."""
+
+    # ------------------------------------------------------------------
+    # Fingertip contact-force gate (true touch)
+    # ------------------------------------------------------------------
+    use_contact_force_gate: bool = True
+    """AND the kinematic distance gate with a net-contact-force gate, so a
+    fingertip counts as "in contact" only when it is BOTH near the handle axis
+    AND registering real contact force.  This closes the "hover near the axis
+    without touching" exploit that lets the policy farm turn reward while the
+    handle creeps.  The env builds a :class:`~isaaclab.sensors.ContactSensor`
+    over the hand's fingertip bodies; this requires ``activate_contact_sensors``
+    on the hand spawn (set in the hand cfg).  Set False to fall back to the
+    distance-only gate and skip building the sensor (graceful degradation)."""
+
+    fingertip_contact_force_threshold: float = 0.05
+    """Net contact-force norm (N) above which a fingertip counts as touching.
+    Small but non-zero so light pad contact registers while sensor noise / no
+    contact does not.  Tune from ``eval_contact_force`` during bring-up."""
 
     # Action / finger regularisation (phase-independent)
     reward_action_weight: float = 0.25
@@ -514,16 +534,20 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
             "rotation": ImplicitActuatorCfg(
                 joint_names_expr=["table_screwdriver_joint_3"],
                 stiffness=0.0,
-                # Damping 0.15: with the screwdriver body inertia this gives a
-                # time constant far shorter than one physics step, so the handle
-                # stops the moment the finger leaves — a single tap cannot earn
-                # sustained turn reward.
-                damping=0.15,
+                # Damping 0.5: with the handle z-inertia (izz~6e-5) the velocity
+                # time constant tau = I/c ~ 1.2e-4 s is far shorter than one
+                # physics step (1/60 s), so the handle stops the instant the
+                # finger leaves — it cannot coast forward for reward.  Raised from
+                # 0.15 (which still let a steady sub-threshold push spin it up).
+                damping=0.5,
             ),
             "cap": ImplicitActuatorCfg(
                 joint_names_expr=["screwdriver_body_cap_joint"],
                 stiffness=0.0,
-                damping=0.0,
+                # Light damping (was 0.0): couples the free-spinning cap to the
+                # body so it cannot keep rotating on its own bearing and look like
+                # the screwdriver is "spinning by itself".
+                damping=0.05,
             ),
         },
     )

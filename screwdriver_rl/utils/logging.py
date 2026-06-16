@@ -95,6 +95,7 @@ class RotationTrainingLogger:
         mot_gate   = m("eval_motion_gate")
         pad_fac    = m("eval_pad_gate")
         pad_cos    = m("eval_pad_cos")
+        cforce     = m("eval_contact_force")
         turn_vel   = m("eval_fwd_vel")
         rev_vel    = m("eval_rev_vel")
         tip_dist   = m("eval_min_tip_dist")
@@ -143,7 +144,8 @@ class RotationTrainingLogger:
             ),
             (
                 f"    PadFactor {_colour(pad_fac, 0.2, 0.7):>14}  "
-                f"PadCos {_colour(pad_cos, 0.0, 0.5):>16}"
+                f"PadCos {_colour(pad_cos, 0.0, 0.5):>16}  "
+                f"ContactForce {cforce:>7.3f}N"
             ),
             (
                 f"    MinTipDist {_colour(tip_dist, 0.08, 0.035, invert=True):>13}  "

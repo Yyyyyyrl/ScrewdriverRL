@@ -37,6 +37,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_rotate
 
@@ -135,6 +136,18 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         self._handle_cap_idx: int = 2    # screwdriver_cap
         self._shaft_idx: int = 0         # screwdriver_stick (shaft axis ref)
 
+        # Map the contact-sensor body order to the active-finger order so the
+        # net-force columns align with the fingertip distances (self.fingers).
+        self._contact_body_order: torch.Tensor | None = None
+        if self._fingertip_contact_sensor is not None:
+            distal_names = [self.FINGERTIP_BODY_NAMES[f] for f in self.fingers]
+            order_ids, _ = self._fingertip_contact_sensor.find_bodies(
+                [f"^{re.escape(n)}$" for n in distal_names], preserve_order=True
+            )
+            self._contact_body_order = torch.tensor(
+                order_ids, dtype=torch.long, device=self.device
+            )
+
         # Fingertip pad-normal (outward, toward a grasped object) in the
         # fingertip link local frame, used by the pad-facing contact gate.
         self._pad_axis_local = torch.tensor(
@@ -224,6 +237,24 @@ class ScrewdriverRotationEnv(DirectRLEnv):
     def _setup_scene(self) -> None:
         self.allegro = Articulation(self.cfg.robot_cfg)
         self.screwdriver = Articulation(self.cfg.screwdriver_cfg)
+
+        # Fingertip contact-force sensor (true-touch gate).  Built from the
+        # hand's fingertip body names so it stays hand-agnostic.  ``self.fingers``
+        # is not set yet (this runs inside super().__init__), so read the cfg
+        # directly.  Requires ``activate_contact_sensors`` on the hand spawn.
+        self._fingertip_contact_sensor: ContactSensor | None = None
+        if self.cfg.use_contact_force_gate:
+            distal_names = [self.FINGERTIP_BODY_NAMES[f] for f in self.cfg.fingers]
+            body_regex = "(" + "|".join(distal_names) + ")"
+            sensor_cfg = ContactSensorCfg(
+                prim_path=f"{self.cfg.robot_cfg.prim_path}/{body_regex}",
+                history_length=0,
+                update_period=0.0,
+                track_air_time=False,
+            )
+            self._fingertip_contact_sensor = ContactSensor(sensor_cfg)
+            self.scene.sensors["fingertip_contact"] = self._fingertip_contact_sensor
+
         spawn_ground_plane(
             prim_path="/World/ground",
             cfg=GroundPlaneCfg(
@@ -705,11 +736,15 @@ class ScrewdriverRotationEnv(DirectRLEnv):
     # -----------------------------------------------------------------------
 
     def _compute_contact_gate(self, phase: CurriculumPhaseCfg) -> torch.Tensor:
-        """Binary × continuous gate: contact proximity × fingertip speed.
+        """Binary × continuous gate: true contact × tangential rolling speed.
 
-        Gate = 0 when fewer than ``min_contact_fingers`` are inside
-        ``turn_reward_contact_distance``, or all in-contact fingertip speeds
-        are below ``turn_reward_min_fingertip_speed``.
+        A fingertip counts as in contact only when it is inside
+        ``turn_reward_contact_distance`` AND (if the contact-force gate is on)
+        registering net contact force ≥ ``fingertip_contact_force_threshold``.
+        Gate = 0 when fewer than ``min_contact_fingers`` are in contact, when the
+        in-contact tangential speeds are below ``turn_reward_min_fingertip_speed``
+        (only motion that circles the handle counts), or when the pads do not face
+        the handle.
 
         Both the turn reward and the reverse penalty are multiplied by this
         gate (see cfg for the asymmetric-penalty failure mode it prevents).
@@ -722,15 +757,33 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         if tip_dist.shape[1] == 0:
             return torch.zeros(self.num_envs, device=self.device)
 
-        contact_mask = tip_dist <= threshold  # (N, n_fingers) bool — distance only
+        contact_mask = tip_dist <= threshold  # (N, n_fingers) bool — distance
+
+        # True-touch gate: AND the distance proxy with measured net contact
+        # force.  The distance test localises the force to the handle (it is the
+        # only thing near the tip), so a fingertip hovering off the surface — even
+        # if inside the distance threshold — is rejected for lack of force.
+        force = self._compute_fingertip_contact_forces()
+        if force is not None:
+            contact_mask = contact_mask & (
+                force >= float(self.cfg.fingertip_contact_force_threshold)
+            )
+            self.extras["eval_contact_force"] = force.mean(dim=-1).detach()
+            self.extras["eval_contact_force_max"] = force.max(dim=-1).values.detach()
 
         contact_count = contact_mask.sum(dim=-1)
         min_c = max(1, phase.turn_reward_min_contact_fingers)
         binary_gate = (contact_count >= min_c).float()
 
-        # Motion gate: average speed of the near (distance) fingertips.
+        # Motion gate: average *tangential* speed of the near (distance)
+        # fingertips.  Only motion that circles the handle axis (genuine
+        # rolling) counts — a static tremor or radial press has ~zero
+        # tangential component and cannot satisfy the gate.
+        tip_pos = self.allegro.data.body_state_w[:, self._fingertip_body_ids, :3]
         fingertip_vel = self.allegro.data.body_state_w[:, self._fingertip_body_ids, 7:10]
-        tip_speed = torch.linalg.norm(fingertip_vel, dim=-1)  # (N, n_fingers)
+        base = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_base_idx], :3]
+        top = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_cap_idx], :3]
+        tip_speed = rewards.tangential_speed(tip_pos, fingertip_vel, base, top)  # (N, n_fingers)
         w = contact_mask.float()
         denom = w.sum(dim=-1).clamp(min=1.0)
         avg_contact_speed = (tip_speed * w).sum(dim=-1) / denom
@@ -765,6 +818,19 @@ class ScrewdriverRotationEnv(DirectRLEnv):
     # -----------------------------------------------------------------------
     # Distance helpers
     # -----------------------------------------------------------------------
+
+    def _compute_fingertip_contact_forces(self) -> torch.Tensor | None:
+        """Per-fingertip net contact-force magnitude (N), in ``self.fingers``
+        order.  Returns ``None`` when the contact-force gate is disabled or the
+        sensor is unavailable, so callers fall back to the distance-only gate.
+        """
+        if self._fingertip_contact_sensor is None or self._contact_body_order is None:
+            return None
+        net = self._fingertip_contact_sensor.data.net_forces_w  # (N, n_bodies, 3)
+        if net is None:
+            return None
+        net = net.index_select(1, self._contact_body_order)     # -> self.fingers order
+        return torch.linalg.norm(net, dim=-1)                   # (N, n_fingers)
 
     def _compute_fingertip_axis_distances(self) -> torch.Tensor:
         """Per-fingertip distance to the handle axis segment.

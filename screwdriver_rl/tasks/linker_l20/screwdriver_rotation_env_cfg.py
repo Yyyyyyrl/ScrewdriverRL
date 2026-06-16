@@ -7,8 +7,9 @@ overrides the Linker-specific fields: the gym spaces, active fingers, pregrasp,
 RMA dims, fingertip pad axis, and the Linker articulation.
 
 Bring-up TODO (see the project plan):
-  * ``fingertip_pad_axis_local`` is a PLACEHOLDER — recover the true value with
-    ``calibrate_pad.py --task Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0``.
+  * ``fingertip_pad_axis_local`` is calibrated to ``(+1, 0, 0)`` via
+    ``calibrate_pad.py --task Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0``;
+    re-run it if the pregrasp changes.
   * The hand pose (``init_state.pos/rot``) and ``pregrasp_positions`` should be
     confirmed in play.py (zero action) so the five fingertip pads contact the
     handle with the screwdriver upright; re-render with ``render_posture.py``
@@ -63,43 +64,54 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     turn_direction: float = 1.0
 
     # ---- Curriculum (LinkerL20-tuned; see CurriculumPhaseCfg for field docs) ----
-    # Differs from the Allegro curriculum on three geometry-driven knobs (all
-    # other per-phase values match Allegro; step boundaries unchanged):
-    #   * turn_reward_min_contact_fingers 3/3/4 (vs Allegro 2/2/2): this is a
-    #     5-finger, human-like (non-uniform) hand, so 2 contacts is too lenient —
-    #     "3" means thumb + 2 fingers, and the final phase demands 4-of-5.
-    #   * turn_reward_contact_distance 0.12/0.08/0.06 (vs 0.10/0.07/0.05): larger,
-    #     non-uniform hand whose tips sit ~0.06-0.076 m off the handle axis at
-    #     reset, so the contact gate needs more room to open early.
-    #   * reward_proximal_penalty_weight 0/2/4 (vs 0/3/5): a human-like 5-finger
-    #     wrap legitimately engages more of the finger, so a gentler ramp avoids
-    #     fighting the natural grasp while still steering toward fingertip contact.
-    # These are starting points to validate during Stage-1 retraining.
+    # Retuned to stop the "handle spins while fingers barely move" reward-gaming:
+    #   * turn_reward_contact_distance 0.06/0.045/0.032 (was 0.09/0.07/0.05): the
+    #     handle radius is only 0.02 m, so the old thresholds counted a fingertip
+    #     hovering 1-3 cm OFF the surface as "contact".  The new values track
+    #     ~handle-radius + distal half-width (~0.01) + margin so the distance gate
+    #     fires only near genuine touch.  Re-derive from eval_min_tip_dist at true
+    #     contact once the Stage-2 ContactSensor force gate lands.
+    #   * turn_reward_min/full_fingertip_speed 0.005/0.02 (P1/P2): the motion gate
+    #     now measures the fingertip speed *tangential to the handle axis* (genuine
+    #     rolling), so a static tremor no longer opens it; the threshold is raised
+    #     accordingly.  P0 keeps min=0 so the approach is unpenalised.
+    #   * screwdriver_load_scale 0.25/0.6/1.0 (P0 was 0.0): a small screw load from
+    #     the very first phase anchors "you must actually push" instead of letting
+    #     the policy learn feeble nudging against a free-spinning handle.
+    #   * turn_reward_min_contact_fingers 3/3/4: 5-finger non-uniform hand, so 2
+    #     contacts is too lenient ("3" = thumb + 2 fingers; final demands 4-of-5).
+    #   * reward_proximal_penalty_weight 0/2/4: a human-like 5-finger wrap engages
+    #     more of the finger, so a gentler ramp avoids fighting the natural grasp.
+    # pad_facing_cos_threshold (0/0.3/0.5) is unchanged but only becomes meaningful
+    # now that fingertip_pad_axis_local is correct (see below).  Validate during
+    # Stage-1 retraining.
     curriculum_phases: list[CurriculumPhaseCfg] = field(
         default_factory=lambda: [
             CurriculumPhaseCfg(
-                # --- P0: reach & grasp; contact gate ON but generous, no load ---
+                # --- P0: reach & grasp; contact gate ON, small load from step 0 ---
                 step_start=0,
                 reward_turn_weight=120.0,
-                turn_reward_contact_distance=0.09,
+                turn_reward_contact_distance=0.06,
                 turn_reward_min_contact_fingers=3,
                 turn_reward_min_fingertip_speed=0.0,
+                turn_reward_full_fingertip_speed=0.02,
                 pad_facing_cos_threshold=0.0,
-                screwdriver_load_scale=0.0,
+                screwdriver_load_scale=0.25,
                 reward_proximal_penalty_weight=0.0,
                 near_reward_weight=0.8,
                 episode_length_s=30.0,
                 upright_termination_threshold=2.0,
             ),
             CurriculumPhaseCfg(
-                # --- P1: introduce the screw load and tighten the pad ---
+                # --- P1: ramp the screw load and tighten the contact gate ---
                 step_start=40_000_000,
                 reward_turn_weight=180.0,
-                turn_reward_contact_distance=0.07,
+                turn_reward_contact_distance=0.045,
                 turn_reward_min_contact_fingers=3,
-                turn_reward_min_fingertip_speed=0.003,
+                turn_reward_min_fingertip_speed=0.005,
+                turn_reward_full_fingertip_speed=0.02,
                 pad_facing_cos_threshold=0.3,
-                screwdriver_load_scale=0.5,
+                screwdriver_load_scale=0.6,
                 reward_proximal_penalty_weight=2.0,
                 near_reward_weight=0.3,
                 episode_length_s=50.0,
@@ -109,9 +121,10 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
                 # --- P2: final — strict pad + full load; demand 4-of-5 fingers ---
                 step_start=90_000_000,
                 reward_turn_weight=200.0,
-                turn_reward_contact_distance=0.05,
-                turn_reward_min_contact_fingers=4,
-                turn_reward_min_fingertip_speed=0.003,
+                turn_reward_contact_distance=0.032,
+                turn_reward_min_contact_fingers=3,
+                turn_reward_min_fingertip_speed=0.005,
+                turn_reward_full_fingertip_speed=0.02,
                 pad_facing_cos_threshold=0.5,
                 screwdriver_load_scale=1.0,
                 reward_proximal_penalty_weight=4.0,
@@ -128,12 +141,19 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     history_obs_dim: int = 32
     """[finger_q(16), cur_targets(16)] per frame."""
 
-    # ---- Fingertip pad axis (PLACEHOLDER — calibrate before training) ----
-    fingertip_pad_axis_local: tuple[float, float, float] = (0.0, 0.0, 1.0)
-    """Outward pad normal in the ``*_distal`` link local frame.  This is a
-    PLACEHOLDER copied from the Allegro convention; the Linker distal frames are
-    raw phalanx links (not rotated _ee tips), so this WILL differ.  Recover the
-    true axis with calibrate_pad.py and replace this value."""
+    # ---- Fingertip pad axis (calibrated in sim with calibrate_pad.py) ----
+    fingertip_pad_axis_local: tuple[float, float, float] = (1.0, 0.0, 0.0)
+    """Outward pad normal in the ``*_distal`` link local frame.  Calibrated with
+    ``calibrate_pad.py`` at the zero-action pregrasp: ``+x`` is the axis whose
+    pad-facing cosine is positive across all five fingers (index/middle/ring/pinky
+    ~+0.79..+0.94, thumb ~+0.37), i.e. it points from each distal pad toward the
+    handle.  ``-x`` faces away (all negative) and the old ``(0,0,1)`` placeholder
+    pointed out the fingertip *end*, both of which made the pad-facing cosine
+    meaningless.  NOTE: a single axis is shared by all fingers; the thumb_distal
+    frame is rotated relative to the four fingers (it prefers ~``+z``, ~+0.93), so
+    ``+x`` is the best whole-hand compromise and the thumb is mildly undervalued.
+    Re-run calibrate_pad.py if the pregrasp changes; consider a per-finger axis if
+    the thumb pad-facing proves limiting in training."""
 
     # ---- Robot (Linker Hand L20, left) ----
     robot_cfg: ArticulationCfg = ArticulationCfg(
@@ -144,6 +164,9 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             merge_fixed_joints=False,
             replace_cylinders_with_capsules=True,
             make_instanceable=False,
+            # Required for the fingertip ContactSensor force gate (the env builds
+            # a ContactSensor over the *_distal bodies; see use_contact_force_gate).
+            activate_contact_sensors=True,
             # Cheap per-link convex_hull collision (1 shape/link) + importer-level
             # self-collision.  Hull shapes are slightly inflated vs the real
             # geometry, so non-adjacent links phantom-overlap near the palm; those

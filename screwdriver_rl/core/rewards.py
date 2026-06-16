@@ -137,6 +137,41 @@ def point_segment_distance(
     return torch.linalg.norm(points - closest, dim=-1)
 
 
+def tangential_speed(
+    points: torch.Tensor,
+    velocities: torch.Tensor,
+    seg_a: torch.Tensor,
+    seg_b: torch.Tensor,
+) -> torch.Tensor:
+    """Speed of each point *tangential* to the axis ``seg_a -> seg_b``.
+
+    Only motion that circles the axis (genuine rolling of the handle) is
+    counted; the radial (approach/retreat) and axial (sliding along the shaft)
+    components are rejected.  The tangential direction is ``t = a_hat x r_hat``
+    where ``a_hat`` is the unit axis direction and ``r_hat`` is the unit radial
+    direction from the axis to the point.
+
+    Args:
+        points:     ``(N, K, 3)`` query points (fingertip positions).
+        velocities: ``(N, K, 3)`` matching point velocities (world frame).
+        seg_a:      ``(N, 3)`` axis start (handle base origin).
+        seg_b:      ``(N, 3)`` axis end (handle cap origin).
+
+    Returns:
+        ``(N, K)`` non-negative tangential speed magnitudes.  A pure tremor
+        (mostly radial / jitter) or an axial slide returns ~0.
+    """
+    axis = seg_b - seg_a                                              # (N, 3)
+    a_hat = axis / torch.linalg.norm(axis, dim=-1, keepdim=True).clamp(min=1e-9)
+    a_hat_k = a_hat.unsqueeze(1)                                      # (N, 1, 3)
+    rel = points - seg_a.unsqueeze(1)                                 # (N, K, 3)
+    axial_len = (rel * a_hat_k).sum(-1, keepdim=True)                 # (N, K, 1)
+    radial = rel - axial_len * a_hat_k                                # (N, K, 3)
+    r_hat = radial / torch.linalg.norm(radial, dim=-1, keepdim=True).clamp(min=1e-9)
+    t_hat = torch.linalg.cross(a_hat_k.expand_as(r_hat), r_hat, dim=-1)
+    return (velocities * t_hat).sum(-1).abs()                         # (N, K)
+
+
 def near_contact_score(
     near: torch.Tensor,
     thumb_index: int | None,
