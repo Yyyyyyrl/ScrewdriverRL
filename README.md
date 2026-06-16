@@ -127,21 +127,6 @@ python eval.py --task <id> --checkpoint <path.pth> --no_domain_rand --rot_dampin
 ```
 Key flags: `--stochastic`, `--no_pad_gate`, `--eval_phase`, `--fixed_start`, `--success_turns`.
 
-### `calibrate_pad.py` — recover the fingertip pad-normal axis
-Policy-independent: resets to the zero-action pregrasp and measures, per fingertip, the local-frame direction toward the handle (= the pad normal). Use the printed value for `fingertip_pad_axis_local` in the hand cfg. **Only valid once the pregrasp actually contacts the handle.**
-```bash
-python calibrate_pad.py --task <id> --num_envs 64 --headless
-```
-
-### `render_posture.py` — headless posture snapshots
-Spawns the hand + screwdriver at the task's `init_state`, settles, and saves front/side/top/iso PNGs + a 2×2 composite (default into `post_render/`). Also prints a stability line (max joint velocity) — handy for checking `init_state.pos/rot/joint_pos` or actuator/collision changes without opening the viewport.
-```bash
-python render_posture.py --task <id> --headless
-```
-Key flags: `--out PREFIX`, `--self_collisions {cfg,on,off}`, `--cam_dist`, `--settle`, `--width/--height`.
-
----
-
 ## Curriculum
 
 Training proceeds through three automatic phases based on the global step counter (shared across hands; per-phase values live in
@@ -189,29 +174,6 @@ The terminal logger prints a structured summary every ~500 environment steps (Fw
 
 ---
 
-## Adding a new hand
-
-The env is hand-agnostic; a new hand is a thin subclass of `ScrewdriverRotationEnv` + a cfg subclass of `ScrewdriverRotationEnvCfg`.
-
-1. Create `screwdriver_rl/tasks/<hand>/` mirroring `linker_l20/`.
-2. **Env subclass** — set the class-attribute name maps:
-   ```python
-   from screwdriver_rl.tasks.base.screwdriver_rotation_env import ScrewdriverRotationEnv
-
-   class MyHandEnv(ScrewdriverRotationEnv):
-       FINGERTIP_BODY_NAMES = {"index": "index_tip", ...}          # finger -> fingertip body
-       PROXIMAL_BODY_PATTERNS = [r"^palm$", r"^.*_proximal$", ...] # non-fingertip links to penalise
-       FINGER_JOINT_NAMES = {"index": ("j0", "j1", "j2"), ...}     # finger -> INDEPENDENT joint names
-       COUPLED_JOINTS = {"index_dip": ("index_pip", 0.89, 0.0)}    # mimic followers (optional)
-       SELF_COLLISION_FILTER_PAIRS = [("palm", "index_proximal")]  # phantom-overlap pairs (optional)
-   ```
-3. **Cfg subclass** — set `robot_cfg` (your URDF `ArticulationCfg`), `fingers`, `pregrasp_positions`, the gym `observation_space`/`action_space`, `privileged_obs_dim`, `history_obs_dim`, `fingertip_pad_axis_local`, and (if a mirror hand) `turn_direction`.
-4. **Register** the gym id in `screwdriver_rl/tasks/<hand>/__init__.py` and add `agents/rl_games_ppo_cfg.yaml`.
-5. **Import** the package in `screwdriver_rl/tasks/__init__.py`.
-6. Verify dims/joints with `tests/`, then `render_posture.py` / `calibrate_pad.py` to tune the pregrasp and pad axis.
-
----
-
 ## Repository structure
 
 ```
@@ -219,8 +181,6 @@ ScrewdriverRL/
 ├── train.py                # Two-stage training entry point (--stage 1|2, --task)
 ├── play.py                 # Viewport playback / quick stats
 ├── eval.py                 # Headless aggregate-statistics evaluator
-├── calibrate_pad.py        # Recover fingertip pad-normal axis from the pregrasp
-├── render_posture.py       # Headless multi-view posture snapshots (-> post_render/)
 ├── pyproject.toml
 ├── docs/
 │   └── 2-stage-training.md
