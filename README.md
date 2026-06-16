@@ -157,23 +157,6 @@ Failure modes and countermeasures:
 
 ---
 
-## Self-collision (sim-to-real)
-
-Self-collision is **enabled** for both hands so the policy can't learn finger configurations that pass through each other / the palm.
-
-For the Linker, the per-link convex-hull collision shapes are *inflated* relative to the real geometry, so non-adjacent links (palm↔proximals, sibling metacarpals, the thumb's nested CMC chain) falsely overlap at the grasp pose and destabilise the very light joints. This is fixed by **collision-pair filtering**: a `SELF_COLLISION_FILTER_PAIRS` list (applied via `pxr` `FilteredPairsAPI` in `_setup_scene`, before env cloning) that excludes only those physically-impossible pairs while **keeping** the deployment-critical collisions (fingertip↔fingertip, thumb↔fingers, finger-crossing). Verified stable (max |joint vel| ≈ 0.01 rad/s) across all envs.
-
-> **Collision geometry / performance.** The hand uses cheap `convex_hull` colliders (one shape per link). An earlier `convex_decomposition` attempt fit the geometry tighter but was **~10× slower per step and ~2.6× heavier in memory** for no stability benefit once pair-filtering was in place — so it was dropped. With `convex_hull`, the Linker runs comfortably at high env counts (e.g. `--num_envs 16384` ≈ 15.5 GB), which dominates throughput.
-
----
-
-## Monitoring
-
-The terminal logger prints a structured summary every ~500 environment steps (FwdTurns/NetTurns/OscRatio, TiltNorm/UprightGate, ContactGate/PadGate/PadCos/MinTipDist/FwdVel, and a reward breakdown). Inline warnings flag failure modes:
-`⚠ OSCILLATION` (OscRatio > 0.35), `⚠ TILT` (TiltNorm > 0.4 rad), `⚠ NO-CONTACT` (BinaryGate < 0.15), `⚠ BACKWARD` (RevVel > FwdVel).
-
----
-
 ## Repository structure
 
 ```
