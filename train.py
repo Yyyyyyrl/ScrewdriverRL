@@ -269,7 +269,8 @@ def run_stage1(env_cfg, log_dir: str) -> None:
         f"\n[Stage 1] Task        : {args.task}"
         f"\n[Stage 1] Num envs    : {env.unwrapped.num_envs}"
         f"\n[Stage 1] Log dir     : {log_dir}"
-        f"\n[Stage 1] Actor obs   : 27-D (policy)   Critic obs: 17-D (privileged)"
+        f"\n[Stage 1] Actor obs   : {env_cfg.observation_space.shape[0]}-D (policy)   "
+        f"Critic obs: {env_cfg.privileged_obs_dim}-D (privileged)"
         + (f"\n[Stage 1] Resume from : {args.checkpoint}" if args.checkpoint else "")
         + "\n",
         flush=True,

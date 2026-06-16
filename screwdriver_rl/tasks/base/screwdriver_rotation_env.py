@@ -456,7 +456,9 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         upright_gate = rewards.upright_gate(tilt_norm, self.cfg.turn_upright_gate_std)
 
         # ---- Contact gate ----
-        contact_gate = self._compute_contact_gate(phase)
+        # ``fwd_vel`` (forward handle angular speed) feeds the rolling-consistency
+        # factor so the gate only opens for spin the fingertips actually drive.
+        contact_gate = self._compute_contact_gate(phase, fwd_vel)
 
         combined_gate = contact_gate * upright_gate
 
@@ -494,10 +496,27 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         # ---- Proximal-link penalty ----
         proximal_cost = self._compute_proximal_penalty(phase.reward_proximal_penalty_weight)
 
+        # ---- Contact-engagement reward (bridge hover -> press; per-phase weight) ----
+        contact_reward = self._compute_contact_engagement_reward(
+            phase.reward_contact_weight, tip_dist, float(phase.turn_reward_contact_distance)
+        )
+
+        # ---- Grip-force penalty (discourage crushing the handle; per-phase weight) ----
+        grip_force_cost = self._compute_grip_force_penalty(phase.reward_contact_force_weight)
+
+        # ---- Idle/abandonment penalty (fingers parked off the handle; per-phase) ----
+        if tip_dist.numel() > 0 and phase.reward_finger_abandon_weight > 0.0:
+            abandon_cost = phase.reward_finger_abandon_weight * (
+                (tip_dist - self.cfg.finger_abandon_distance).clamp(min=0.0).sum(dim=-1)
+            )
+        else:
+            abandon_cost = torch.zeros(self.num_envs, device=self.device)
+
         reward = (
             turn_reward
             + milestone_reward
             + near_reward
+            + contact_reward
             - reverse_cost
             - upright_cost
             - tilt_vel_cost
@@ -505,6 +524,8 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             - action_rate_cost
             - finger_vel_cost
             - proximal_cost
+            - grip_force_cost
+            - abandon_cost
         )
 
         # ---- Logging extras ----
@@ -530,6 +551,9 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             "eval_milestone":      milestone_reward.detach(),
             "eval_near_reward":    near_reward.detach(),
             "eval_proximal_cost":  proximal_cost.detach(),
+            "eval_contact_reward": contact_reward.detach(),
+            "eval_grip_force_cost": grip_force_cost.detach(),
+            "eval_abandon_cost":   abandon_cost.detach(),
             "eval_action_cost":    action_cost.detach(),
             "eval_action_rate":    action_rate_cost.detach(),
             "eval_total_reward":   reward.detach(),
@@ -747,15 +771,19 @@ class ScrewdriverRotationEnv(DirectRLEnv):
     # Contact gate
     # -----------------------------------------------------------------------
 
-    def _compute_contact_gate(self, phase: CurriculumPhaseCfg) -> torch.Tensor:
-        """Binary × continuous gate: true contact × tangential rolling speed.
+    def _compute_contact_gate(
+        self, phase: CurriculumPhaseCfg, fwd_omega: torch.Tensor
+    ) -> torch.Tensor:
+        """Binary × continuous gate: true contact × finger-driven rolling.
 
         A fingertip counts as in contact only when it is inside
         ``turn_reward_contact_distance`` AND (if the contact-force gate is on)
         registering net contact force ≥ ``fingertip_contact_force_threshold``.
         Gate = 0 when fewer than ``min_contact_fingers`` are in contact, when the
-        in-contact tangential speeds are below ``turn_reward_min_fingertip_speed``
-        (only motion that circles the handle counts), or when the pads do not face
+        in-contact fingertips are not *driving* the handle forward (the
+        rolling-consistency factor — forward fingertip tangential speed vs. the
+        handle surface speed ``fwd_omega * rolling_ref_radius``; a standing squeeze
+        scores ~0 even while a damped handle spins), or when the pads do not face
         the handle.
 
         Both the turn reward and the reverse penalty are multiplied by this
@@ -787,23 +815,38 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         min_c = max(1, phase.turn_reward_min_contact_fingers)
         binary_gate = (contact_count >= min_c).float()
 
-        # Motion gate: average *tangential* speed of the near (distance)
-        # fingertips.  Only motion that circles the handle axis (genuine
-        # rolling) counts — a static tremor or radial press has ~zero
-        # tangential component and cannot satisfy the gate.
+        # Rolling factor: credit only handle spin the in-contact fingertips
+        # actually DRIVE.  Measure each near fingertip's SIGNED tangential speed in
+        # the forward (turn_direction) sense — a static squeeze (~0 finger motion),
+        # a radial press, or a back-driving finger contributes nothing — then
+        # compare the average forward fingertip speed to the handle surface speed
+        # (fwd_omega * rolling_ref_radius).  Genuine rolling (fingertip orbits at
+        # >= surface speed) saturates the factor to 1; a standing squeeze that
+        # spins the damped joint drives it to 0.  This replaces the old absolute
+        # motion gate, which saturated at a trivial speed and let micro-jitter open
+        # the gate while the handle "spun by itself".
         tip_pos = self.allegro.data.body_state_w[:, self._fingertip_body_ids, :3]
         fingertip_vel = self.allegro.data.body_state_w[:, self._fingertip_body_ids, 7:10]
         base = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_base_idx], :3]
         top = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_cap_idx], :3]
-        tip_speed = rewards.tangential_speed(tip_pos, fingertip_vel, base, top)  # (N, n_fingers)
+        tip_speed_signed = rewards.signed_tangential_speed(
+            tip_pos, fingertip_vel, base, top, self.cfg.turn_direction
+        )  # (N, n_fingers) — forward-positive
+        tip_fwd_speed = tip_speed_signed.clamp(min=0.0)
         w = contact_mask.float()
         denom = w.sum(dim=-1).clamp(min=1.0)
-        avg_contact_speed = (tip_speed * w).sum(dim=-1) / denom
-
-        motion_gate = rewards.motion_gate(
-            avg_contact_speed,
-            float(phase.turn_reward_min_fingertip_speed),
-            float(phase.turn_reward_full_fingertip_speed),
+        avg_contact_speed = (tip_fwd_speed * w).sum(dim=-1) / denom
+        # Absolute anti-noise floor: ignore sub-threshold tremor entirely so
+        # sensor/solver jitter cannot open the gate at standstill.
+        min_speed = float(phase.turn_reward_min_fingertip_speed)
+        if min_speed > 0.0:
+            avg_contact_speed = torch.where(
+                avg_contact_speed < min_speed,
+                torch.zeros_like(avg_contact_speed),
+                avg_contact_speed,
+            )
+        motion_gate = rewards.rolling_consistency(
+            fwd_omega, avg_contact_speed, float(self.cfg.rolling_ref_radius)
         )
 
         # Pad-facing factor: SOFT (not a hard mask) so a near-but-mis-oriented
@@ -819,7 +862,9 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             pad_factor = torch.ones_like(pad_factor)
 
         gate = binary_gate * motion_gate * pad_factor
-        self.extras["eval_contact_count"] = contact_count.detach()
+        # Store as float: it is a Long (bool-mask sum) and downstream consumers
+        # (terminal logger, tensorboard observer) take a float mean of it.
+        self.extras["eval_contact_count"] = contact_count.float().detach()
         self.extras["eval_binary_gate"] = binary_gate.detach()
         self.extras["eval_motion_gate"] = motion_gate.detach()
         self.extras["eval_avg_contact_speed"] = avg_contact_speed.detach()
@@ -926,6 +971,48 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         penalty_threshold = 0.05
         penalty = torch.clamp(penalty_threshold - d, min=0.0).sum(dim=-1)
         return weight * penalty
+
+    def _compute_grip_force_penalty(self, weight: float) -> torch.Tensor:
+        """Penalises fingertip contact force above ``cfg.contact_force_target``.
+
+        Discourages crushing the handle: with a hard squeeze (~26 N) sub-mm finger
+        motions transfer large torque (the high-force micro-gait that looks like the
+        handle "spinning by itself"), and it is unrealistic for hardware.  ``weight``
+        is the per-phase ``reward_contact_force_weight`` (ramped in over the
+        curriculum).  Returns zeros when disabled or the contact sensor is
+        unavailable.
+        """
+        weight = float(weight)
+        if weight <= 0.0:
+            return torch.zeros(self.num_envs, device=self.device)
+        force = self._compute_fingertip_contact_forces()  # (N, n_fingers) or None
+        if force is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        return weight * rewards.over_force_penalty(force, float(self.cfg.contact_force_target))
+
+    def _compute_contact_engagement_reward(
+        self, weight: float, tip_dist: torch.Tensor, contact_distance: float
+    ) -> torch.Tensor:
+        """Dense reward for fingertips pressing the handle (force up to target).
+
+        Bridges the "hover near the handle but never press" local optimum: the
+        distance-based near-reward saturates once the tips reach the surface, so
+        without a contact signal the policy parks there and never opens the contact
+        gate.  ``weight`` is the per-phase ``reward_contact_weight`` (high in P0 to
+        bootstrap, tapering later).  Masked to fingertips within ``contact_distance``
+        so finger-finger forces don't count.  Returns zeros when disabled or the
+        contact sensor is unavailable.
+        """
+        weight = float(weight)
+        if weight <= 0.0 or tip_dist.numel() == 0:
+            return torch.zeros(self.num_envs, device=self.device)
+        force = self._compute_fingertip_contact_forces()  # (N, n_fingers) or None
+        if force is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        near_mask = (tip_dist <= contact_distance).float()
+        return weight * rewards.contact_engagement(
+            force, near_mask, float(self.cfg.contact_force_target)
+        )
 
     # -----------------------------------------------------------------------
     # Milestone (sparse progress bonus)

@@ -172,6 +172,114 @@ def tangential_speed(
     return (velocities * t_hat).sum(-1).abs()                         # (N, K)
 
 
+def signed_tangential_speed(
+    points: torch.Tensor,
+    velocities: torch.Tensor,
+    seg_a: torch.Tensor,
+    seg_b: torch.Tensor,
+    direction: float = 1.0,
+) -> torch.Tensor:
+    """Signed tangential speed of each point about the axis ``seg_a -> seg_b``.
+
+    Identical geometry to :func:`tangential_speed`, but the result keeps its sign
+    and is multiplied by ``direction``: it is **positive** when the point moves in
+    the sense that would drive the handle forward (i.e. consistent with a forward
+    ``shaft_spin_delta`` for the same ``direction``), negative when it drives the
+    handle backward, and ~0 for a static squeeze or a purely radial/axial motion.
+
+    The sign convention: a surface point rotating with positive angular velocity
+    ``Ω`` about ``a_hat`` moves at ``Ω * r * t_hat`` with ``t_hat = a_hat x r_hat``.
+    The forward turn reward uses ``fwd_vel = clamp(direction * shaft_spin, 0)``, so
+    ``direction * (v . t_hat)`` is positive exactly when the fingertip is rolling
+    the handle in the rewarded direction.
+
+    Args:
+        points:     ``(N, K, 3)`` query points (fingertip positions).
+        velocities: ``(N, K, 3)`` matching point velocities (world frame).
+        seg_a:      ``(N, 3)`` axis start (handle base origin).
+        seg_b:      ``(N, 3)`` axis end (handle cap origin).
+        direction:  sign of the desired rotation (matches ``cfg.turn_direction``).
+
+    Returns:
+        ``(N, K)`` signed tangential speeds (m/s).
+    """
+    axis = seg_b - seg_a                                              # (N, 3)
+    a_hat = axis / torch.linalg.norm(axis, dim=-1, keepdim=True).clamp(min=1e-9)
+    a_hat_k = a_hat.unsqueeze(1)                                      # (N, 1, 3)
+    rel = points - seg_a.unsqueeze(1)                                 # (N, K, 3)
+    axial_len = (rel * a_hat_k).sum(-1, keepdim=True)                 # (N, K, 1)
+    radial = rel - axial_len * a_hat_k                                # (N, K, 3)
+    r_hat = radial / torch.linalg.norm(radial, dim=-1, keepdim=True).clamp(min=1e-9)
+    t_hat = torch.linalg.cross(a_hat_k.expand_as(r_hat), r_hat, dim=-1)
+    return direction * (velocities * t_hat).sum(-1)                   # (N, K)
+
+
+def rolling_consistency(
+    handle_fwd_omega: torch.Tensor,
+    finger_fwd_speed: torch.Tensor,
+    ref_radius: float,
+    eps: float = 1e-4,
+) -> torch.Tensor:
+    """Fraction of the handle's forward spin that the fingertips are *driving*.
+
+    Returns a ``[0, 1]`` factor comparing the forward fingertip tangential speed
+    ``finger_fwd_speed`` (m/s) to the handle surface speed ``handle_fwd_omega *
+    ref_radius`` (m/s).  Because a no-slip fingertip orbits at **>=** the handle
+    surface speed, genuine rolling saturates the ratio to 1, while a static
+    squeeze (``finger_fwd_speed ~ 0``) drives it to 0 *regardless of how fast a
+    damping-driven handle is spinning* — this is what removes the "handle spins
+    by itself under a standing torque" reward exploit.
+
+    When the handle is essentially still (``handle_fwd_omega ~ 0``) the surface
+    speed floors at ``eps`` and the ratio saturates to 1, but the caller's turn
+    reward is ``~ fwd_vel * factor`` which is ~0 there anyway, so no reward leaks.
+
+    Args:
+        handle_fwd_omega: ``(N,)`` forward angular speed of the handle (rad/s, >=0).
+        finger_fwd_speed: ``(N,)`` forward tangential speed of the in-contact
+            fingertips (m/s); clamp negatives to 0 before calling so back-driving
+            fingers earn no credit.
+        ref_radius:       representative fingertip orbit radius (m).
+
+    Returns:
+        ``(N,)`` rolling-consistency factor in ``[0, 1]``.
+    """
+    handle_surface_speed = (handle_fwd_omega * ref_radius).clamp(min=eps)
+    return (finger_fwd_speed / handle_surface_speed).clamp(0.0, 1.0)
+
+
+def over_force_penalty(force: torch.Tensor, target: float) -> torch.Tensor:
+    """Summed per-fingertip contact force exceeding ``target`` (N).
+
+    Returns ``(N,)`` = ``sum_k clamp(force_k - target, min=0)``.  Zero while every
+    fingertip grips at or below ``target``; grows linearly with any excess.  Used to
+    penalise *crushing* the handle: a hard squeeze (e.g. ~26 N) lets sub-mm finger
+    motions transfer large torque — the "spins by itself" / high-force micro-gait
+    exploit — and is also unrealistic for real hardware (fingertips grip at ~1-5 N).
+    """
+    return (force - target).clamp(min=0.0).sum(dim=-1)
+
+
+def contact_engagement(
+    force: torch.Tensor, near_mask: torch.Tensor, target: float
+) -> torch.Tensor:
+    """Dense per-fingertip contact reward, summed over fingers.
+
+    Each near fingertip contributes ``clamp(force / target, 0, 1)``: it rises with
+    contact force up to ``target`` and is then **flat** (no incentive to press
+    harder — that is the grip-force penalty's job).  ``near_mask`` (0/1 per finger,
+    typically "within the contact distance") localises the reward to genuine handle
+    contact so finger-finger forces don't count.
+
+    This bridges the exploration gap between "hover near the handle" (which the
+    distance-based near-reward already maxes out) and "turn the handle" (which needs
+    a hard simultaneous press+roll): it gives a smooth gradient that rewards simply
+    establishing a firm-but-gentle grip, from which the turn reward is reachable.
+    """
+    engaged = (force / max(target, 1e-6)).clamp(0.0, 1.0)
+    return (engaged * near_mask).sum(dim=-1)
+
+
 def near_contact_score(
     near: torch.Tensor,
     thumb_index: int | None,

@@ -34,7 +34,9 @@ _N = "\033[0m"  if _USE_COLOUR else ""   # reset
 def _mean(t: torch.Tensor | None) -> float:
     if t is None:
         return float("nan")
-    return t.mean().item()
+    # Cast first: integer tensors (e.g. eval_contact_count, a bool-mask sum) have
+    # no float mean and would otherwise raise "could not infer output dtype".
+    return t.float().mean().item()
 
 
 def _colour(value: float, lo: float, hi: float, invert: bool = False) -> str:
@@ -92,7 +94,9 @@ class RotationTrainingLogger:
         u_gate     = m("eval_upright_gate")
         c_gate     = m("eval_contact_gate")
         b_gate     = m("eval_binary_gate")
-        mot_gate   = m("eval_motion_gate")
+        mot_gate   = m("eval_motion_gate")  # now the rolling-consistency factor
+        ccount     = m("eval_contact_count")
+        avg_roll   = m("eval_avg_contact_speed")  # avg forward fingertip speed (m/s)
         pad_fac    = m("eval_pad_gate")
         pad_cos    = m("eval_pad_cos")
         cforce     = m("eval_contact_force")
@@ -105,7 +109,10 @@ class RotationTrainingLogger:
         turn_rew   = m("eval_turn_reward")
         rev_cost   = m("eval_reverse_cost")
         near_rew   = m("eval_near_reward")
+        con_rew    = m("eval_contact_reward")
         prox_cost  = m("eval_proximal_cost")
+        grip_cost  = m("eval_grip_force_cost")
+        abandon_cost = m("eval_abandon_cost")
         up_cost    = m("eval_upright_cost")
         act_cost   = m("eval_action_cost")
         total_rew  = m("eval_total_reward")
@@ -115,6 +122,14 @@ class RotationTrainingLogger:
         tilt_warn = " ⚠ TILT"          if tilt_norm > 0.4   else ""
         cont_warn = " ⚠ NO-CONTACT"    if b_gate < 0.15     else ""
         rev_warn  = " ⚠ BACKWARD"      if rev_vel > turn_vel else ""
+        # Idle-finger flag: mean in-contact fingertips < ~3.5 suggests fingers are
+        # parked off the handle (the degenerate "clamp with 3, park 2" policy).
+        idle_warn = " ⚠ IDLE-FINGERS"  if (ccount == ccount and ccount < 3.5) else ""
+        # Self-spin flag: handle turning forward but fingertips barely rolling.
+        spin_warn = " ⚠ SELF-SPIN"     if (turn_vel > 0.1 and mot_gate < 0.2) else ""
+        # Crush flag: mean fingertip contact force far above the realistic grip
+        # target (the high-force micro-gait exploit).
+        crush_warn = " ⚠ CRUSH"        if (cforce == cforce and cforce > 5.0) else ""
 
         # ``phase``/``num_phases`` arrive as floats (env emits a 1-indexed phase
         # number and the phase count).  NaN means the key was missing.
@@ -149,12 +164,16 @@ class RotationTrainingLogger:
             (
                 f"    ContactGate {_colour(c_gate, 0.2, 0.6):>14}  "
                 f"BinaryGate {_colour(b_gate, 0.2, 0.7):>14}  "
-                f"MotionGate {_colour(mot_gate, 0.2, 0.7):>14}{cont_warn}"
+                f"RollFactor {_colour(mot_gate, 0.2, 0.7):>14}{cont_warn}{spin_warn}"
+            ),
+            (
+                f"    ContactCount {_colour(ccount, 3.5, 4.5):>13}  "
+                f"AvgRollSpeed {avg_roll:>10.4f}m/s{idle_warn}"
             ),
             (
                 f"    PadFactor {_colour(pad_fac, 0.2, 0.7):>14}  "
                 f"PadCos {_colour(pad_cos, 0.0, 0.5):>16}  "
-                f"ContactForce {cforce:>7.3f}N"
+                f"ContactForce {cforce:>7.3f}N{crush_warn}"
             ),
             (
                 f"    MinTipDist {_colour(tip_dist, 0.08, 0.035, invert=True):>13}  "
@@ -165,6 +184,10 @@ class RotationTrainingLogger:
             (
                 f"    TurnRew {turn_rew:>10.3f}  RevCost {rev_cost:>9.3f}  "
                 f"NearRew {near_rew:>9.3f}  ProxCost {prox_cost:>8.3f}"
+            ),
+            (
+                f"    ContactRew {con_rew:>9.3f}  "
+                f"GripForceCost {grip_cost:>7.3f}  AbandonCost {abandon_cost:>7.3f}"
             ),
             (
                 f"    UprightCost {up_cost:>8.3f}  ActionCost {act_cost:>7.3f}"

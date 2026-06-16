@@ -63,71 +63,131 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     # natural grip drives the screwdriver the opposite way: +1 (vs Allegro -1).
     turn_direction: float = 1.0
 
+    # ---- Near-reward finger count (override the 3-finger Allegro default) ----
+    # The base default (2) only credits the 2 closest NON-thumb fingertips, which
+    # is right for the 3-finger Allegro (2 non-thumb) but lets the 5-finger Linker
+    # park its 2 "extra" non-thumb fingers idle at an extreme (they earn nothing
+    # from proximity and a frozen finger costs no action/velocity penalty).  Credit
+    # ALL FOUR non-thumb fingertips so every finger is incentivised to engage.
+    near_reward_top_k: int = 4
+
     # ---- Curriculum (LinkerL20-tuned; see CurriculumPhaseCfg for field docs) ----
-    # Retuned to stop the "handle spins while fingers barely move" reward-gaming:
-    #   * turn_reward_contact_distance 0.06/0.045/0.032 (was 0.09/0.07/0.05): the
-    #     handle radius is only 0.02 m, so the old thresholds counted a fingertip
-    #     hovering 1-3 cm OFF the surface as "contact".  The new values track
-    #     ~handle-radius + distal half-width (~0.01) + margin so the distance gate
-    #     fires only near genuine touch.  Re-derive from eval_min_tip_dist at true
-    #     contact once the Stage-2 ContactSensor force gate lands.
-    #   * turn_reward_min/full_fingertip_speed 0.005/0.02 (P1/P2): the motion gate
-    #     now measures the fingertip speed *tangential to the handle axis* (genuine
-    #     rolling), so a static tremor no longer opens it; the threshold is raised
-    #     accordingly.  P0 keeps min=0 so the approach is unpenalised.
-    #   * screwdriver_load_scale 0.25/0.6/1.0 (P0 was 0.0): a small screw load from
-    #     the very first phase anchors "you must actually push" instead of letting
-    #     the policy learn feeble nudging against a free-spinning handle.
-    #   * turn_reward_min_contact_fingers 3/3/4: 5-finger non-uniform hand, so 2
-    #     contacts is too lenient ("3" = thumb + 2 fingers; final demands 4-of-5).
-    #   * reward_proximal_penalty_weight 0/2/4: a human-like 5-finger wrap engages
-    #     more of the finger, so a gentler ramp avoids fighting the natural grasp.
-    # pad_facing_cos_threshold (0/0.3/0.5) is unchanged but only becomes meaningful
-    # now that fingertip_pad_axis_local is correct (see below).  Validate during
-    # Stage-1 retraining.
+    # FOUR phases (was 3) so the final tightening is spread out: the old 3-phase
+    # schedule slammed full load (0.6->1.0) + tight contact (0.045->0.032) + strict
+    # pad (0.3->0.5) + strict upright (1.3->1.0) ALL at the P2 boundary, which
+    # collapsed the policy (reward went negative for ~200 epochs and never cleanly
+    # recovered).  Now each axis ramps gently, and full load (P2) arrives BEFORE the
+    # strictest contact/upright/finger-count gates (P3).
+    #
+    # Key changes vs. the old schedule (which produced the idle-finger + "handle
+    # spins by itself" policy):
+    #   * screwdriver_load_scale 0.6/0.8/1.0/1.0 (P0 was 0.25): a MEANINGFUL screw
+    #     load from step 0, so the free-spin exploit never establishes.  Combined
+    #     with the joint-physics fix (base cfg: Coulomb 0.10 dominant, damping 0.12)
+    #     the handle no longer spins under a standing squeeze.
+    #   * turn_reward_min_contact_fingers 3/4/4/5 (was 3/3/3): with near_reward_top_k
+    #     now 4 (above), every non-thumb finger earns proximity reward, and the turn
+    #     gate progressively demands nearly all fingers in genuine contact — no more
+    #     "clamp with 3, park 2 idle".  P0 stays 3 so the grip can bootstrap.
+    #   * reward_contact_force_weight 0.3/0.7/0.8/0.8 and reward_finger_abandon_weight
+    #     5/20/30/30: the anti-crush and anti-idle penalties RAMP IN (like the
+    #     proximal penalty) so they don't strangle the initial grasp — full-strength
+    #     from step 0 trapped the policy in a "hover, don't grip" optimum.
+    #   * reward_contact_weight 0.6/0.3/0.15/0.1: dense contact-engagement reward,
+    #     HIGH in P0 to bootstrap pressing.  The distance-based near-reward saturates
+    #     at the surface, so the policy hovered there (ContactForce ~0) and never
+    #     opened the contact gate; this rewards force up to the 2.5 N target (then
+    #     flat) to bridge "hover" -> "press", and tapers as the turn reward takes over.
+    #   * turn_reward_min_fingertip_speed 0/0.008/0.01/0.01: an absolute anti-noise
+    #     floor under the rolling-consistency factor (the gate now credits handle
+    #     spin only to the extent the fingertips actually drive it — see
+    #     _compute_contact_gate / rewards.rolling_consistency).  P0 keeps 0 so the
+    #     approach is unpenalised.  turn_reward_full_fingertip_speed is no longer
+    #     used by the gate (the rolling factor self-normalises to the handle speed).
+    #   * turn_reward_contact_distance 0.06->0.035 and pad/upright ramps unchanged in
+    #     spirit but stretched over four phases.
     curriculum_phases: list[CurriculumPhaseCfg] = field(
         default_factory=lambda: [
             CurriculumPhaseCfg(
-                # --- P0: reach & grasp; contact gate ON, small load from step 0 ---
+                # --- P0: reach & grasp; contact gate ON, real load from step 0 ---
                 step_start=0,
                 reward_turn_weight=120.0,
                 turn_reward_contact_distance=0.06,
+                # 3 in P0 (ramps 4 -> 4 -> 5 in later phases): keep the bar low so the
+                # policy can FIRST discover a grip + turn; the abandon penalty
+                # (ramped) + the min-fingers ramp engage the spare fingers later.
                 turn_reward_min_contact_fingers=3,
                 turn_reward_min_fingertip_speed=0.0,
-                turn_reward_full_fingertip_speed=0.02,
+                turn_reward_full_fingertip_speed=0.03,
                 pad_facing_cos_threshold=0.0,
-                screwdriver_load_scale=0.25,
+                screwdriver_load_scale=0.6,
                 reward_proximal_penalty_weight=0.0,
+                # Grip-force GENTLE in P0 (only bites above the 2.5 N target anyway):
+                # ramps up later.  Abandon gentle too (a strong abandon penalty traps
+                # the policy in a "hover, don't grip" optimum during early exploration).
+                reward_contact_force_weight=0.3,
+                reward_finger_abandon_weight=5.0,
+                # Contact-engagement reward HIGH in P0: this is the key bootstrap
+                # signal that bridges "hover at the surface" -> "press".  The
+                # distance-based near-reward saturates at the surface, so without this
+                # the policy parked hovering (ContactForce ~0) and never opened the
+                # contact gate.  near_reward kept at 0.8 (its job is only the approach;
+                # boosting it to 1.5 made the hover optimum MORE comfortable).
+                reward_contact_weight=0.6,
                 near_reward_weight=0.8,
                 episode_length_s=30.0,
-                upright_termination_threshold=2.0,
+                upright_termination_threshold=1.8,
             ),
             CurriculumPhaseCfg(
-                # --- P1: ramp the screw load and tighten the contact gate ---
+                # --- P1: require genuine rolling; engage a 4th finger ---
                 step_start=40_000_000,
-                reward_turn_weight=180.0,
-                turn_reward_contact_distance=0.045,
-                turn_reward_min_contact_fingers=3,
-                turn_reward_min_fingertip_speed=0.005,
-                turn_reward_full_fingertip_speed=0.02,
+                reward_turn_weight=160.0,
+                turn_reward_contact_distance=0.05,
+                turn_reward_min_contact_fingers=4,
+                turn_reward_min_fingertip_speed=0.008,
+                turn_reward_full_fingertip_speed=0.04,
                 pad_facing_cos_threshold=0.3,
-                screwdriver_load_scale=0.6,
+                screwdriver_load_scale=0.8,
                 reward_proximal_penalty_weight=2.0,
-                near_reward_weight=0.3,
-                episode_length_s=50.0,
-                upright_termination_threshold=1.3,
+                reward_contact_force_weight=0.7,
+                reward_finger_abandon_weight=20.0,
+                reward_contact_weight=0.3,
+                near_reward_weight=0.4,
+                episode_length_s=45.0,
+                upright_termination_threshold=1.4,
             ),
             CurriculumPhaseCfg(
-                # --- P2: final — strict pad + full load; demand 4-of-5 fingers ---
+                # --- P2: full screw load (but contact/upright not yet strictest) ---
                 step_start=90_000_000,
+                reward_turn_weight=180.0,
+                turn_reward_contact_distance=0.04,
+                turn_reward_min_contact_fingers=4,
+                turn_reward_min_fingertip_speed=0.01,
+                turn_reward_full_fingertip_speed=0.045,
+                pad_facing_cos_threshold=0.4,
+                screwdriver_load_scale=1.0,
+                reward_proximal_penalty_weight=3.0,
+                reward_contact_force_weight=0.8,
+                reward_finger_abandon_weight=30.0,
+                reward_contact_weight=0.15,
+                near_reward_weight=0.25,
+                episode_length_s=55.0,
+                upright_termination_threshold=1.2,
+            ),
+            CurriculumPhaseCfg(
+                # --- P3: final — strict pad + tight contact; demand 5-of-5 ---
+                step_start=150_000_000,
                 reward_turn_weight=200.0,
-                turn_reward_contact_distance=0.032,
-                turn_reward_min_contact_fingers=3,
-                turn_reward_min_fingertip_speed=0.005,
-                turn_reward_full_fingertip_speed=0.02,
+                turn_reward_contact_distance=0.035,
+                turn_reward_min_contact_fingers=5,
+                turn_reward_min_fingertip_speed=0.01,
+                turn_reward_full_fingertip_speed=0.05,
                 pad_facing_cos_threshold=0.5,
                 screwdriver_load_scale=1.0,
                 reward_proximal_penalty_weight=4.0,
+                reward_contact_force_weight=0.8,
+                reward_finger_abandon_weight=30.0,
+                reward_contact_weight=0.1,
                 near_reward_weight=0.15,
                 episode_length_s=60.0,
                 upright_termination_threshold=1.0,

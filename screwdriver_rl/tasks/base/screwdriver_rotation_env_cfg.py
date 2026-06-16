@@ -126,6 +126,31 @@ class CurriculumPhaseCfg:
     Encourages fingertip-only contact.  Off in Phase 0 to not confuse
     the policy before it has learned to approach at all."""
 
+    # ---- Grip-force penalty (per-phase; see base cfg contact_force_target) ----
+    reward_contact_force_weight: float = 0.0
+    """Penalty weight on per-fingertip force above ``cfg.contact_force_target``
+    (see ``rewards.over_force_penalty``).  RAMPED like the proximal penalty: gentle
+    in Phase 0 so it does not strangle the initial grasp learning (a full-strength
+    force penalty from step 0 suppresses the exploration needed to discover a grip),
+    rising to full in later phases to clamp the ~26 N crush-and-micro-gait exploit."""
+
+    # ---- Idle/abandonment penalty (per-phase; see base cfg finger_abandon_distance) ----
+    reward_finger_abandon_weight: float = 0.0
+    """Penalty weight on fingertip distance beyond ``cfg.finger_abandon_distance``.
+    RAMPED: gentle in Phase 0 (a strong abandon penalty there punishes the wide
+    finger motions of early exploration and traps the policy in a "hover, don't
+    grip" optimum), rising in later phases to stop fingers parking idle once the
+    policy can already grasp."""
+
+    # ---- Contact-engagement reward (per-phase; bridges hover -> press) ----
+    reward_contact_weight: float = 0.0
+    """Dense reward weight for fingertips actually pressing the handle (force up to
+    ``cfg.contact_force_target``; see ``rewards.contact_engagement``).  HIGH in
+    Phase 0 to bootstrap contact — the distance-based near-reward maxes out once the
+    fingertips reach the surface, so without this the policy parks "hovering" there
+    and never presses (the turn reward needs a hard press+roll leap it can't find).
+    Tapers in later phases as the turn reward takes over."""
+
     # ---- Near reward ----
     near_reward_weight: float = 0.8
     """Fingertip proximity reward weight.  High in Phase 0 (dominant signal
@@ -293,9 +318,13 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     """Sign of the desired rotation: −1 = negative-z (right-hand rule: CCW
     when viewed from above).  A mirror-image (left) hand may need +1."""
 
-    turn_velocity_clip: float = 1.0
-    """Cap on instantaneous turn velocity used in the reward (rad/s).
-    Prevents a single forceful flick from producing an outsized reward spike."""
+    turn_velocity_clip: float = 0.5
+    """Cap on instantaneous turn velocity used in the reward (rad/s).  Lowered from
+    1.0 to 0.5: at 1.0 the policy was rewarded for spinning as fast as possible
+    (FwdVel ~0.93), which drove a hard grip; capping at 0.5 rewards controlled,
+    sustained turning instead and makes the cost terms (grip-force, abandon, action)
+    relatively more important.  Also prevents a single forceful flick from producing
+    an outsized reward spike."""
 
     # ------------------------------------------------------------------
     # Physics realism
@@ -306,21 +335,34 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------
     # Screwdriver rotational load (models the resistance of driving a screw)
     # ------------------------------------------------------------------
-    screwdriver_load_torque: float = 0.045
+    screwdriver_load_torque: float = 0.10
     """Constant (Coulomb) resistive torque on the screwdriver rotation joint
     (N·m), opposing the direction of motion.  This is the breakaway "stiction" a
     real screw presents: below it the handle does not rotate at all, so a
     sub-threshold finger nudge cannot make it creep forward and farm turn reward.
-    Raised from 0.02 (where feeble low-torque nudging still spun a near-free
-    handle) to 0.045.  Set 0.0 to recover a free-spinning handle."""
+    Raised from 0.045 to 0.10 so the Coulomb deadband DOMINATES the bearing
+    damping (now 0.12, below): together they make the handle stop the instant the
+    fingers stop driving it, so a *standing* squeeze can no longer spin it.  The
+    deceleration this imparts to a coasting handle is load/izz ~ 0.10/6e-5 ~ 1.6e3
+    rad/s², i.e. it halts within one substep, which is why the bearing damping can
+    be lowered without the handle coasting for reward.  Set 0.0 for a free handle."""
 
     screwdriver_load_viscous: float = 0.0
     """Extra speed-proportional resistance (N·m·s/rad) on top of the actuator's
     bearing damping.  Usually 0 — the Coulomb term above is dominant."""
 
-    screwdriver_load_omega_eps: float = 0.05
+    screwdriver_load_omega_eps: float = 0.03
     """Velocity (rad/s) over which the Coulomb torque is smoothly ramped via
-    tanh(omega/eps), so it passes through zero without solver chatter."""
+    tanh(omega/eps), so it passes through zero without solver chatter.  Tightened
+    from 0.05 to 0.03 for a sharper stiction deadband (less creep below breakaway)."""
+
+    rolling_ref_radius: float = 0.025
+    """Representative fingertip orbit radius (m) used by the rolling-consistency
+    factor (``rewards.rolling_consistency``): the turn reward is credited only to
+    the extent the in-contact fingertips are moving tangentially at >= the handle
+    surface speed ``fwd_vel * rolling_ref_radius``.  ~handle radius (0.02) plus the
+    fingertip pad half-thickness; a no-slip fingertip orbits at >= this, so genuine
+    rolling saturates the factor to 1 while a static squeeze drives it to 0."""
 
     # ------------------------------------------------------------------
     # Reward — stable weights (phase-independent)
@@ -389,6 +431,16 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     Small but non-zero so light pad contact registers while sensor noise / no
     contact does not.  Tune from ``eval_contact_force`` during bring-up."""
 
+    # ------------------------------------------------------------------
+    # Grip-force penalty (discourage crushing the handle)
+    # ------------------------------------------------------------------
+    contact_force_target: float = 2.5
+    """Per-fingertip contact force (N) up to which gripping is free.  Above it the
+    grip-force penalty kicks in.  ~real fingertip grip (1-5 N); together with the
+    distance/force *gate floor* (0.05 N) it leaves a comfortable normal-grip window.
+    The penalty WEIGHT is per-phase (``CurriculumPhaseCfg.reward_contact_force_weight``)
+    so it can ramp in without strangling the initial grasp."""
+
     # Action / finger regularisation (phase-independent)
     reward_action_weight: float = 0.25
     reward_action_rate_weight: float = 0.1
@@ -400,6 +452,17 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     near_reward_top_k: int = 2
     """Average only the top-k closest non-thumb fingertips.  Prevents the
     near-reward from forcing all fingers onto the same side of the handle."""
+
+    # ------------------------------------------------------------------
+    # Idle/abandonment penalty (fingers parked away from the handle)
+    # ------------------------------------------------------------------
+    finger_abandon_distance: float = 0.06
+    """Fingertip-to-handle-axis distance (m) beyond which a finger counts as
+    "abandoned" (parked off the handle).  ~3x the handle radius (0.02) + margin, so
+    a finger genuinely in/near the grasp is unpenalised.  The penalty WEIGHT is
+    per-phase (``CurriculumPhaseCfg.reward_finger_abandon_weight``) so it can ramp in
+    after the policy can already grasp (a strong abandon penalty during early
+    exploration traps the policy in a "hover, don't grip" optimum)."""
 
     # Milestone (sparse progress bonus)
     milestone_angle: float = 0.5 * math.pi
@@ -534,12 +597,16 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
             "rotation": ImplicitActuatorCfg(
                 joint_names_expr=["table_screwdriver_joint_3"],
                 stiffness=0.0,
-                # Damping 0.5: with the handle z-inertia (izz~6e-5) the velocity
-                # time constant tau = I/c ~ 1.2e-4 s is far shorter than one
-                # physics step (1/60 s), so the handle stops the instant the
-                # finger leaves — it cannot coast forward for reward.  Raised from
-                # 0.15 (which still let a steady sub-threshold push spin it up).
-                damping=0.5,
+                # Damping 0.12 (was 0.5).  High damping made steady velocity
+                # ω ≈ (grip_torque − Coulomb)/damping, so a *standing* asymmetric
+                # squeeze produced constant rotation with no finger motion (the
+                # handle "spun by itself" — the central reward exploit).  The
+                # Coulomb load (now 0.10, dominant) already halts the handle within
+                # one substep when the fingers stop driving it, so the bearing
+                # damping no longer needs to suppress coasting; it is kept small
+                # only to take the chatter off the velocity solver.  The handle now
+                # responds to finger *work* (rolling/gaiting), not standing torque.
+                damping=0.12,
             ),
             "cap": ImplicitActuatorCfg(
                 joint_names_expr=["screwdriver_body_cap_joint"],
