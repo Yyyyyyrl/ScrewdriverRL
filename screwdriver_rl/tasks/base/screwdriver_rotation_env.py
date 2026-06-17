@@ -779,8 +779,9 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         A fingertip counts as in contact only when it is inside
         ``turn_reward_contact_distance`` AND (if the contact-force gate is on)
         registering net contact force ≥ ``fingertip_contact_force_threshold``.
-        Gate = 0 when fewer than ``min_contact_fingers`` are in contact, when the
-        in-contact fingertips are not *driving* the handle forward (the
+        Gate is de-rated (soft ramp over ``contact_count_soft_width`` fingers, 0 at
+        ``min_contact_fingers - width``) below ``min_contact_fingers`` in contact,
+        when the in-contact fingertips are not *driving* the handle forward (the
         rolling-consistency factor — forward fingertip tangential speed vs. the
         handle surface speed ``fwd_omega * rolling_ref_radius``; a standing squeeze
         scores ~0 even while a damped handle spins), or when the pads do not face
@@ -813,7 +814,19 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
         contact_count = contact_mask.sum(dim=-1)
         min_c = max(1, phase.turn_reward_min_contact_fingers)
-        binary_gate = (contact_count >= min_c).float()
+        # SOFT finger-count gate (was a hard `contact_count >= min_c` step).  That
+        # step was the curriculum cliff: raising min_c across phases (3->4->5)
+        # instantly zeroed the turn reward on the policy's *existing* grasp, leaving
+        # no gradient to recruit the next finger -- so it released contact into the
+        # free-spin basin and never recovered (collapsed run 16-08-11 at P0->P1).
+        # Ramp over `contact_count_soft_width` fingers: one-finger-short still earns
+        # partial credit (a gradient to add it), while genuine under-gripping
+        # (>= width fingers short) still scores 0.  Mirrors the deliberately-soft
+        # pad_factor / motion_gate below; the count gate is just the one the
+        # curriculum moves the most, so it has to be soft too.
+        cw = max(float(self.cfg.contact_count_soft_width), 1e-6)
+        count_gate = ((contact_count.float() - (min_c - cw)) / cw).clamp(0.0, 1.0)
+        binary_gate = (contact_count >= min_c).float()  # kept for the BinaryGate diagnostic
 
         # Rolling factor: credit only handle spin the in-contact fingertips
         # actually DRIVE.  Measure each near fingertip's SIGNED tangential speed in
@@ -861,11 +874,12 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         if not self.cfg.require_pad_facing:
             pad_factor = torch.ones_like(pad_factor)
 
-        gate = binary_gate * motion_gate * pad_factor
+        gate = count_gate * motion_gate * pad_factor
         # Store as float: it is a Long (bool-mask sum) and downstream consumers
         # (terminal logger, tensorboard observer) take a float mean of it.
         self.extras["eval_contact_count"] = contact_count.float().detach()
         self.extras["eval_binary_gate"] = binary_gate.detach()
+        self.extras["eval_count_gate"] = count_gate.detach()
         self.extras["eval_motion_gate"] = motion_gate.detach()
         self.extras["eval_avg_contact_speed"] = avg_contact_speed.detach()
         self.extras["eval_pad_cos"] = pad_cos.mean(dim=-1).detach()

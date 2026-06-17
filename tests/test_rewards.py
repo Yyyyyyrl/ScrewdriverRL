@@ -101,6 +101,101 @@ def test_point_segment_distance():
     assert abs(d[0, 1].item() - 1.0) < 1e-6
 
 
+def test_tangential_speed_pure_rotation():
+    # Vertical handle axis (0,0,0)->(0,0,1); point at radius 0.02 on +x.
+    # The tangential direction there is +y (a_hat x r_hat = z x x = y), so a
+    # purely tangential velocity returns its full magnitude.
+    pts = torch.tensor([[[0.02, 0.0, 0.5]]])
+    a = torch.tensor([[0.0, 0.0, 0.0]])
+    b = torch.tensor([[0.0, 0.0, 1.0]])
+    vel = torch.tensor([[[0.0, 0.3, 0.0]]])
+    s = R.tangential_speed(pts, vel, a, b)
+    assert abs(s[0, 0].item() - 0.3) < 1e-6
+
+
+def test_tangential_speed_ignores_radial_and_axial():
+    # Same point; radial (+x), axial (+z), and a mix whose only tangential part
+    # is +0.3 along +y.  Only the tangential component is counted.
+    pts = torch.tensor([[[0.02, 0.0, 0.5], [0.02, 0.0, 0.5], [0.02, 0.0, 0.5]]])
+    a = torch.tensor([[0.0, 0.0, 0.0]])
+    b = torch.tensor([[0.0, 0.0, 1.0]])
+    vel = torch.tensor([[[0.5, 0.0, 0.0], [0.0, 0.0, 0.7], [0.5, 0.3, 0.7]]])
+    s = R.tangential_speed(pts, vel, a, b)
+    assert s[0, 0].item() < 1e-6              # pure radial  -> ~0
+    assert s[0, 1].item() < 1e-6              # pure axial   -> ~0
+    assert abs(s[0, 2].item() - 0.3) < 1e-6   # mix -> only the tangential part
+
+
+def test_signed_tangential_speed_sign_follows_direction():
+    # Vertical axis z; point at radius 0.02 on +x; tangential dir is +y.
+    # A +y velocity drives +z rotation (right-hand rule), i.e. positive shaft spin
+    # for direction=+1 and negative for direction=-1.
+    pts = torch.tensor([[[0.02, 0.0, 0.5]]])
+    a = torch.tensor([[0.0, 0.0, 0.0]])
+    b = torch.tensor([[0.0, 0.0, 1.0]])
+    vel = torch.tensor([[[0.0, 0.3, 0.0]]])
+    s_pos = R.signed_tangential_speed(pts, vel, a, b, direction=1.0)
+    s_neg = R.signed_tangential_speed(pts, vel, a, b, direction=-1.0)
+    assert abs(s_pos[0, 0].item() - 0.3) < 1e-6     # forward-driving -> positive
+    assert abs(s_neg[0, 0].item() + 0.3) < 1e-6     # same motion, opposite sign
+    # A back-driving fingertip (-y) is negative for direction=+1.
+    vel_back = torch.tensor([[[0.0, -0.3, 0.0]]])
+    s_back = R.signed_tangential_speed(pts, vel_back, a, b, direction=1.0)
+    assert s_back[0, 0].item() < 0.0
+
+
+def test_rolling_consistency_static_squeeze_is_zero():
+    # Handle spinning fast (5 rad/s) but fingers static -> factor ~0.  This is the
+    # "spins by itself under a standing torque" exploit that must earn no reward.
+    omega = torch.tensor([5.0])
+    finger = torch.tensor([0.0])
+    f = R.rolling_consistency(omega, finger, ref_radius=0.025)
+    assert f[0].item() < 1e-3
+
+
+def test_rolling_consistency_genuine_rolling_saturates():
+    # Fingertip at the reference radius rolling no-slip with the handle moves at
+    # omega*radius, so the ratio saturates to 1 (and >= 1 for a larger orbit).
+    omega = torch.tensor([2.0, 2.0])
+    radius = 0.025
+    finger = torch.tensor([omega[0].item() * radius, omega[1].item() * radius * 1.5])
+    f = R.rolling_consistency(omega, finger, ref_radius=radius)
+    assert abs(f[0].item() - 1.0) < 1e-5
+    assert abs(f[1].item() - 1.0) < 1e-5      # faster than surface -> clamped to 1
+
+
+def test_rolling_consistency_partial_slip():
+    # Fingers moving at half the handle surface speed -> factor ~0.5.
+    omega = torch.tensor([2.0])
+    radius = 0.025
+    finger = torch.tensor([0.5 * omega[0].item() * radius])
+    f = R.rolling_consistency(omega, finger, ref_radius=radius)
+    assert abs(f[0].item() - 0.5) < 1e-5
+
+
+def test_over_force_penalty():
+    # Per-fingertip forces; target 2.5 N.  Only the excess above target counts,
+    # summed across fingers; forces at/below target contribute 0.
+    force = torch.tensor([[0.0, 2.5, 5.0, 12.5]])   # excess: 0, 0, 2.5, 10.0
+    p = R.over_force_penalty(force, target=2.5)
+    assert abs(p[0].item() - 12.5) < 1e-5
+    # A gentle grip (all <= target) costs nothing.
+    gentle = torch.tensor([[1.0, 2.0, 0.5, 2.5]])
+    assert R.over_force_penalty(gentle, target=2.5)[0].item() == 0.0
+
+
+def test_contact_engagement():
+    # clamp(force/target,0,1) per finger, summed; flat at/above target.
+    force = torch.tensor([[0.0, 1.25, 2.5, 5.0]])   # -> 0, 0.5, 1, 1
+    mask = torch.ones_like(force)
+    e = R.contact_engagement(force, mask, target=2.5)
+    assert abs(e[0].item() - 2.5) < 1e-5
+    # near_mask zeroes out fingers away from the handle (e.g. the 3rd here).
+    mask2 = torch.tensor([[1.0, 1.0, 0.0, 1.0]])
+    e2 = R.contact_engagement(force, mask2, target=2.5)
+    assert abs(e2[0].item() - 1.5) < 1e-5   # 0 + 0.5 + (masked) + 1
+
+
 def test_shaft_spin_delta_pure_z_rotation():
     # Rotation of +0.1 rad about z between steps -> spin = direction * 0.1.
     half = 0.05

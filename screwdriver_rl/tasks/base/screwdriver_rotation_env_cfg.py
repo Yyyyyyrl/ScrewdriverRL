@@ -409,6 +409,17 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     ``pad_facing_cos_threshold``.  Full pad credit at cos ≥ threshold and zero
     at cos ≤ threshold − width, linear between."""
 
+    contact_count_soft_width: float = 2.0
+    """Width (in fingers) of the SOFT ramp on the turn-reward finger-count gate.
+    Full credit at ``contact_count ≥ turn_reward_min_contact_fingers``; linear down
+    to 0 at ``min - contact_count_soft_width``.  Makes RAISING
+    ``turn_reward_min_contact_fingers`` across the curriculum a smooth de-rating
+    instead of a zero-reward cliff (the failure that collapsed run 16-08-11 at the
+    P0→P1 boundary: the old hard ``count >= min`` step zeroed the turn reward on the
+    existing grasp the instant min went 3→4).  2.0 ⇒ one finger short of the target
+    earns half credit (a gradient to recruit it), two short earns nothing (still
+    rejects 1–2-finger pokes; the rolling + pad gates also still apply)."""
+
     use_axis_contact_proxy: bool = True
     """Compute fingertip distances to the handle *axis segment* (handle
     origin → cap origin) instead of the handle body origin."""
@@ -456,13 +467,16 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     # ------------------------------------------------------------------
     # Idle/abandonment penalty (fingers parked away from the handle)
     # ------------------------------------------------------------------
-    finger_abandon_distance: float = 0.06
+    finger_abandon_distance: float = 0.085
     """Fingertip-to-handle-axis distance (m) beyond which a finger counts as
-    "abandoned" (parked off the handle).  ~3x the handle radius (0.02) + margin, so
-    a finger genuinely in/near the grasp is unpenalised.  The penalty WEIGHT is
-    per-phase (``CurriculumPhaseCfg.reward_finger_abandon_weight``) so it can ramp in
-    after the policy can already grasp (a strong abandon penalty during early
-    exploration traps the policy in a "hover, don't grip" optimum)."""
+    "abandoned" (parked off the handle).  MUST stay ABOVE ``turn_reward_contact_distance``
+    (0.07), else a finger can be both "in contact" and "abandoned" at once.  Per-finger
+    diagnostics (diag_fingers.py) show the genuine grasp's pads sit 0.039 (thumb) ..
+    0.064 (ring) from the axis; only a truly parked finger (e.g. middle at ~0.106) is
+    beyond 0.085.  The penalty WEIGHT is per-phase
+    (``CurriculumPhaseCfg.reward_finger_abandon_weight``) so it can ramp in after the
+    policy can already grasp (a strong abandon penalty during early exploration traps
+    the policy in a "hover, don't grip" optimum)."""
 
     # Milestone (sparse progress bonus)
     milestone_angle: float = 0.5 * math.pi

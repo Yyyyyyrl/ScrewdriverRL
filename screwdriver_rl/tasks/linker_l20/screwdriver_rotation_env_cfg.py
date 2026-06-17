@@ -72,50 +72,55 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     near_reward_top_k: int = 4
 
     # ---- Curriculum (LinkerL20-tuned; see CurriculumPhaseCfg for field docs) ----
-    # FOUR phases (was 3) so the final tightening is spread out: the old 3-phase
-    # schedule slammed full load (0.6->1.0) + tight contact (0.045->0.032) + strict
-    # pad (0.3->0.5) + strict upright (1.3->1.0) ALL at the P2 boundary, which
-    # collapsed the policy (reward went negative for ~200 epochs and never cleanly
-    # recovered).  Now each axis ramps gently, and full load (P2) arrives BEFORE the
-    # strictest contact/upright/finger-count gates (P3).
+    # FOUR phases.  The phase COUNT is not what prevents collapse — continuity at
+    # each boundary is.  The earlier 3-phase schedule stacked every tightening at
+    # one boundary; spreading it over four + reordering (full screw load lands
+    # BEFORE the strictest pad/finger/upright gates) helps, but run 16-08-11 still
+    # collapsed at the FIRST boundary (P0->P1) because the contact gate's finger-
+    # count test used to be a HARD step: raising turn_reward_min_contact_fingers
+    # 3->4 instantly zeroed the turn reward on the working 3-finger grasp, so the
+    # policy released into a free-spin basin with no gradient back (phase2.pth:
+    # ContactCount~2, AvgRollSpeed 0, TurnRew 0).
     #
-    # Key changes vs. the old schedule (which produced the idle-finger + "handle
-    # spins by itself" policy):
-    #   * screwdriver_load_scale 0.6/0.8/1.0/1.0 (P0 was 0.25): a MEANINGFUL screw
-    #     load from step 0, so the free-spin exploit never establishes.  Combined
-    #     with the joint-physics fix (base cfg: Coulomb 0.10 dominant, damping 0.12)
-    #     the handle no longer spins under a standing squeeze.
-    #   * turn_reward_min_contact_fingers 3/4/4/5 (was 3/3/3): with near_reward_top_k
-    #     now 4 (above), every non-thumb finger earns proximity reward, and the turn
-    #     gate progressively demands nearly all fingers in genuine contact — no more
-    #     "clamp with 3, park 2 idle".  P0 stays 3 so the grip can bootstrap.
-    #   * reward_contact_force_weight 0.3/0.7/0.8/0.8 and reward_finger_abandon_weight
-    #     5/20/30/30: the anti-crush and anti-idle penalties RAMP IN (like the
-    #     proximal penalty) so they don't strangle the initial grasp — full-strength
-    #     from step 0 trapped the policy in a "hover, don't grip" optimum.
-    #   * reward_contact_weight 0.6/0.3/0.15/0.1: dense contact-engagement reward,
-    #     HIGH in P0 to bootstrap pressing.  The distance-based near-reward saturates
-    #     at the surface, so the policy hovered there (ContactForce ~0) and never
-    #     opened the contact gate; this rewards force up to the 2.5 N target (then
-    #     flat) to bridge "hover" -> "press", and tapers as the turn reward takes over.
-    #   * turn_reward_min_fingertip_speed 0/0.008/0.01/0.01: an absolute anti-noise
-    #     floor under the rolling-consistency factor (the gate now credits handle
-    #     spin only to the extent the fingertips actually drive it — see
-    #     _compute_contact_gate / rewards.rolling_consistency).  P0 keeps 0 so the
-    #     approach is unpenalised.  turn_reward_full_fingertip_speed is no longer
-    #     used by the gate (the rolling factor self-normalises to the handle speed).
-    #   * turn_reward_contact_distance 0.06->0.035 and pad/upright ramps unchanged in
-    #     spirit but stretched over four phases.
+    # Two fixes, applied together:
+    #   1) The count gate is now SOFT (base cfg `contact_count_soft_width`, see
+    #      _compute_contact_gate): one finger short of the target keeps partial turn
+    #      reward, so raising min_fingers DE-RATES the grasp instead of zeroing it.
+    #   2) This schedule is gentle + continuous.  P0 is UNCHANGED (eval proved it
+    #      reaches a genuine ~3-finger rolling grasp: NetTurns/ep +1.14, force in
+    #      target, survives a 4x rotation-damping stress test).  P1 only NUDGES it —
+    #      min_fingers stays 3 (recruit the 4th/5th via the ramped abandon penalty,
+    #      which has a gradient, not via a gate-count step), load +0.15, a soft pad
+    #      threshold 0.15, light proximal 0.5, abandon x2 (not x4), and the dense
+    #      contact/near bootstrap reward only TAPERS (not halved the instant the
+    #      penalties switch on).  min_fingers reaches 4 at P2 and 5 at P3, where the
+    #      soft gate turns each into a smooth pull toward the next finger.
+    #
+    # Per-axis ramps (P0 / P1 / P2 / P3):
+    #   screwdriver_load_scale          0.6 / 0.75 / 1.0  / 1.0   (full load at P2)
+    #   turn_reward_min_contact_fingers 3   / 3    / 4    / 4     (soft-gated; capped at 4)
+    #   pad_facing_cos_threshold        0.0 / 0.15 / 0.35 / 0.5
+    #   turn_reward_min_fingertip_speed 0.0 / 0.004/ 0.008/ 0.01  (anti-noise floor)
+    #   reward_proximal_penalty_weight  0.0 / 0.5  / 2.0  / 3.5
+    #   reward_finger_abandon_weight    5   / 10   / 20   / 30    (drives recruitment)
+    #   reward_contact_force_weight     0.3 / 0.5  / 0.7  / 0.8   (anti-crush)
+    #   reward_contact_weight           0.6 / 0.45 / 0.25 / 0.12  (dense bootstrap)
+    #   near_reward_weight              0.8 / 0.6  / 0.35 / 0.18
+    #   reward_turn_weight              120 / 140  / 170  / 200
+    #   turn_reward_contact_distance    0.07/ 0.07 / 0.07 / 0.07  (LOOSE+HELD; grasp sits 0.039-0.064)
+    #   upright_termination_threshold   1.8 / 1.5  / 1.2  / 1.0
+    #   episode_length_s                30  / 40   / 50   / 60
     curriculum_phases: list[CurriculumPhaseCfg] = field(
         default_factory=lambda: [
             CurriculumPhaseCfg(
                 # --- P0: reach & grasp; contact gate ON, real load from step 0 ---
                 step_start=0,
                 reward_turn_weight=120.0,
-                turn_reward_contact_distance=0.06,
-                # 3 in P0 (ramps 4 -> 4 -> 5 in later phases): keep the bar low so the
-                # policy can FIRST discover a grip + turn; the abandon penalty
-                # (ramped) + the min-fingers ramp engage the spare fingers later.
+                turn_reward_contact_distance=0.07,
+                # 3 in P0 and P1 (ramps to 4 at P2, capped there): keep the bar low
+                # while the policy discovers a grip + turn; the ramped abandon penalty
+                # (not a gate-count step) recruits the spare finger, and the SOFT count
+                # gate makes the 3->4 increase a smooth de-rating, not a cliff.
                 turn_reward_min_contact_fingers=3,
                 turn_reward_min_fingertip_speed=0.0,
                 turn_reward_full_fingertip_speed=0.03,
@@ -139,56 +144,70 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
                 upright_termination_threshold=1.8,
             ),
             CurriculumPhaseCfg(
-                # --- P1: require genuine rolling; engage a 4th finger ---
+                # --- P1: GENTLE nudge of the working P0 grasp (was the cliff) ---
+                # min_fingers stays 3; recruit via the abandon penalty.  Every change
+                # here is small so the +14.5k P0 grasp is perturbed, not destroyed.
                 step_start=40_000_000,
-                reward_turn_weight=160.0,
-                turn_reward_contact_distance=0.05,
+                reward_turn_weight=140.0,
+                turn_reward_contact_distance=0.07,
+                turn_reward_min_contact_fingers=3,
+                turn_reward_min_fingertip_speed=0.004,
+                turn_reward_full_fingertip_speed=0.04,
+                pad_facing_cos_threshold=0.15,
+                screwdriver_load_scale=0.75,
+                reward_proximal_penalty_weight=0.5,
+                reward_contact_force_weight=0.5,
+                reward_finger_abandon_weight=10.0,
+                # Dense bootstrap reward only tapers (was halved 0.6->0.3 here, which
+                # removed the gradient back to grasping just as penalties switched on).
+                reward_contact_weight=0.45,
+                near_reward_weight=0.6,
+                episode_length_s=40.0,
+                upright_termination_threshold=1.5,
+            ),
+            CurriculumPhaseCfg(
+                # --- P2: full screw load; now demand the 4th finger (soft-gated) ---
+                step_start=90_000_000,
+                reward_turn_weight=170.0,
+                # 0.07 (LOOSENED from the old 0.04).  diag_fingers.py showed the genuine
+                # 4-finger grasp sits 0.039 (thumb) .. 0.064 (ring) from the axis, so a
+                # tight gate EXCLUDES fingers that already grip (0.05->0.04 dropped the
+                # count 3->1 and collapsed run 17-09-13).  0.07 counts all four; the
+                # force + pad + rolling gates still enforce quality.
+                turn_reward_contact_distance=0.07,
                 turn_reward_min_contact_fingers=4,
                 turn_reward_min_fingertip_speed=0.008,
-                turn_reward_full_fingertip_speed=0.04,
-                pad_facing_cos_threshold=0.3,
-                screwdriver_load_scale=0.8,
+                turn_reward_full_fingertip_speed=0.045,
+                pad_facing_cos_threshold=0.35,
+                screwdriver_load_scale=1.0,
                 reward_proximal_penalty_weight=2.0,
                 reward_contact_force_weight=0.7,
                 reward_finger_abandon_weight=20.0,
-                reward_contact_weight=0.3,
-                near_reward_weight=0.4,
-                episode_length_s=45.0,
-                upright_termination_threshold=1.4,
-            ),
-            CurriculumPhaseCfg(
-                # --- P2: full screw load (but contact/upright not yet strictest) ---
-                step_start=90_000_000,
-                reward_turn_weight=180.0,
-                turn_reward_contact_distance=0.04,
-                turn_reward_min_contact_fingers=4,
-                turn_reward_min_fingertip_speed=0.01,
-                turn_reward_full_fingertip_speed=0.045,
-                pad_facing_cos_threshold=0.4,
-                screwdriver_load_scale=1.0,
-                reward_proximal_penalty_weight=3.0,
-                reward_contact_force_weight=0.8,
-                reward_finger_abandon_weight=30.0,
-                reward_contact_weight=0.15,
-                near_reward_weight=0.25,
-                episode_length_s=55.0,
+                reward_contact_weight=0.25,
+                near_reward_weight=0.35,
+                episode_length_s=50.0,
                 upright_termination_threshold=1.2,
             ),
             CurriculumPhaseCfg(
-                # --- P3: final — strict pad + tight contact; demand 5-of-5 ---
+                # --- P3: final — strict pad; demand a 4th finger (capped at 4) ---
+                # contact_distance 0.07 (loosened, same as P2 — counts the real grasp).
+                # min_fingers capped at 4 (not 5): diag_fingers.py shows only the MIDDLE
+                # finger truly parks (~0.106 m); the other four (thumb/index/ring/pinky)
+                # grip with force.  Engaging middle too (->5) is a separate problem
+                # (likely geometry: index already occupies that side of the handle).
                 step_start=150_000_000,
                 reward_turn_weight=200.0,
-                turn_reward_contact_distance=0.035,
-                turn_reward_min_contact_fingers=5,
+                turn_reward_contact_distance=0.07,
+                turn_reward_min_contact_fingers=4,
                 turn_reward_min_fingertip_speed=0.01,
                 turn_reward_full_fingertip_speed=0.05,
                 pad_facing_cos_threshold=0.5,
                 screwdriver_load_scale=1.0,
-                reward_proximal_penalty_weight=4.0,
+                reward_proximal_penalty_weight=3.5,
                 reward_contact_force_weight=0.8,
                 reward_finger_abandon_weight=30.0,
-                reward_contact_weight=0.1,
-                near_reward_weight=0.15,
+                reward_contact_weight=0.12,
+                near_reward_weight=0.18,
                 episode_length_s=60.0,
                 upright_termination_threshold=1.0,
             ),
