@@ -6,9 +6,15 @@ common failure modes:
 
   - Oscillation ratio > 0.3  → net turns ≪ forward turns; back-and-forth.
   - Upright gate mean < 0.3  → screwdriver is consistently tilting.
-  - Contact gate mean < 0.1  → fingers are not staying near the handle.
+  - Contact gate mean < 0.1  → not enough drive fingers engaged.
   - Rev-vel > Fwd-vel        → policy is pushing backward more than forward.
-  - Proximal cost > 0        → palm/knuckle contacts occurring (Phase 2+).
+  - Idle count > 0           → some finger is hanging unused.
+  - WrongSurf > 0            → back/knuckle/palm contact with the screwdriver.
+
+The contact / reward sections adapt to the hand: the force-based LinkerL20 task
+emits ``eval_in_window`` (and friends) and gets the force-window layout; the
+distance/pad-based Allegro task emits ``eval_pad_gate`` and keeps its layout.
+Missing keys render as ``nan`` (``_mean`` returns NaN), so either hand is safe.
 """
 
 from __future__ import annotations
@@ -92,20 +98,14 @@ class RotationTrainingLogger:
         u_gate     = m("eval_upright_gate")
         c_gate     = m("eval_contact_gate")
         b_gate     = m("eval_binary_gate")
-        mot_gate   = m("eval_motion_gate")
-        pad_fac    = m("eval_pad_gate")
-        pad_cos    = m("eval_pad_cos")
         cforce     = m("eval_contact_force")
         turn_vel   = m("eval_fwd_vel")
         rev_vel    = m("eval_rev_vel")
-        tip_dist   = m("eval_min_tip_dist")
         phase      = m("eval_curriculum_phase")
         num_phases = m("eval_num_phases")
 
         turn_rew   = m("eval_turn_reward")
         rev_cost   = m("eval_reverse_cost")
-        near_rew   = m("eval_near_reward")
-        prox_cost  = m("eval_proximal_cost")
         up_cost    = m("eval_upright_cost")
         act_cost   = m("eval_action_cost")
         total_rew  = m("eval_total_reward")
@@ -146,29 +146,85 @@ class RotationTrainingLogger:
                 f"UprightGate {_colour(u_gate, 0.3, 0.8):>14}{tilt_warn}"
             ),
             f"  {_W}Contact quality{_N}",
-            (
-                f"    ContactGate {_colour(c_gate, 0.2, 0.6):>14}  "
-                f"BinaryGate {_colour(b_gate, 0.2, 0.7):>14}  "
-                f"MotionGate {_colour(mot_gate, 0.2, 0.7):>14}{cont_warn}"
-            ),
-            (
-                f"    PadFactor {_colour(pad_fac, 0.2, 0.7):>14}  "
-                f"PadCos {_colour(pad_cos, 0.0, 0.5):>16}  "
-                f"ContactForce {cforce:>7.3f}N"
-            ),
-            (
-                f"    MinTipDist {_colour(tip_dist, 0.08, 0.035, invert=True):>13}  "
-                f"FwdVel {_colour(turn_vel, 0.1, 0.5):>14}  "
-                f"RevVel {_colour(rev_vel, 0.4, 0.1, invert=True):>14}{rev_warn}"
-            ),
-            f"  {_W}Reward breakdown{_N}",
-            (
-                f"    TurnRew {turn_rew:>10.3f}  RevCost {rev_cost:>9.3f}  "
-                f"NearRew {near_rew:>9.3f}  ProxCost {prox_cost:>8.3f}"
-            ),
-            (
-                f"    UprightCost {up_cost:>8.3f}  ActionCost {act_cost:>7.3f}"
-            ),
+        ]
+
+        # Force-based (LinkerL20) vs distance/pad-based (Allegro) contact layout.
+        if "eval_in_window" in extras:
+            in_win    = m("eval_in_window")
+            drive_cnt = m("eval_drive_count")
+            idle_cnt  = m("eval_idle_count")
+            cap_force = m("eval_index_cap_force")
+            wrong_f   = m("eval_wrong_surface_force")
+            max_dev   = m("eval_max_joint_dev")
+            idle_warn  = " ⚠ IDLE-FINGER"  if idle_cnt > 0.5     else ""
+            wrong_warn = " ⚠ WRONG-SURF"   if wrong_f  > 0.5     else ""
+            lines += [
+                (
+                    f"    ContactGate {_colour(c_gate, 0.2, 0.6):>14}  "
+                    f"InWindow {_colour(in_win, 0.2, 0.6):>14}  "
+                    f"DriveCnt {_colour(drive_cnt, 1.5, 3.0):>14}{cont_warn}"
+                ),
+                (
+                    f"    ContactForce {cforce:>7.3f}N  "
+                    f"IndexCapF {cap_force:>8.3f}N  "
+                    f"IdleCnt {_colour(idle_cnt, 0.5, 0.0, invert=True):>14}{idle_warn}"
+                ),
+                (
+                    f"    WrongSurf {_colour(wrong_f, 0.5, 0.0, invert=True):>13}N  "
+                    f"MaxJointDev {max_dev:>7.3f}rad{wrong_warn}"
+                ),
+                (
+                    f"    FwdVel {_colour(turn_vel, 0.1, 0.5):>14}  "
+                    f"RevVel {_colour(rev_vel, 0.4, 0.1, invert=True):>14}{rev_warn}"
+                ),
+                f"  {_W}Reward breakdown{_N}",
+                (
+                    f"    TurnRew {turn_rew:>9.3f}  IdxCap {m('eval_index_cap_reward'):>8.3f}  "
+                    f"Drive {m('eval_drive_reward'):>8.3f}  Grip {m('eval_grip_reward'):>8.3f}"
+                ),
+                (
+                    f"    RevCost {rev_cost:>9.3f}  Excess {m('eval_excess_cost'):>8.3f}  "
+                    f"WrongC {m('eval_wrong_surface_cost'):>8.3f}  HomeDev {m('eval_home_dev_cost'):>7.3f}"
+                ),
+                (
+                    f"    UprightCost {up_cost:>8.3f}  IdleCost {m('eval_idle_cost'):>8.3f}  "
+                    f"ActionCost {act_cost:>7.3f}"
+                ),
+            ]
+        else:
+            mot_gate = m("eval_motion_gate")
+            pad_fac  = m("eval_pad_gate")
+            pad_cos  = m("eval_pad_cos")
+            tip_dist = m("eval_min_tip_dist")
+            near_rew = m("eval_near_reward")
+            prox_cost = m("eval_proximal_cost")
+            lines += [
+                (
+                    f"    ContactGate {_colour(c_gate, 0.2, 0.6):>14}  "
+                    f"BinaryGate {_colour(b_gate, 0.2, 0.7):>14}  "
+                    f"MotionGate {_colour(mot_gate, 0.2, 0.7):>14}{cont_warn}"
+                ),
+                (
+                    f"    PadFactor {_colour(pad_fac, 0.2, 0.7):>14}  "
+                    f"PadCos {_colour(pad_cos, 0.0, 0.5):>16}  "
+                    f"ContactForce {cforce:>7.3f}N"
+                ),
+                (
+                    f"    MinTipDist {_colour(tip_dist, 0.08, 0.035, invert=True):>13}  "
+                    f"FwdVel {_colour(turn_vel, 0.1, 0.5):>14}  "
+                    f"RevVel {_colour(rev_vel, 0.4, 0.1, invert=True):>14}{rev_warn}"
+                ),
+                f"  {_W}Reward breakdown{_N}",
+                (
+                    f"    TurnRew {turn_rew:>10.3f}  RevCost {rev_cost:>9.3f}  "
+                    f"NearRew {near_rew:>9.3f}  ProxCost {prox_cost:>8.3f}"
+                ),
+                (
+                    f"    UprightCost {up_cost:>8.3f}  ActionCost {act_cost:>7.3f}"
+                ),
+            ]
+
+        lines += [
             f"{_W}{'─'*72}{_N}",
             (
                 f"  {_W}TOTAL REWARD{_N} {_colour(total_rew, 0.0, 1.0):>12}"
@@ -181,7 +237,7 @@ class RotationTrainingLogger:
     def _header() -> str:
         return (
             f"\n{'='*72}\n"
-            f"  ScrewdriverRL — Allegro Continuous Rotation Training\n"
+            f"  ScrewdriverRL — Continuous Screwdriver Rotation Training\n"
             f"  Colour guide: {_G}good{_N}  {_Y}ok{_N}  {_R}bad{_N}\n"
             f"  OscRatio < 0.15 = good  |  UprightGate > 0.8 = good\n"
             f"  ContactGate > 0.6 = good  |  RevVel < FwdVel = good\n"

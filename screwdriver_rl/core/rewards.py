@@ -92,6 +92,53 @@ def motion_gate(
     return ((speed - min_speed) / (full_speed - min_speed)).clamp(0.0, 1.0)
 
 
+def force_window(
+    force: torch.Tensor,
+    f_min: float,
+    f_lo: float,
+    f_hi: float,
+    f_max: float,
+) -> torch.Tensor:
+    """Trapezoidal "good contact pressure" score in ``[0, 1]``.
+
+    The single shared notion of acceptable fingertip contact force: a finger that
+    is barely touching (``< f_min``) and a finger that is crushing the handle
+    (``> f_max``) both score 0; the flat top ``[f_lo, f_hi]`` is the ideal band.
+
+        0                              for force <= f_min
+        ramp 0 -> 1 over [f_min, f_lo]
+        1                              for f_lo <= force <= f_hi
+        ramp 1 -> 0 over [f_hi, f_max]
+        0                              for force >= f_max
+
+    Works elementwise on any shape (e.g. ``(N, n_fingers)``).
+    """
+    rise = ((force - f_min) / max(f_lo - f_min, 1e-6)).clamp(0.0, 1.0)
+    fall = ((f_max - force) / max(f_max - f_hi, 1e-6)).clamp(0.0, 1.0)
+    return torch.minimum(rise, fall)
+
+
+def excess_force(force: torch.Tensor, f_max: float) -> torch.Tensor:
+    """Per-element overshoot above ``f_max`` (``relu(force - f_max)``).
+
+    The crush penalty: too-hard contact destabilises the grasp (free-spin /
+    flickering fingers), so the force above the safe ceiling is penalised.
+    """
+    return (force - f_max).clamp(min=0.0)
+
+
+def soft_count_gate(scores: torch.Tensor, target: float) -> torch.Tensor:
+    """Smooth "at least ``target`` fingers engaged" gate in ``[0, 1]``.
+
+    ``scores`` is a per-finger engagement in ``[0, 1]`` of shape ``(N, K)``; the
+    gate is ``(scores.sum(-1) / target).clamp(0, 1)`` so it ramps up as more
+    fingers engage and saturates once the required number are engaged.  Unlike a
+    hard count it is differentiable, so the policy gets gradient toward engaging
+    one more finger.
+    """
+    return (scores.sum(dim=-1) / max(float(target), 1e-6)).clamp(0.0, 1.0)
+
+
 def joint_limit_barrier(
     q: torch.Tensor,
     lower: torch.Tensor,
@@ -108,6 +155,23 @@ def joint_limit_barrier(
     lower_violation = (lower + margin - q).clamp(min=0.0)
     upper_violation = (q - (upper - margin)).clamp(min=0.0)
     return ((lower_violation + upper_violation) / margin).sum(dim=-1)
+
+
+def home_deviation(
+    q: torch.Tensor, home: torch.Tensor, deadband: float = 0.0
+) -> torch.Tensor:
+    """Per-row quadratic "stay near the initial posture" cost.
+
+    For each joint, the absolute deviation from its ``home`` (pregrasp) value
+    beyond a free ``deadband`` is squared and summed:
+    ``sum_j relu(|q_j - home_j| - deadband) ** 2``.  The deadband lets the small
+    finger motions that roll the handle go unpenalised, while large excursions
+    (flailing away from the working grip) are penalised quadratically.
+
+    ``q`` and ``home`` are ``(N, D)``; returns ``(N,)``.
+    """
+    dev = ((q - home).abs() - deadband).clamp(min=0.0)
+    return (dev ** 2).sum(dim=-1)
 
 
 # ---------------------------------------------------------------------------
