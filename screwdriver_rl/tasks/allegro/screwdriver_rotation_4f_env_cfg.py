@@ -65,15 +65,16 @@ class AllegroScrewdriverRotation4FEnvCfg(AllegroScrewdriverRotationEnvCfg):
         "allegro_hand_hitosashi_finger_finger_joint_2": 0.60,
         "allegro_hand_hitosashi_finger_finger_joint_3": 0.60,
         # middle (naka) — near-original, slightly more curl to seat on the side
-        "allegro_hand_naka_finger_finger_joint_4": -0.07,
-        "allegro_hand_naka_finger_finger_joint_5": 0.53,
+        "allegro_hand_naka_finger_finger_joint_4": -0.05,
+        "allegro_hand_naka_finger_finger_joint_5": 0.52,
         "allegro_hand_naka_finger_finger_joint_6": 0.93,
         "allegro_hand_naka_finger_finger_joint_7": 0.92,
-        # ring (kusuri) — added alongside middle on the same side
-        "allegro_hand_kusuri_finger_finger_joint_8": 0.24,
-        "allegro_hand_kusuri_finger_finger_joint_9": 0.89,
-        "allegro_hand_kusuri_finger_finger_joint_10": 0.70,
-        "allegro_hand_kusuri_finger_finger_joint_11": 0.98,
+        # ring (kusuri) — same side as middle, splayed + curled so its links
+        # do NOT collide with the middle finger (verified by VTK triangle test)
+        "allegro_hand_kusuri_finger_finger_joint_8": 0.12,
+        "allegro_hand_kusuri_finger_finger_joint_9": 0.94,
+        "allegro_hand_kusuri_finger_finger_joint_10": 0.73,
+        "allegro_hand_kusuri_finger_finger_joint_11": 0.99,
         # thumb (oya) — near-original (+0.01); opposes from the other side
         "allegro_hand_oya_finger_joint_12": 1.21,
         "allegro_hand_oya_finger_joint_13": 0.30,
@@ -88,8 +89,8 @@ class AllegroScrewdriverRotation4FEnvCfg(AllegroScrewdriverRotationEnvCfg):
     pregrasp_positions: dict[str, tuple[float, ...]] = field(
         default_factory=lambda: {
             "index":  (0.10, 0.60, 0.60, 0.60),
-            "middle": (-0.07, 0.53, 0.93, 0.92),
-            "ring":   (0.24, 0.89, 0.70, 0.98),
+            "middle": (-0.05, 0.52, 0.93, 0.92),
+            "ring":   (0.12, 0.94, 0.73, 0.99),
             "thumb":  (1.21, 0.30, 0.30, 1.21),
         }
     )
