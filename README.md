@@ -19,6 +19,7 @@ Every entry script (`train.py`, `play.py`, `eval.py`, `calibrate_pad.py`, `rende
 |---|---|---|---|---|---|---|
 | `Isaac-Allegro-Screwdriver-Rotation-Direct-v0` | Allegro (right) | index, middle, thumb (3) | 12 | 27 / 17 | −z (CCW from above) | on |
 | `Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0` | Linker Hand L20 (left) | index, middle, ring, pinky, thumb (5) | 16 | 35 / 19 | +z (mirror of Allegro) | on (pair-filtered) |
+| `Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0` | Linker Hand L20 (left, top-down grasp) | index, middle, ring, pinky, thumb (5) | 16 | 35 / 19 | +z (mirror of Allegro) | on (pair-filtered) |
 
 `train.py`/`play.py`/`eval.py`/`calibrate_pad.py` **default to the Allegro task** if `--task` is omitted.
 
@@ -57,6 +58,9 @@ python train.py --task Isaac-Allegro-Screwdriver-Rotation-Direct-v0 --stage 1 --
 
 # Linker Hand L20
 python train.py --task Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0 --stage 1 --num_envs 2048 --headless
+
+# Linker Hand L20 — alternate top-down initial grasp
+python train.py --task Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0 --stage 1 --num_envs 2048 --headless
 
 # Resume from a checkpoint
 python train.py --task <id> --stage 1 --headless \
