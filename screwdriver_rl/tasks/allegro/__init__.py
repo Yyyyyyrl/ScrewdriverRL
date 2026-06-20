@@ -2,6 +2,7 @@
 
 Registers:
   Isaac-Allegro-Screwdriver-Rotation-Direct-v0
+  Isaac-Allegro-4F-Screwdriver-Rotation-Direct-v0
 """
 
 import gymnasium as gym
@@ -20,6 +21,22 @@ gym.register(
         "env_cfg_entry_point": (
             "screwdriver_rl.tasks.allegro."
             "screwdriver_rotation_env_cfg:AllegroScrewdriverRotationEnvCfg"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Allegro-4F-Screwdriver-Rotation-Direct-v0",
+    entry_point=(
+        "screwdriver_rl.tasks.allegro."
+        "screwdriver_rotation_env:AllegroScrewdriverRotationEnv"
+    ),
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "screwdriver_rl.tasks.allegro."
+            "screwdriver_rotation_4f_env_cfg:AllegroScrewdriverRotation4FEnvCfg"
         ),
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
