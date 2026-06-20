@@ -232,10 +232,11 @@ def _register_rl_games(env, agent_cfg: dict) -> None:
 
 
 def run_stage1(env_cfg, log_dir: str) -> None:
-    # Enable asymmetric observations: actor sees policy obs (27-D),
-    # critic sees privileged obs (17-D) via RL-Games central_value_config.
+    # Enable asymmetric observations: the actor sees the policy obs, the critic
+    # additionally sees the privileged obs via RL-Games central_value_config.
+    # (Dims are hand-specific: Allegro 27/17, LinkerL20 35/19.)
     env_cfg.asymmetric_obs = True
-    env_cfg.state_space = env_cfg.privileged_obs_dim  # 17
+    env_cfg.state_space = env_cfg.privileged_obs_dim
 
     env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.video else None)
     if args.init_global_steps > 0:
@@ -265,11 +266,13 @@ def run_stage1(env_cfg, log_dir: str) -> None:
         agent_cfg["params"]["load_checkpoint"] = True
         agent_cfg["params"]["load_path"] = args.checkpoint
 
+    _policy_dim = int(env_cfg.observation_space.shape[0])
+    _priv_dim = int(env_cfg.privileged_obs_dim)
     print(
         f"\n[Stage 1] Task        : {args.task}"
         f"\n[Stage 1] Num envs    : {env.unwrapped.num_envs}"
         f"\n[Stage 1] Log dir     : {log_dir}"
-        f"\n[Stage 1] Actor obs   : 27-D (policy)   Critic obs: 17-D (privileged)"
+        f"\n[Stage 1] Actor obs   : {_policy_dim}-D (policy)   Critic obs: {_priv_dim}-D (privileged)"
         + (f"\n[Stage 1] Resume from : {args.checkpoint}" if args.checkpoint else "")
         + "\n",
         flush=True,

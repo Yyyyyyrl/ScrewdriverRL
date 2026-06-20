@@ -9,6 +9,10 @@ Usage
 # Visual playback (16 envs, opens viewport)
 python play.py --checkpoint runs/Isaac-Allegro-Screwdriver-Rotation-Direct-v0/nn/allegro_screwdriver_rotation.pth
 
+# Linker Hand L20 (pass its task id)
+python play.py --task Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0 \
+    --checkpoint runs/Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0/nn/linker_l20_screwdriver_rotation.pth
+
 # Headless stats collection (512 envs, no window)
 python play.py --checkpoint <path> --num_envs 512 --headless --num_episodes 20
 

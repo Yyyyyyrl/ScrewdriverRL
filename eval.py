@@ -300,13 +300,21 @@ def main() -> None:
 
     device = base_env.device
 
-    # Per-step streaming stats.
+    # Per-step streaming stats.  Superset across hands; whichever the running task
+    # does not emit simply stays empty (reported as nan) and is skipped in the
+    # layout branch below.
     step_keys = [
+        # shared
         "eval_fwd_vel", "eval_rev_vel", "eval_tilt_norm", "eval_upright_gate",
-        "eval_contact_gate", "eval_binary_gate", "eval_motion_gate",
-        "eval_pad_gate", "eval_pad_cos",
-        "eval_contact_count", "eval_avg_contact_speed", "eval_min_tip_dist",
+        "eval_contact_gate", "eval_binary_gate",
         "eval_total_reward", "eval_turn_reward",
+        # force-based contact (LinkerL20)
+        "eval_drive_count", "eval_in_window", "eval_contact_force",
+        "eval_index_cap_force", "eval_idle_count", "eval_wrong_surface_force",
+        "eval_max_joint_dev",
+        # distance/pad-based contact (Allegro)
+        "eval_motion_gate", "eval_pad_gate", "eval_pad_cos",
+        "eval_contact_count", "eval_avg_contact_speed", "eval_min_tip_dist",
     ]
     stats = {k: _RunningStat(device) for k in step_keys}
 
@@ -395,12 +403,23 @@ def main() -> None:
     print("  Contact")
     print(line("ContactGate", "eval_contact_gate"))
     print(line("BinaryGate", "eval_binary_gate"))
-    print(line("MotionGate", "eval_motion_gate"))
-    print(line("PadGate", "eval_pad_gate"))
-    print(line("PadCos", "eval_pad_cos"))
-    print(line("ContactCount", "eval_contact_count"))
-    print(line("AvgContactSpd", "eval_avg_contact_speed"))
-    print(line("MinTipDist (m)", "eval_min_tip_dist"))
+    # Force-based (LinkerL20) vs distance/pad-based (Allegro) contact diagnostics.
+    force_based = not math.isnan(stats["eval_in_window"].result()[0])
+    if force_based:
+        print(line("DriveCount", "eval_drive_count", "{:.2f}"))
+        print(line("InWindow", "eval_in_window"))
+        print(line("ContactForce N", "eval_contact_force", "{:.3f}"))
+        print(line("IndexCapForce N", "eval_index_cap_force", "{:.3f}"))
+        print(line("IdleCount", "eval_idle_count", "{:.2f}"))
+        print(line("WrongSurf N", "eval_wrong_surface_force", "{:.3f}"))
+        print(line("MaxJointDev rad", "eval_max_joint_dev", "{:.3f}"))
+    else:
+        print(line("MotionGate", "eval_motion_gate"))
+        print(line("PadGate", "eval_pad_gate"))
+        print(line("PadCos", "eval_pad_cos"))
+        print(line("ContactCount", "eval_contact_count"))
+        print(line("AvgContactSpd", "eval_avg_contact_speed"))
+        print(line("MinTipDist (m)", "eval_min_tip_dist"))
 
     # Episode-level outcomes.
     if ep_net_turns:
@@ -432,7 +451,7 @@ def main() -> None:
     fwd_out = coast["fwd_out"].item() / n_out if n_out else float("nan")
     frac_in = n_in / (n_in + n_out) if (n_in + n_out) else float("nan")
     print(f"\n  Reward-validity (coasting probe)")
-    print(f"    Steps with >=2 fingertips in contact : {frac_in*100:5.1f}%")
+    print(f"    Steps with contact gate open (binary): {frac_in*100:5.1f}%")
     print(f"    Mean FwdVel  WHILE in contact        : {fwd_in:+.3f} rad/s")
     if n_out > 0:
         print(f"    Mean FwdVel  WITHOUT contact (coast) : {fwd_out:+.3f} rad/s")
