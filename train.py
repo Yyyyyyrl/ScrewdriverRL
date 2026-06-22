@@ -283,7 +283,19 @@ def run_stage1(env_cfg, log_dir: str) -> None:
     runner = Runner(observer)
     runner.load(agent_cfg)
     runner.reset()
-    runner.run({"train": True, "play": False, "sigma": None})
+    # NOTE: this rl_games version restores weights ONLY from the "checkpoint" key
+    # in the run() args dict (see rl_games.torch_runner._restore); the
+    # params["load_checkpoint"]/["load_path"] set above are ignored on this path.
+    # Pass the checkpoint here so --checkpoint actually resumes instead of
+    # silently training from scratch.
+    runner.run(
+        {
+            "train": True,
+            "play": False,
+            "sigma": None,
+            "checkpoint": args.checkpoint,
+        }
+    )
 
     # Save the final-phase checkpoint: the last curriculum phase has no
     # transition to trigger on, so capture it now that training has ended.

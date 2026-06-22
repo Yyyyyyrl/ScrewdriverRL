@@ -11,10 +11,11 @@ common failure modes:
   - Idle count > 0           → some finger is hanging unused.
   - WrongSurf > 0            → back/knuckle/palm contact with the screwdriver.
 
-The contact / reward sections adapt to the hand: the force-based LinkerL20 task
-emits ``eval_in_window`` (and friends) and gets the force-window layout; the
-distance/pad-based Allegro task emits ``eval_pad_gate`` and keeps its layout.
-Missing keys render as ``nan`` (``_mean`` returns NaN), so either hand is safe.
+The body adapts per task via the ``eval_in_window`` signature key in ``extras``
+(see ``_render_body``): the force-window LinkerL20 layout when present, otherwise
+the distance/motion-gated Allegro layout.  The shared frame (rule + Epoch line +
+TOTAL REWARD footer) is task-independent.  Missing keys render as ``nan``
+(``_mean`` returns NaN), so any task is safe.
 """
 
 from __future__ import annotations
@@ -91,30 +92,10 @@ class RotationTrainingLogger:
             v = extras.get(key)
             return _mean(v) if isinstance(v, torch.Tensor) else float("nan")
 
-        fwd_turns = m("eval_total_turns")
-        net_turns  = m("eval_net_turns")
-        osc_ratio  = m("eval_osc_ratio")
-        tilt_norm  = m("eval_tilt_norm")
-        u_gate     = m("eval_upright_gate")
-        c_gate     = m("eval_contact_gate")
-        b_gate     = m("eval_binary_gate")
-        cforce     = m("eval_contact_force")
-        turn_vel   = m("eval_fwd_vel")
-        rev_vel    = m("eval_rev_vel")
+        # ---- Shared frame scalars ----
         phase      = m("eval_curriculum_phase")
         num_phases = m("eval_num_phases")
-
-        turn_rew   = m("eval_turn_reward")
-        rev_cost   = m("eval_reverse_cost")
-        up_cost    = m("eval_upright_cost")
-        act_cost   = m("eval_action_cost")
         total_rew  = m("eval_total_reward")
-
-        # Failure-mode flags
-        osc_warn  = " ⚠ OSCILLATION"   if osc_ratio > 0.35  else ""
-        tilt_warn = " ⚠ TILT"          if tilt_norm > 0.4   else ""
-        cont_warn = " ⚠ NO-CONTACT"    if b_gate < 0.15     else ""
-        rev_warn  = " ⚠ BACKWARD"      if rev_vel > turn_vel else ""
 
         # ``phase``/``num_phases`` arrive as floats (env emits a 1-indexed phase
         # number and the phase count).  NaN means the key was missing.
@@ -125,7 +106,8 @@ class RotationTrainingLogger:
         else:
             phase_str = "Phase ?"
 
-        lines = [
+        # ---- Shared frame: top rule + Epoch line, TOTAL REWARD footer ----
+        top = [
             f"{_W}{'─'*72}{_N}",
             (
                 f"  {_B}Epoch{_N} {epoch:>8,}  "
@@ -134,6 +116,51 @@ class RotationTrainingLogger:
                 f"{_B}SPS{_N} {sps:>7,.0f}  "
                 f"{_B}Curriculum{_N} {_W}{phase_str}{_N}"
             ),
+        ]
+        footer = [
+            f"{_W}{'─'*72}{_N}",
+            (
+                f"  {_W}TOTAL REWARD{_N} {_colour(total_rew, 0.0, 1.0):>12}"
+                f"   {_B}(mean per-step, Phase {int(phase) if phase == phase else '?'}){_N}"
+            ),
+        ]
+
+        # ---- Task-adaptive body: LinkerL20 force-window vs Allegro distance gate ----
+        body = self._render_body(m, extras)
+
+        print("\n".join(top + body + footer), flush=True)
+
+    # ------------------------------------------------------------------
+    # Task-adaptive body renderer
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _render_body(m, extras: dict[str, Any]) -> list[str]:
+        """Per-task body: the force-window LinkerL20 layout (``eval_in_window``)
+        and the distance/motion-gated Allegro layout (otherwise)."""
+        fwd_turns = m("eval_total_turns")
+        net_turns  = m("eval_net_turns")
+        osc_ratio  = m("eval_osc_ratio")
+        tilt_norm  = m("eval_tilt_norm")
+        u_gate     = m("eval_upright_gate")
+        c_gate     = m("eval_contact_gate")
+        b_gate     = m("eval_binary_gate")
+        cforce     = m("eval_contact_force")
+        turn_vel   = m("eval_fwd_vel")
+        rev_vel    = m("eval_rev_vel")
+
+        turn_rew   = m("eval_turn_reward")
+        rev_cost   = m("eval_reverse_cost")
+        up_cost    = m("eval_upright_cost")
+        act_cost   = m("eval_action_cost")
+
+        # Failure-mode flags
+        osc_warn  = " ⚠ OSCILLATION"   if osc_ratio > 0.35  else ""
+        tilt_warn = " ⚠ TILT"          if tilt_norm > 0.4   else ""
+        cont_warn = " ⚠ NO-CONTACT"    if b_gate < 0.15     else ""
+        rev_warn  = " ⚠ BACKWARD"      if rev_vel > turn_vel else ""
+
+        lines = [
             f"  {_W}Progress{_N}",
             (
                 f"    FwdTurns {_colour(fwd_turns, 0.0, 2.0):>14}  "
@@ -148,7 +175,7 @@ class RotationTrainingLogger:
             f"  {_W}Contact quality{_N}",
         ]
 
-        # Force-based (LinkerL20) vs distance/pad-based (Allegro) contact layout.
+        # Force-based (LinkerL20) vs distance/pad-based (legacy) contact layout.
         if "eval_in_window" in extras:
             in_win    = m("eval_in_window")
             drive_cnt = m("eval_drive_count")
@@ -193,8 +220,6 @@ class RotationTrainingLogger:
             ]
         else:
             mot_gate = m("eval_motion_gate")
-            pad_fac  = m("eval_pad_gate")
-            pad_cos  = m("eval_pad_cos")
             tip_dist = m("eval_min_tip_dist")
             near_rew = m("eval_near_reward")
             prox_cost = m("eval_proximal_cost")
@@ -203,11 +228,6 @@ class RotationTrainingLogger:
                     f"    ContactGate {_colour(c_gate, 0.2, 0.6):>14}  "
                     f"BinaryGate {_colour(b_gate, 0.2, 0.7):>14}  "
                     f"MotionGate {_colour(mot_gate, 0.2, 0.7):>14}{cont_warn}"
-                ),
-                (
-                    f"    PadFactor {_colour(pad_fac, 0.2, 0.7):>14}  "
-                    f"PadCos {_colour(pad_cos, 0.0, 0.5):>16}  "
-                    f"ContactForce {cforce:>7.3f}N"
                 ),
                 (
                     f"    MinTipDist {_colour(tip_dist, 0.08, 0.035, invert=True):>13}  "
@@ -223,15 +243,7 @@ class RotationTrainingLogger:
                     f"    UprightCost {up_cost:>8.3f}  ActionCost {act_cost:>7.3f}"
                 ),
             ]
-
-        lines += [
-            f"{_W}{'─'*72}{_N}",
-            (
-                f"  {_W}TOTAL REWARD{_N} {_colour(total_rew, 0.0, 1.0):>12}"
-                f"   {_B}(mean per-step, Phase {int(phase) if phase == phase else '?'}){_N}"
-            ),
-        ]
-        print("\n".join(lines), flush=True)
+        return lines
 
     @staticmethod
     def _header() -> str:
