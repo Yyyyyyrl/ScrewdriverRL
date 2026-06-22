@@ -106,14 +106,6 @@ class CurriculumPhaseCfg:
     turn_reward_full_fingertip_speed: float = 0.015
     """Fingertip speed at which the motion gate is fully open."""
 
-    # ---- Pad-facing gate ----
-    pad_facing_cos_threshold: float = 0.0
-    """Min cosine between a fingertip pad normal and the tip→handle direction
-    for that contact to count (only applied when ``cfg.require_pad_facing``).
-    Ramp from lenient (≤0: accept anything not actively back-facing, so there is
-    still gradient while the policy learns to approach) to strict (~0.5: within
-    60° of squarely facing the handle) in the final phase."""
-
     # ---- Screwdriver rotational load ----
     screwdriver_load_scale: float = 1.0
     """Multiplier on ``cfg.screwdriver_load_torque`` for this phase.  Ramp from
@@ -213,8 +205,7 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
 
     Subclasses MUST set the hand-specific fields (declared ``MISSING`` below):
     ``observation_space``, ``action_space``, ``fingers``, ``pregrasp_positions``,
-    ``fingertip_pad_axis_local``, ``privileged_obs_dim``, ``history_obs_dim``,
-    and ``robot_cfg``.
+    ``privileged_obs_dim``, ``history_obs_dim``, and ``robot_cfg``.
 
     Observation layout (per hand, D = num finger DOFs):
       policy:  [finger_q(D), cur_targets(D), screwdriver_euler(3)]
@@ -349,45 +340,11 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     than the Euler-z joint coordinate (which advances under precession)."""
 
     # ------------------------------------------------------------------
-    # Pad-facing contact gate
+    # Contact distance proxy
     # ------------------------------------------------------------------
-    require_pad_facing: bool = True
-    """Master switch for the pad-facing contact gate: a fingertip only counts
-    toward the turn-reward contact gate if its pad faces the handle.  Distance
-    alone is orientation-blind and is satisfied by back-/side-of-finger contact,
-    which does not transfer to hardware.  Per-phase strictness lives in
-    ``CurriculumPhaseCfg.pad_facing_cos_threshold``."""
-
-    fingertip_pad_axis_local: tuple[float, float, float] = MISSING
-    """Outward pad normal in the fingertip link local frame (hand-specific).
-    Recover it with ``calibrate_pad.py`` from the zero-action pregrasp."""
-
-    pad_facing_soft_width: float = 0.5
-    """Width of the soft pad-facing ramp (in cosine units) below the per-phase
-    ``pad_facing_cos_threshold``.  Full pad credit at cos ≥ threshold and zero
-    at cos ≤ threshold − width, linear between."""
-
     use_axis_contact_proxy: bool = True
     """Compute fingertip distances to the handle *axis segment* (handle
     origin → cap origin) instead of the handle body origin."""
-
-    # ------------------------------------------------------------------
-    # Fingertip contact-force gate (true touch)
-    # ------------------------------------------------------------------
-    use_contact_force_gate: bool = True
-    """AND the kinematic distance gate with a net-contact-force gate, so a
-    fingertip counts as "in contact" only when it is BOTH near the handle axis
-    AND registering real contact force.  This closes the "hover near the axis
-    without touching" exploit that lets the policy farm turn reward while the
-    handle creeps.  The env builds a :class:`~isaaclab.sensors.ContactSensor`
-    over the hand's fingertip bodies; this requires ``activate_contact_sensors``
-    on the hand spawn (set in the hand cfg).  Set False to fall back to the
-    distance-only gate and skip building the sensor (graceful degradation)."""
-
-    fingertip_contact_force_threshold: float = 0.05
-    """Net contact-force norm (N) above which a fingertip counts as touching.
-    Small but non-zero so light pad contact registers while sensor noise / no
-    contact does not.  Tune from ``eval_contact_force`` during bring-up."""
 
     # Action / finger regularisation (phase-independent)
     reward_action_weight: float = 0.25
@@ -442,7 +399,6 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
                 turn_reward_contact_distance=0.10,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.0,
-                pad_facing_cos_threshold=0.0,
                 screwdriver_load_scale=0.0,
                 reward_proximal_penalty_weight=0.0,
                 near_reward_weight=0.8,
@@ -456,7 +412,6 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
                 turn_reward_contact_distance=0.07,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.003,
-                pad_facing_cos_threshold=0.3,
                 screwdriver_load_scale=0.5,
                 reward_proximal_penalty_weight=3.0,
                 near_reward_weight=0.3,
@@ -470,7 +425,6 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
                 turn_reward_contact_distance=0.05,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.003,
-                pad_facing_cos_threshold=0.5,
                 screwdriver_load_scale=1.0,
                 reward_proximal_penalty_weight=5.0,
                 near_reward_weight=0.15,

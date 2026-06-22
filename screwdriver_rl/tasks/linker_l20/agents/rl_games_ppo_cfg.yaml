@@ -44,7 +44,10 @@ params:
     mini_epochs: 4
     learning_rate: 1e-4
     lr_schedule: adaptive
-    kl_threshold: 0.016
+    # Stability: tightened 0.016 -> 0.008 (see config block below) to match the
+    # actor KL band and stop the adaptive LR from ratcheting up during easy
+    # convergence.
+    kl_threshold: 0.008
     grad_norm: 1.0
     truncate_grads: True
     e_clip: 0.2
@@ -79,10 +82,17 @@ params:
     normalize_advantage: True
     gamma: 0.99
     tau: 0.95
-    learning_rate: 3e-4
+    # --- PPO stability (anti-collapse) ---
+    # The 21-06 Phase-2 run mastered the task (~15.7k reward, full episodes) then
+    # collapsed at iter ~290: the adaptive scheduler let LR ratchet to 5.85e-4
+    # during easy convergence, and a single 8-mini-epoch iteration overshot to
+    # KL 0.3 -> 0.92, destroying the policy. Fixes: lower base LR (3e-4 -> 1e-4),
+    # tighter KL band (0.016 -> 0.008) so the scheduler cuts harder / raises less,
+    # and half the per-iteration drift (mini_epochs 8 -> 4).
+    learning_rate: 1e-4
     lr_schedule: adaptive
     schedule_type: standard
-    kl_threshold: 0.016
+    kl_threshold: 0.008
     score_to_win: 100000
     max_epochs: 8000
     save_best_after: 100
@@ -94,7 +104,7 @@ params:
     e_clip: 0.2
     horizon_length: 32
     minibatch_size: 8192
-    mini_epochs: 8
+    mini_epochs: 4
     critic_coef: 4
     clip_value: True
     seq_length: 4
