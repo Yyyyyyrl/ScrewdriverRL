@@ -4,7 +4,7 @@ All shared task config (curriculum, domain randomisation, reward weights,
 screwdriver asset, simulation) lives in
 :class:`screwdriver_rl.tasks.base.ScrewdriverRotationEnvCfg`.  This module only
 overrides the Allegro-specific fields: the gym spaces, active fingers, pregrasp,
-RMA dims, fingertip pad axis, and the Allegro articulation.
+RMA dims, and the Allegro articulation.
 """
 
 from __future__ import annotations
@@ -49,52 +49,62 @@ class AllegroScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     fingers: tuple[str, ...] = ("index", "middle", "thumb")
     """3-finger configuration: 1–2 fingers stabilise, 1–2 push/reposition."""
 
-    # ---- Curriculum (Allegro-tuned; see CurriculumPhaseCfg for field docs) ----
-    # The Allegro hand drives the task with 3 active fingers (index/middle/thumb),
-    # so a 2-of-N contact gate is appropriate.  These were the original base
-    # values; they now live here so each hand owns its curriculum independently.
+    # ---- Reward (044e558 clean design; computed in the shared base _get_rewards) ----
+    # turn_reward × (distance+motion contact gate) × upright_gate + near + milestone
+    # − reverse − proximal − action/finger regularizers.  No contact sensor, no
+    # pad-facing, no screw load.  Most weights are inherited base defaults; these two
+    # restore the Allegro-tuned 044e558 values WITHOUT changing the shared base
+    # defaults that LinkerL20 also reads (reward_tilt_velocity_weight, gate std).
+    reward_tilt_velocity_weight: float = 5.0
+    turn_upright_gate_std: float = 0.25
+
+    # ---- Free-spinning handle (clean Allegro) ----
+    # Zero screw load: the base load mechanism stays in place but early-returns, so
+    # the handle turns freely, exactly like the original 044e558 task.
+    screwdriver_load_torque: float = 0.0
+
+    # episode_length_s must match curriculum_phases[0] for the initial stagger.
+    episode_length_s: float = 20.0
+
+    # ---- Curriculum (Allegro — 044e558 clean) ----
+    # Three phases ramp the distance contact gate (off → 0.10 m → 0.05 m) and the
+    # proximal penalty (0 → 2 → 5) while the near-reward tapers (0.8 → 0.3 → 0.15)
+    # and the upright termination tightens (2.0 → 1.5 → 1.0).  Free-spinning handle
+    # throughout (no screw load).
     curriculum_phases: list[CurriculumPhaseCfg] = field(
         default_factory=lambda: [
             CurriculumPhaseCfg(
-                # --- P0: learn PAD contact from the start ---
-                # The ungated ``near_reward`` (0.8) provides the "approach the
-                # handle" gradient, so we start with the contact gate ON (generous
-                # 0.10 m), a lenient SOFT pad factor, and a free-spinning handle.
+                # P0: contact gate OFF — first learn to approach/hold the handle
+                # (near-reward dominates); even accidental rotation gives signal.
                 step_start=0,
-                reward_turn_weight=120.0,
-                turn_reward_contact_distance=0.10,
+                reward_turn_weight=30.0,
+                turn_reward_contact_distance=0.0,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.0,
-                pad_facing_cos_threshold=0.0,
-                screwdriver_load_scale=0.0,
                 reward_proximal_penalty_weight=0.0,
                 near_reward_weight=0.8,
-                episode_length_s=30.0,
+                episode_length_s=20.0,
                 upright_termination_threshold=2.0,
             ),
             CurriculumPhaseCfg(
-                # --- P1: introduce the screw load and tighten the pad ---
-                step_start=40_000_000,
-                reward_turn_weight=180.0,
-                turn_reward_contact_distance=0.07,
+                # P1: contact gate ON, generous (0.10 m); mild proximal penalty.
+                step_start=15_000_000,
+                reward_turn_weight=150.0,
+                turn_reward_contact_distance=0.10,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.003,
-                pad_facing_cos_threshold=0.3,
-                screwdriver_load_scale=0.5,
-                reward_proximal_penalty_weight=3.0,
+                reward_proximal_penalty_weight=2.0,
                 near_reward_weight=0.3,
-                episode_length_s=50.0,
-                upright_termination_threshold=1.3,
+                episode_length_s=40.0,
+                upright_termination_threshold=1.5,
             ),
             CurriculumPhaseCfg(
-                # --- P2: final — strict pad + full load ---
-                step_start=90_000_000,
+                # P2: tighten gate to 0.05 m, strong proximal penalty, strict upright.
+                step_start=60_000_000,
                 reward_turn_weight=200.0,
                 turn_reward_contact_distance=0.05,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.003,
-                pad_facing_cos_threshold=0.5,
-                screwdriver_load_scale=1.0,
                 reward_proximal_penalty_weight=5.0,
                 near_reward_weight=0.15,
                 episode_length_s=60.0,
@@ -108,12 +118,6 @@ class AllegroScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     """3 euler + 3 angvel + 3 rel-pos + 4 quat + 1 friction + 3 fingertip-dist."""
     history_obs_dim: int = 24
     """[finger_q(12), cur_targets(12)] per frame."""
-
-    # ---- Fingertip pad axis ----
-    fingertip_pad_axis_local: tuple[float, float, float] = (0.0, 0.0, 1.0)
-    """Outward pad normal in the fingertip (_ee) link local frame.  The Allegro
-    distal phalanx pad faces +x of the phalanx; the fixed tip-frame rotation
-    (rpy = π/2,0,π/2) maps that to +z of _ee.  Verified by calibrate_pad.py."""
 
     # ---- Robot (Allegro hand) ----
     robot_cfg: ArticulationCfg = ArticulationCfg(

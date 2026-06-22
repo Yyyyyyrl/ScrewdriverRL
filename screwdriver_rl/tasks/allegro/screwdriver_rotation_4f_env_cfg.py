@@ -21,15 +21,49 @@ joint-limit margins) with ``tools/render_allegro_4f_posture.py`` — see
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import field
-
 import gymnasium as gym
 import numpy as np
 
 from isaaclab.utils import configclass
 
 from .screwdriver_rotation_env_cfg import AllegroScrewdriverRotationEnvCfg
+
+
+# Four-finger spawn pose: original index/thumb, lightly re-curled middle, +ring,
+# so all four fingertips seat on the SHARED 20 mm handle.
+_FOUR_FINGER_JOINT_POS = {
+    # index (hitosashi) — unchanged; drapes over and presses the cap-top
+    "allegro_hand_hitosashi_finger_finger_joint_0": 0.10,
+    "allegro_hand_hitosashi_finger_finger_joint_1": 0.60,
+    "allegro_hand_hitosashi_finger_finger_joint_2": 0.60,
+    "allegro_hand_hitosashi_finger_finger_joint_3": 0.60,
+    # middle (naka) — near-original, slightly more curl to seat on the side
+    "allegro_hand_naka_finger_finger_joint_4": -0.05,
+    "allegro_hand_naka_finger_finger_joint_5": 0.52,
+    "allegro_hand_naka_finger_finger_joint_6": 0.93,
+    "allegro_hand_naka_finger_finger_joint_7": 0.92,
+    # ring (kusuri) — same side as middle, splayed + curled so its links
+    # do NOT collide with the middle finger (verified by VTK triangle test)
+    "allegro_hand_kusuri_finger_finger_joint_8": 0.12,
+    "allegro_hand_kusuri_finger_finger_joint_9": 0.94,
+    "allegro_hand_kusuri_finger_finger_joint_10": 0.73,
+    "allegro_hand_kusuri_finger_finger_joint_11": 0.99,
+    # thumb (oya) — near-original (+0.01); opposes from the other side
+    "allegro_hand_oya_finger_joint_12": 1.21,
+    "allegro_hand_oya_finger_joint_13": 0.30,
+    "allegro_hand_oya_finger_joint_14": 0.30,
+    "allegro_hand_oya_finger_joint_15": 1.21,
+}
+
+# Pregrasp targets — MUST match _FOUR_FINGER_JOINT_POS so the PD targets equal
+# the spawn pose (no reset transient).  index/middle/ring share one handle side
+# from above; the thumb opposes from the side.
+_FOUR_FINGER_PREGRASP = {
+    "index":  (0.10, 0.60, 0.60, 0.60),
+    "middle": (-0.05, 0.52, 0.93, 0.92),
+    "ring":   (0.12, 0.94, 0.73, 0.99),
+    "thumb":  (1.21, 0.30, 0.30, 1.21),
+}
 
 
 @configclass
@@ -55,42 +89,14 @@ class AllegroScrewdriverRotation4FEnvCfg(AllegroScrewdriverRotationEnvCfg):
     history_obs_dim: int = 32
     """[finger_q(16), cur_targets(16)] per frame."""
 
-    # ---- Robot: original transform, original index/thumb, +ring, lightly
-    #      re-curled middle so all four fingertips contact the 20 mm handle. ----
-    robot_cfg = deepcopy(AllegroScrewdriverRotationEnvCfg.robot_cfg)
-    robot_cfg.init_state.joint_pos = {
-        # index (hitosashi) — unchanged; drapes over and presses the cap-top
-        "allegro_hand_hitosashi_finger_finger_joint_0": 0.10,
-        "allegro_hand_hitosashi_finger_finger_joint_1": 0.60,
-        "allegro_hand_hitosashi_finger_finger_joint_2": 0.60,
-        "allegro_hand_hitosashi_finger_finger_joint_3": 0.60,
-        # middle (naka) — near-original, slightly more curl to seat on the side
-        "allegro_hand_naka_finger_finger_joint_4": -0.05,
-        "allegro_hand_naka_finger_finger_joint_5": 0.52,
-        "allegro_hand_naka_finger_finger_joint_6": 0.93,
-        "allegro_hand_naka_finger_finger_joint_7": 0.92,
-        # ring (kusuri) — same side as middle, splayed + curled so its links
-        # do NOT collide with the middle finger (verified by VTK triangle test)
-        "allegro_hand_kusuri_finger_finger_joint_8": 0.12,
-        "allegro_hand_kusuri_finger_finger_joint_9": 0.94,
-        "allegro_hand_kusuri_finger_finger_joint_10": 0.73,
-        "allegro_hand_kusuri_finger_finger_joint_11": 0.99,
-        # thumb (oya) — near-original (+0.01); opposes from the other side
-        "allegro_hand_oya_finger_joint_12": 1.21,
-        "allegro_hand_oya_finger_joint_13": 0.30,
-        "allegro_hand_oya_finger_joint_14": 0.30,
-        "allegro_hand_oya_finger_joint_15": 1.21,
-    }
+    def __post_init__(self) -> None:
+        # ``@configclass`` materialises ``robot_cfg`` as a per-instance field via
+        # ``default_factory``, so the base posture is only available on ``self``
+        # (the class attribute is gone).  Add the ring finger and re-seat the
+        # middle/thumb here, after the parent has finished wiring.
+        super().__post_init__()
 
-    # ---- Pregrasp joint positions (per finger, 4 joints each) ----
-    # MUST match robot_cfg.init_state.joint_pos above so the PD targets equal the
-    # spawn pose (no reset transient).  index/middle/ring share one handle side
-    # from above; the thumb opposes from the side.
-    pregrasp_positions: dict[str, tuple[float, ...]] = field(
-        default_factory=lambda: {
-            "index":  (0.10, 0.60, 0.60, 0.60),
-            "middle": (-0.05, 0.52, 0.93, 0.92),
-            "ring":   (0.12, 0.94, 0.73, 0.99),
-            "thumb":  (1.21, 0.30, 0.30, 1.21),
+        self.robot_cfg.init_state.joint_pos = dict(_FOUR_FINGER_JOINT_POS)
+        self.pregrasp_positions = {
+            finger: tuple(pos) for finger, pos in _FOUR_FINGER_PREGRASP.items()
         }
-    )
