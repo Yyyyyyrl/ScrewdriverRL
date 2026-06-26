@@ -1,0 +1,97 @@
+{
+  "base": {
+    "radius": 0.02,
+    "length": 0.1,
+    "mass": 0.3
+  },
+  "num_diameter_buckets": 3,
+  "num_length_buckets": 2,
+  "num_buckets": 6,
+  "signature_rel_tol": 0.02,
+  "variants": [
+    {
+      "file": "variants/screwdriver_v00.urdf",
+      "name": "screwdriver_v00.urdf",
+      "index": 0,
+      "radius": 0.017,
+      "length": 0.09,
+      "mass": 0.195075,
+      "izz": 2.8188337500000002e-05,
+      "diameter_scale": 0.8500000000000001,
+      "length_scale": 0.8999999999999999,
+      "diameter_bucket": 0,
+      "length_bucket": 0,
+      "bucket": 0
+    },
+    {
+      "file": "variants/screwdriver_v01.urdf",
+      "name": "screwdriver_v01.urdf",
+      "index": 1,
+      "radius": 0.017,
+      "length": 0.11,
+      "mass": 0.238425,
+      "izz": 3.445241250000001e-05,
+      "diameter_scale": 0.8500000000000001,
+      "length_scale": 1.0999999999999999,
+      "diameter_bucket": 0,
+      "length_bucket": 1,
+      "bucket": 1
+    },
+    {
+      "file": "variants/screwdriver_v02.urdf",
+      "name": "screwdriver_v02.urdf",
+      "index": 2,
+      "radius": 0.02,
+      "length": 0.09,
+      "mass": 0.26999999999999996,
+      "izz": 5.4e-05,
+      "diameter_scale": 1.0,
+      "length_scale": 0.8999999999999999,
+      "diameter_bucket": 1,
+      "length_bucket": 0,
+      "bucket": 2
+    },
+    {
+      "file": "variants/screwdriver_v03.urdf",
+      "name": "screwdriver_v03.urdf",
+      "index": 3,
+      "radius": 0.02,
+      "length": 0.11,
+      "mass": 0.32999999999999996,
+      "izz": 6.599999999999999e-05,
+      "diameter_scale": 1.0,
+      "length_scale": 1.0999999999999999,
+      "diameter_bucket": 1,
+      "length_bucket": 1,
+      "bucket": 3
+    },
+    {
+      "file": "variants/screwdriver_v04.urdf",
+      "name": "screwdriver_v04.urdf",
+      "index": 4,
+      "radius": 0.023,
+      "length": 0.09,
+      "mass": 0.3570749999999999,
+      "izz": 9.444633749999998e-05,
+      "diameter_scale": 1.15,
+      "length_scale": 0.8999999999999999,
+      "diameter_bucket": 2,
+      "length_bucket": 0,
+      "bucket": 4
+    },
+    {
+      "file": "variants/screwdriver_v05.urdf",
+      "name": "screwdriver_v05.urdf",
+      "index": 5,
+      "radius": 0.023,
+      "length": 0.11,
+      "mass": 0.4364249999999999,
+      "izz": 0.00011543441249999996,
+      "diameter_scale": 1.15,
+      "length_scale": 1.0999999999999999,
+      "diameter_bucket": 2,
+      "length_bucket": 1,
+      "bucket": 5
+    }
+  ]
+}

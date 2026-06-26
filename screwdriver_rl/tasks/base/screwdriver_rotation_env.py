@@ -30,6 +30,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -142,6 +143,11 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             i for i, f in enumerate(self.fingers) if f != "thumb"
         ]
 
+        # ---- Geometry-variant identification ----
+        # Must precede the pregrasp / home-target build below (and any subclass
+        # post-super construction) so per-env postures can be gathered by bucket.
+        self._identify_geometry_variants()
+
         # ---- Finger target and pregrasp defaults ----
         self._default_finger_pos: torch.Tensor = self._make_default_finger_pos()
         self._cur_targets: torch.Tensor = self._default_finger_pos.clone()
@@ -150,12 +156,10 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         self._finger_lower = finger_limits[..., 0] + margin
         self._finger_upper = finger_limits[..., 1] - margin
 
-        self._pregrasp_pos: dict[str, torch.Tensor] = {
-            finger: torch.tensor(
-                cfg.pregrasp_positions[finger], dtype=torch.float32, device=self.device
-            )
-            for finger in self.FINGER_JOINT_NAMES  # all fingers for reset
-        }
+        # Per-finger reset posture.  When geometry DR is on with a per-bucket
+        # table this is ``(num_buckets, n_joints)`` and reset gathers each env's
+        # row by bucket; otherwise it is the single shared ``(n_joints,)`` vector.
+        self._pregrasp_pos: dict[str, torch.Tensor] = self._make_pregrasp_table()
 
         # ---- Continuous-turn tracking ----
         self._policy_dt: float = float(cfg.decimation) * float(cfg.sim.dt)
@@ -192,6 +196,18 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         _fing_act = cfg.robot_cfg.actuators["fingers"]
         self._base_finger_stiffness: float = float(_fing_act.stiffness)
         self._base_finger_damping: float = float(_fing_act.damping)
+
+        # Per-env real contact friction (init to the task's base friction); the
+        # privileged obs exposes this when contact-friction DR is enabled.
+        _base_friction = float(getattr(cfg, "friction_coefficient", 1.5))
+        self._base_friction: float = _base_friction
+        self._env_friction = torch.full(
+            (self.num_envs,), _base_friction, dtype=torch.float32, device=self.device
+        )
+        # Base tilt-joint (universal-joint bearing) damping for tilt-damping DR.
+        self._base_tilt_damping: float = float(
+            cfg.screwdriver_cfg.actuators["tilt"].damping
+        )
 
         # ---- RMA / asymmetric observations ----
         self._prop_hist_buf = torch.zeros(
@@ -230,21 +246,44 @@ class ScrewdriverRotationEnv(DirectRLEnv):
                 )
             ),
         )
-        # Apply self-collision pair filters on the source env BEFORE cloning so
-        # the cloner replicates them to every env.
-        self._apply_self_collision_filters()
-        self.scene.clone_environments(copy_from_source=False)
+        # Clone the environments + apply self-collision / inter-env collision
+        # filtering (the replicate-physics vs per-env-geometry paths differ).
+        self._finalize_scene()
         self.scene.articulations["allegro"] = self.allegro
         self.scene.articulations["screwdriver"] = self.screwdriver
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    def _apply_self_collision_filters(self) -> None:
+    def _finalize_scene(self) -> None:
+        """Clone environments and apply collision filtering.
+
+        ``replicate_physics=True`` (homogeneous): apply the self-collision filters
+        to ``env_0`` and clone — the cloner replicates both the assets and the
+        filters to every env.
+
+        ``replicate_physics=False`` (per-env geometry DR): ``InteractiveScene``
+        already cloned the env *xforms* in its ``__init__`` and the multi-asset
+        spawner populated each env with its own variant when the Articulations
+        were created above.  Calling ``clone_environments`` again would copy
+        ``env_0`` over all envs and **collapse every env to one variant**, so we
+        must NOT re-clone.  Instead apply the self-collision filters to *every*
+        env (they cannot ride the cloner) and filter inter-env collisions.
+        """
+        if self.scene.cfg.replicate_physics:
+            self._apply_self_collision_filters(env_indices=(0,))
+            self.scene.clone_environments(copy_from_source=False)
+        else:
+            self._apply_self_collision_filters(env_indices=range(self.scene.num_envs))
+            self.scene.filter_collisions(global_prim_paths=["/World/ground"])
+
+    def _apply_self_collision_filters(self, env_indices=(0,)) -> None:
         """Exclude ``SELF_COLLISION_FILTER_PAIRS`` from self-collision checking.
 
-        Applied to the source env (``env_0``) prims before ``clone_environments``
-        so the filtering is replicated to all envs.  Uses USD ``FilteredPairsAPI``
-        (no high-level Isaac Lab helper exists).  No-op when the list is empty.
+        ``env_indices`` selects which envs to author the filters on: ``(0,)`` for
+        the replicate-physics path (the cloner copies them to the rest) or every
+        env for the per-env-geometry path (no cloning happens afterwards).  Uses
+        USD ``FilteredPairsAPI`` (no high-level Isaac Lab helper exists).  No-op
+        when the list is empty.
         """
         if not self.SELF_COLLISION_FILTER_PAIRS:
             return
@@ -252,20 +291,30 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         from pxr import Sdf, UsdPhysics
 
         stage = omni.usd.get_context().get_stage()
-        # robot_cfg.prim_path is e.g. "/World/envs/env_.*/LinkerHand" -> env_0 source.
-        base_path = self.cfg.robot_cfg.prim_path.replace(".*", "0")
+        env_indices = list(env_indices)
         applied = 0
-        for link_a, link_b in self.SELF_COLLISION_FILTER_PAIRS:
-            a_path = f"{base_path}/{link_a}"
-            b_path = f"{base_path}/{link_b}"
-            prim_a = stage.GetPrimAtPath(a_path)
-            if not prim_a.IsValid() or not stage.GetPrimAtPath(b_path).IsValid():
-                print(f"[self-collision-filter] WARN: missing prim {a_path} or {b_path}", flush=True)
-                continue
-            api = UsdPhysics.FilteredPairsAPI.Apply(prim_a)
-            api.CreateFilteredPairsRel().AddTarget(Sdf.Path(b_path))
-            applied += 1
-        print(f"[self-collision-filter] applied {applied} filtered pairs under {base_path}", flush=True)
+        for i in env_indices:
+            # robot_cfg.prim_path is e.g. "/World/envs/env_.*/LinkerHand".
+            base_path = self.cfg.robot_cfg.prim_path.replace(".*", str(i))
+            for link_a, link_b in self.SELF_COLLISION_FILTER_PAIRS:
+                a_path = f"{base_path}/{link_a}"
+                b_path = f"{base_path}/{link_b}"
+                prim_a = stage.GetPrimAtPath(a_path)
+                if not prim_a.IsValid() or not stage.GetPrimAtPath(b_path).IsValid():
+                    if i == env_indices[0]:
+                        print(
+                            f"[self-collision-filter] WARN: missing prim {a_path} or {b_path}",
+                            flush=True,
+                        )
+                    continue
+                api = UsdPhysics.FilteredPairsAPI.Apply(prim_a)
+                api.CreateFilteredPairsRel().AddTarget(Sdf.Path(b_path))
+                applied += 1
+        print(
+            f"[self-collision-filter] applied {applied} filtered pairs over "
+            f"{len(env_indices)} env(s)",
+            flush=True,
+        )
 
     # -----------------------------------------------------------------------
     # Curriculum
@@ -552,8 +601,16 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
         jpos = self.allegro.data.default_joint_pos[env_ids].clone()
         jvel = torch.zeros_like(self.allegro.data.default_joint_vel[env_ids])
+        # Per-bucket geometry DR: gather each env's diameter/length-bucket posture;
+        # otherwise broadcast the single shared posture.  The compliant 32-step
+        # settle below then closes the fingers to contact, absorbing residual
+        # mismatch between the seeded posture and the env's actual handle.
+        bucket_of = (
+            self._env_bucket_idx[env_ids] if self._env_bucket_idx is not None else None
+        )
         for finger, jids in self._finger_joint_ids_by_name.items():
-            jpos[:, jids] = self._pregrasp_pos[finger]
+            posture = self._pregrasp_pos[finger]
+            jpos[:, jids] = posture[bucket_of] if bucket_of is not None else posture
         # Set mimic/coupled followers consistently with their masters.
         if self._coupled_mult is not None:
             masters = jpos[:, self._coupled_master_joint_ids]
@@ -676,6 +733,30 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             load_scale = torch.empty(n, device=self.device).uniform_(*dr.screwdriver_load_torque_range)
             self._env_load_torque[env_ids] = self._base_load_torque * load_scale
 
+        # 6. Contact friction (real) — absolute static==dynamic on BOTH the
+        #    screwdriver and the hand shapes (HORA sets the same friction on the
+        #    object and the hand).  Material buffers live on CPU and only the
+        #    selected env rows are touched.  Stored for the privileged obs.
+        if dr.randomize_contact_friction:
+            fr = torch.empty(len(env_ids_cpu)).uniform_(*dr.contact_friction_range)  # (n,) CPU
+            self._env_friction[env_ids] = fr.to(self.device)
+            for art in (self.screwdriver, self.allegro):
+                mats = art.root_physx_view.get_material_properties()  # (num_envs, num_shapes, 3) CPU
+                mats[env_ids_cpu, :, 0] = fr[:, None]  # static friction
+                mats[env_ids_cpu, :, 1] = fr[:, None]  # dynamic friction
+                art.root_physx_view.set_material_properties(mats, env_ids_cpu)
+
+        # 7. Tilt-joint bearing damping — scale the two universal-joint tilt
+        #    joints (the first two of the euler triple), same idiom as (1).
+        if dr.randomize_tilt_damping:
+            tilt_ids = self._screwdriver_euler_ids[:2]
+            tilt_scale = torch.empty(n, 1, device=self.device).uniform_(*dr.tilt_damping_range)
+            self.screwdriver.write_joint_damping_to_sim(
+                (self._base_tilt_damping * tilt_scale).expand(-1, len(tilt_ids)),
+                joint_ids=tilt_ids,
+                env_ids=env_ids,
+            )
+
     # -----------------------------------------------------------------------
     # Shaft spin (HORA-style, prevents wobble-scraping reward)
     # -----------------------------------------------------------------------
@@ -772,6 +853,28 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         base = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_base_idx], :3]
         top = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_cap_idx], :3]
         return rewards.point_segment_distance(tip_pos, base, top)
+
+    def compute_surface_clearance(self, pad_offset: float = 0.0) -> torch.Tensor:
+        """Per-fingertip signed clearance to the handle **surface**, ``(N, n_fingers)``.
+
+        ``clearance = axis_dist - handle_radius - pad_offset``: ≈0 at contact,
+        >0 floating, <0 penetrating.  This is the correct grasp-acceptance metric
+        (the raw axis distance from ``_compute_fingertip_axis_distances`` is
+        ≈ handle_radius at contact, not 0).  The handle radius is **per-env** when
+        geometry DR is on (from the identified variant's diameter scale), else the
+        base radius.  Intended for the acceptance-gate validation (see plan §3e/3f),
+        not the training loop.
+        """
+        from screwdriver_rl.utils.variants import BASE_RADIUS
+
+        axis_dist = self._compute_fingertip_axis_distances()  # (N, n_fingers)
+        if axis_dist.shape[1] == 0:
+            return axis_dist
+        if self._env_geom_scale is not None:
+            radius = (self._env_geom_scale[:, 0] * BASE_RADIUS).unsqueeze(-1)  # (N, 1)
+        else:
+            radius = BASE_RADIUS
+        return axis_dist - radius - pad_offset
 
     def _compute_near_reward(self, tip_dist: torch.Tensor, weight: float) -> torch.Tensor:
         """Dense fingertip proximity reward with thumb/non-thumb split.
@@ -979,5 +1082,85 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         return self._resolve_bodies(self.screwdriver, list(_SCREWDRIVER_HANDLE_BODIES))
 
     def _make_default_finger_pos(self) -> torch.Tensor:
+        """Per-env reset/home posture over the *active* fingers, ``(N, D)``.
+
+        With per-bucket geometry DR each env gets its diameter/length bucket's
+        posture (gathered by ``_env_bucket_idx``); otherwise every env shares the
+        single ``cfg.pregrasp_positions`` posture.
+        """
+        buckets = self._pregrasp_bucket_dicts()
+        if buckets is not None:
+            table = torch.tensor(
+                [[v for f in self.fingers for v in bucket[f]] for bucket in buckets],
+                dtype=torch.float32,
+                device=self.device,
+            )  # (num_buckets, D)
+            return table[self._env_bucket_idx]  # (N, D)
         pos = [v for f in self.fingers for v in self.cfg.pregrasp_positions[f]]
         return torch.tensor(pos, dtype=torch.float32, device=self.device).expand(self.num_envs, -1).clone()
+
+    # -----------------------------------------------------------------------
+    # Geometry-variant identification + per-bucket pregrasp
+    # -----------------------------------------------------------------------
+
+    def _pregrasp_bucket_dicts(self) -> list | None:
+        """Return the per-bucket pregrasp dicts iff geometry DR + a table are
+        active and the env has been assigned buckets; else ``None``."""
+        buckets = getattr(self.cfg, "pregrasp_positions_buckets", None)
+        if buckets is None or getattr(self, "_env_bucket_idx", None) is None:
+            return None
+        return buckets
+
+    def _identify_geometry_variants(self) -> None:
+        """Recover each env's geometry variant from the handle's un-randomised
+        ``(default_mass, default_izz)`` signature (see utils/variants.py).
+
+        Sets ``_variant_table`` plus per-env ``_env_variant_idx`` /
+        ``_env_bucket_idx`` / ``_env_geom_scale`` (``[diameter, length]`` scale).
+        No-op (all set to ``None``) when geometry DR is off.
+        """
+        self._variant_table = None
+        self._env_variant_idx = None
+        self._env_bucket_idx = None
+        self._env_geom_scale = None
+        if not self.cfg.domain_rand.randomize_geometry:
+            return
+
+        from screwdriver_rl.utils.variants import identify_variants, load_variant_table
+
+        manifest_path = Path(self.cfg.screwdriver_variants_dir) / "manifest.json"
+        table = load_variant_table(manifest_path)
+        body_id = self._handle_body_ids[self._handle_base_idx]  # screwdriver_body
+        masses = self.screwdriver.data.default_mass[:, body_id].to(self.device)
+        # default_inertia rows are flattened 3x3; element 8 is izz (zz).
+        izz = self.screwdriver.data.default_inertia[:, body_id, 8].to(self.device)
+        vidx, bidx, gscale = identify_variants(masses, izz, table)
+        self._variant_table = table
+        self._env_variant_idx = vidx
+        self._env_bucket_idx = bidx
+        self._env_geom_scale = gscale
+        counts = torch.bincount(vidx, minlength=table.num_variants).tolist()
+        print(f"[geometry-DR] env→variant histogram (n={self.num_envs}): {counts}")
+
+    def _make_pregrasp_table(self) -> dict[str, torch.Tensor]:
+        """Per-finger reset posture tensors for *all* reset fingers.
+
+        Per-bucket ``(num_buckets, n_joints)`` when geometry DR + a table are
+        active; otherwise the single shared ``(n_joints,)`` vector.
+        """
+        buckets = self._pregrasp_bucket_dicts()
+        if buckets is not None:
+            return {
+                finger: torch.tensor(
+                    [bucket[finger] for bucket in buckets],
+                    dtype=torch.float32,
+                    device=self.device,
+                )  # (num_buckets, n_joints)
+                for finger in self.FINGER_JOINT_NAMES
+            }
+        return {
+            finger: torch.tensor(
+                self.cfg.pregrasp_positions[finger], dtype=torch.float32, device=self.device
+            )
+            for finger in self.FINGER_JOINT_NAMES
+        }

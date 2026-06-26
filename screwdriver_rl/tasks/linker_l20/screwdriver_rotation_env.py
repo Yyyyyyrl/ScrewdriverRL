@@ -226,9 +226,9 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
                 )
             ),
         )
-        # Apply self-collision pair filters on the source env BEFORE cloning.
-        self._apply_self_collision_filters()
-        self.scene.clone_environments(copy_from_source=False)
+        # Clone envs + collision filtering (replicate-physics vs per-env-geometry
+        # paths differ; see base._finalize_scene).
+        self._finalize_scene()
         self.scene.articulations["allegro"] = self.allegro
         self.scene.articulations["screwdriver"] = self.screwdriver
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -473,9 +473,18 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
         angvel = self.screwdriver.data.joint_vel[:, self._screwdriver_euler_ids]
         rel_pos = self.screwdriver.data.root_pos_w - self.allegro.data.root_pos_w
         quat = self.screwdriver.data.root_quat_w
-        if self._base_load_torque > 0.0:
+        # Real contact friction (normalised) when friction DR is on; otherwise
+        # fall back to the load/damping proxy.
+        if self.cfg.domain_rand.randomize_contact_friction:
+            friction = (self._env_friction / self._base_friction).unsqueeze(-1)
+        elif self._base_load_torque > 0.0:
             friction = (self._env_load_torque / self._base_load_torque).unsqueeze(-1)
         else:
             friction = (self._env_rotation_damping / self._base_rotation_damping).unsqueeze(-1)
         F_total, _, _, _ = self._read_contact_forces()  # (N, n_fingers)
-        return torch.cat([euler, angvel, rel_pos, quat, friction, F_total], dim=-1)
+        parts = [euler, angvel, rel_pos, quat, friction, F_total]
+        # +2 geometry channels (diameter, length scale) when geometry DR is on;
+        # privileged_obs_dim is bumped 19→21 to match (see cfg __post_init__).
+        if self._env_geom_scale is not None:
+            parts.append(self._env_geom_scale)  # (N, 2)
+        return torch.cat(parts, dim=-1)

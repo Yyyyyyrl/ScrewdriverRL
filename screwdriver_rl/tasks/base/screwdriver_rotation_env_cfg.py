@@ -39,6 +39,8 @@ Training is split into three phases controlled by the global step count:
 
 from __future__ import annotations
 
+import copy
+import json as _json
 import math
 import os as _os
 from dataclasses import MISSING, field
@@ -185,6 +187,40 @@ class DomainRandCfg:
 
     finger_damping_range: tuple[float, float] = (0.8, 1.2)
     """Multiplicative scale on finger joint damping (±20%)."""
+
+    # ------------------------------------------------------------------
+    # Contact friction (real, not the rotation-damping proxy)
+    # ------------------------------------------------------------------
+    randomize_contact_friction: bool = False
+    """When True, sample an absolute contact friction per env and write it to
+    both the screwdriver and hand shape materials in ``_randomise_dynamics``,
+    and expose it (normalised) in the privileged obs.  Default off so hands that
+    have not opted in are unchanged."""
+
+    contact_friction_range: tuple[float, float] = (1.0, 2.0)
+    """Absolute static==dynamic friction sampled per env (centred on the task's
+    base 1.5).  HORA randomises absolute friction on object + hand alike."""
+
+    # ------------------------------------------------------------------
+    # Tilt-joint (universal-joint bearing) damping
+    # ------------------------------------------------------------------
+    randomize_tilt_damping: bool = False
+    """When True, scale the two tilt-joint dampings per env in
+    ``_randomise_dynamics``.  Default off."""
+
+    tilt_damping_range: tuple[float, float] = (0.5, 2.0)
+    """Multiplicative scale on the base tilt-joint damping (base 0.003)."""
+
+    # ------------------------------------------------------------------
+    # Geometry (per-env handle diameter/length via pre-generated URDF variants)
+    # ------------------------------------------------------------------
+    randomize_geometry: bool = False
+    """When True, the env cfg ``__post_init__`` swaps the single screwdriver URDF
+    for a ``MultiAssetSpawnerCfg`` over the generated variants and sets
+    ``scene.replicate_physics=False`` (PhysX cannot rescale a cooked collider at
+    runtime).  Each env then carries a fixed geometry for the whole run; the env
+    recovers it from the handle's ``(mass, izz)`` signature.  Default off so
+    geometry-DR-off training keeps the fast replicated-physics path."""
 
     # ------------------------------------------------------------------
     # Observation noise
@@ -513,7 +549,60 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     """Independent finger joint positions at episode reset, keyed by finger,
     in the same semantic order as the hand's ``FINGER_JOINT_NAMES`` tuples."""
 
+    pregrasp_positions_buckets: list | None = None
+    """Optional per-``(diameter,length)``-bucket pregrasp postures, one dict per
+    manifest bucket id (same keys as ``pregrasp_positions``).  When set AND
+    ``domain_rand.randomize_geometry`` is True, the env seeds each env's reset
+    posture + home target from its bucket row instead of the single shared
+    ``pregrasp_positions``.  Built by the hand cfg's ``__post_init__``."""
+
     # ------------------------------------------------------------------
     # Domain randomisation
     # ------------------------------------------------------------------
     domain_rand: DomainRandCfg = field(default_factory=DomainRandCfg)
+
+    # ------------------------------------------------------------------
+    # Geometry variants (only used when domain_rand.randomize_geometry is True)
+    # ------------------------------------------------------------------
+    screwdriver_variants_dir: str = str(ASSET_ROOT / "screwdriver" / "variants")
+    """Directory holding the generated variant URDFs + ``manifest.json`` (see
+    ``tools/generate_screwdriver_variants.py``).  Only consulted when
+    ``domain_rand.randomize_geometry`` is True."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.domain_rand.randomize_geometry:
+            self._enable_geometry_randomisation()
+
+    def _enable_geometry_randomisation(self) -> None:
+        """Swap the single screwdriver URDF for a ``MultiAssetSpawnerCfg`` over
+        the generated variants and disable replicated physics.
+
+        PhysX cannot rescale a cooked collision mesh at runtime, and
+        ``replicate_physics=True`` shares ONE collider across all envs, so per-env
+        geometry requires distinct, individually-cooked assets + non-replicated
+        physics.  Env→variant assignment is deliberately *not* assumed here — the
+        env recovers each handle's variant from its ``(mass, izz)`` signature.
+        """
+        manifest_path = Path(self.screwdriver_variants_dir) / "manifest.json"
+        with open(manifest_path) as f:
+            manifest = _json.load(f)
+
+        # manifest "file" paths are relative to the screwdriver asset dir.
+        sd_asset_root = Path(self.screwdriver_variants_dir).parent
+        base_spawn = self.screwdriver_cfg.spawn  # the single UrdfFileCfg
+        assets_cfg = []
+        for v in manifest["variants"]:
+            urdf = copy.deepcopy(base_spawn)
+            urdf.asset_path = str(sd_asset_root / v["file"])
+            assets_cfg.append(urdf)
+
+        self.screwdriver_cfg.spawn = sim_utils.MultiAssetSpawnerCfg(
+            assets_cfg=assets_cfg,
+            random_choice=True,
+            activate_contact_sensors=getattr(
+                base_spawn, "activate_contact_sensors", False
+            ),
+        )
+        # Per-env geometry is incompatible with a single shared cooked collider.
+        self.scene.replicate_physics = False

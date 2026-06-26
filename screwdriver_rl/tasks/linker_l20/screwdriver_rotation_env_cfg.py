@@ -29,7 +29,9 @@ five-contact grasp (``tools/render_linker_posture.py`` and the post_render grid)
 
 from __future__ import annotations
 
+import json
 from dataclasses import field
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
@@ -43,6 +45,21 @@ from screwdriver_rl.tasks.base.screwdriver_rotation_env_cfg import (
     ASSET_ROOT,
     ScrewdriverRotationEnvCfg,
 )
+from screwdriver_rl.utils.variants import seed_pregrasp_buckets
+
+
+# Fraction of the radial flexion delta applied to each joint of a finger's
+# pregrasp tuple (semantic order; abduction joint gets 0, flexion joints share
+# it).  Used by ``utils.variants.seed_pregrasp_buckets`` (see plan §3d): the
+# index finger stabilises the cap, so handle length is not grasp-neutral and
+# postures are bucketed over both diameter and length.
+_FLEX_WEIGHTS = {
+    "index":  (0.0, 0.5, 0.5),
+    "middle": (0.0, 0.5, 0.5),
+    "ring":   (0.0, 0.5, 0.5),
+    "pinky":  (0.0, 0.5, 0.5),
+    "thumb":  (0.0, 0.5, 0.5, 0.0),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +243,9 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
 
     # ---- RMA dims (hand-specific) ----
     privileged_obs_dim: int = 19
-    """3 euler + 3 angvel + 3 rel-pos + 4 quat + 1 friction + 5 per-finger force."""
+    """3 euler + 3 angvel + 3 rel-pos + 4 quat + 1 friction + 5 per-finger force.
+    Bumped to 21 in ``__post_init__`` when ``domain_rand.randomize_geometry`` is
+    on (+2 channels: handle diameter scale + length scale)."""
     history_obs_dim: int = 32
     """[finger_q(16), cur_targets(16)] per frame."""
 
@@ -380,3 +399,17 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             "thumb":  (1.065296, 0.601400, 0.040001, 0.574150),
         }
     )
+
+    def __post_init__(self) -> None:
+        # Base wires the geometry MultiAssetSpawner + replicate_physics when
+        # randomize_geometry is on; then we add the LinkerL20-specific pieces:
+        # the +2 privileged-obs channels and the per-(d,L)-bucket pregrasp table.
+        super().__post_init__()
+        if self.domain_rand.randomize_geometry:
+            self.privileged_obs_dim += 2  # +diameter scale, +length scale → 21
+            manifest_path = Path(self.screwdriver_variants_dir) / "manifest.json"
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            self.pregrasp_positions_buckets = seed_pregrasp_buckets(
+                self.pregrasp_positions, manifest, _FLEX_WEIGHTS
+            )
