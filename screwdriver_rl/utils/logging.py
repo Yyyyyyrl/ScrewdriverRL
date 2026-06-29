@@ -76,8 +76,20 @@ class RotationTrainingLogger:
 
     # ------------------------------------------------------------------
 
-    def log(self, global_steps: int, extras: dict[str, Any], epoch: int = 0) -> None:
-        if global_steps - self._last_log_step < self._interval:
+    def log(
+        self,
+        global_steps: int,
+        extras: dict[str, Any],
+        epoch: int = 0,
+        stage: int = 1,
+        iter_num: int | None = None,
+        total_iters: int | None = None,
+        loss: float | None = None,
+    ) -> None:
+        # Stage 1 throttles to ~one line per ``_interval`` global steps; Stage 2
+        # is driven once per adaptation iter by the trainer, so it controls its
+        # own cadence and bypasses the throttle.
+        if stage == 1 and global_steps - self._last_log_step < self._interval:
             return
         delta_steps = global_steps - self._last_log_step
         now = time.monotonic()
@@ -97,15 +109,29 @@ class RotationTrainingLogger:
         num_phases = m("eval_num_phases")
         total_rew  = m("eval_total_reward")
 
-        # ``phase``/``num_phases`` arrive as floats (env emits a 1-indexed phase
-        # number and the phase count).  NaN means the key was missing.
         if phase == phase and num_phases == num_phases:  # not NaN
-            phase_str = f"Phase {int(phase)}/{int(num_phases)}"
+            phase_lbl = f"Phase {int(phase)}/{int(num_phases)}"
         elif phase == phase:
-            phase_str = f"Phase {int(phase)}"
+            phase_lbl = f"Phase {int(phase)}"
         else:
-            phase_str = "Phase ?"
+            phase_lbl = "Phase ?"
 
+        # ---- Stage 2: compact adaptation layout (no reward breakdown) ----
+        if stage == 2:
+            print(
+                "\n".join(
+                    self._render_stage2(
+                        m, global_steps, elapsed, sps, phase_lbl,
+                        iter_num, total_iters, loss,
+                    )
+                ),
+                flush=True,
+            )
+            return
+
+        # ``phase``/``num_phases`` arrive as floats (env emits a 1-indexed phase
+        # number and the phase count); ``phase_lbl`` (computed above) renders
+        # "Phase n/total" or "Phase ?" when the key is missing.
         # ---- Shared frame: top rule + Epoch line, TOTAL REWARD footer ----
         top = [
             f"{_W}{'─'*72}{_N}",
@@ -114,7 +140,7 @@ class RotationTrainingLogger:
                 f"{_B}Step{_N} {global_steps:>12,}  "
                 f"{_B}Elapsed{_N} {int(elapsed//3600):02d}h{int((elapsed%3600)//60):02d}m  "
                 f"{_B}SPS{_N} {sps:>7,.0f}  "
-                f"{_B}Curriculum{_N} {_W}{phase_str}{_N}"
+                f"{_B}Curriculum{_N} {_W}{phase_lbl}{_N}"
             ),
         ]
         footer = [
@@ -129,6 +155,69 @@ class RotationTrainingLogger:
         body = self._render_body(m, extras)
 
         print("\n".join(top + body + footer), flush=True)
+
+    # ------------------------------------------------------------------
+    # Stage-2 (adaptation) compact renderer
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _render_stage2(
+        m,
+        global_steps: int,
+        elapsed: float,
+        sps: float,
+        phase_lbl: str,
+        iter_num: int | None,
+        total_iters: int | None,
+        loss: float | None,
+    ) -> list[str]:
+        """Compact Stage-2 (proprioceptive adaptation) block.
+
+        Shows the adaptation loss + frozen-teacher rollout health.  The Stage-1
+        reward breakdown / TOTAL REWARD footer are dropped because Stage 2
+        discards reward (supervised MSE only).  Reuses the shared ``eval_*``
+        keys, so it renders identically for both hands with no task branch.
+        """
+        if iter_num is not None and total_iters is not None:
+            iter_str = f"{iter_num:>4,}/{total_iters:,}"
+        elif iter_num is not None:
+            iter_str = f"{iter_num:>4,}"
+        else:
+            iter_str = "?"
+        loss_str = f"{loss:.6f}" if loss is not None and loss == loss else "nan"
+
+        fwd_vel   = m("eval_fwd_vel")
+        net_turns = m("eval_net_turns")
+        osc_ratio = m("eval_osc_ratio")
+        u_gate    = m("eval_upright_gate")
+        c_gate    = m("eval_contact_gate")
+        osc_warn  = " ⚠ OSCILLATION" if osc_ratio > 0.35 else ""
+
+        return [
+            f"{_W}{'─'*72}{_N}",
+            (
+                f"  {_W}Stage 2{_N} · {_B}Iter{_N} {_W}{iter_str}{_N}   "
+                f"{_B}Step{_N} {global_steps:>12,}   "
+                f"{_B}Elapsed{_N} {int(elapsed//3600):02d}h{int((elapsed%3600)//60):02d}m   "
+                f"{_B}SPS{_N} {sps:>7,.0f}"
+            ),
+            (
+                f"  {_B}AdaptLoss{_N} {_W}{loss_str}{_N}   "
+                f"{_B}Curriculum{_N} {_W}{phase_lbl}{_N}"
+            ),
+            (
+                f"  {_W}Teacher{_N}  "
+                f"FwdVel {_colour(fwd_vel, 0.1, 0.5)}  "
+                f"NetTurns {_colour(net_turns, 0.0, 1.5)}  "
+                f"OscRatio {_colour(osc_ratio, 0.4, 0.15, invert=True)}{osc_warn}"
+            ),
+            (
+                f"           "
+                f"UprightGate {_colour(u_gate, 0.3, 0.8)}  "
+                f"ContactGate {_colour(c_gate, 0.2, 0.6)}"
+            ),
+            f"{_W}{'─'*72}{_N}",
+        ]
 
     # ------------------------------------------------------------------
     # Task-adaptive body renderer

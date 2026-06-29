@@ -461,7 +461,10 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             ),
         })
 
-        self._logger.log(self._global_steps, self.extras, epoch=self._current_epoch)
+        # Stage 2 suppresses the per-step log (the adaptation trainer drives the
+        # logger once per iter); see base env _get_rewards.
+        if self._log_stage == 1:
+            self._logger.log(self._global_steps, self.extras, epoch=self._current_epoch)
         return torch.nan_to_num(reward, nan=-1.0e6)
 
     # -----------------------------------------------------------------------

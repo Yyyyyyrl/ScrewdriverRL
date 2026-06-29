@@ -226,6 +226,12 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         # ``_current_epoch`` is written each epoch by the rl_games
         # PhaseCheckpointObserver; the env itself has no epoch concept.
         self._current_epoch: int = 0
+        # ``_log_stage`` selects the terminal-log layout: 1 = Stage-1 PPO
+        # (per-step, full reward breakdown), 2 = Stage-2 adaptation (compact,
+        # once-per-iter, driven by ProprioAdaptTrainer).  In Stage 2 the env's
+        # per-step logging is suppressed and the trainer drives the logger.
+        self._log_stage: int = 1
+        self._stage2_loss: float = float("nan")
         from screwdriver_rl.utils.logging import RotationTrainingLogger
         self._logger = RotationTrainingLogger(log_interval_steps=2000)
 
@@ -562,7 +568,10 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
         # Periodic terminal log.  ``_current_epoch`` is synced by the rl_games
         # PhaseCheckpointObserver (the true epoch lives at the Runner level).
-        self._logger.log(self._global_steps, self.extras, epoch=self._current_epoch)
+        # Stage 2 suppresses the per-step log — ProprioAdaptTrainer drives the
+        # logger once per adaptation iter instead.
+        if self._log_stage == 1:
+            self._logger.log(self._global_steps, self.extras, epoch=self._current_epoch)
 
         return torch.nan_to_num(reward, nan=-1.0e6)
 

@@ -18,7 +18,6 @@ Usage (called from train.py --stage 2):
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 
 import torch
@@ -89,7 +88,14 @@ class AdaptTrainCfg:
     num_epochs_per_iter: int = 5
     """Gradient epochs over each collected batch."""
     log_interval: int = 20
-    """Print a summary every N training iterations."""
+    """Unused since Stage-2 progress moved to the env's terminal logger (one
+    compact block per iter).  Retained for backward compatibility with callers
+    that still pass it."""
+    save_interval: int = 50
+    """Write an intermediate checkpoint every N iterations (0 disables).  Each
+    cadence point writes ``proprio_adapt_iter_<it>.pth`` and overwrites a
+    rolling ``proprio_adapt_last.pth``, so an interrupted run loses at most
+    ``save_interval`` iterations of work instead of everything."""
 
 
 # ---------------------------------------------------------------------------
@@ -118,18 +124,26 @@ class ProprioAdaptTrainer:
 
         self.net = ProprioAdaptNet(frame_dim=frame_dim, hist_len=hist_len, out_dim=priv_obs_dim).to(device)
         self.optim = torch.optim.Adam(self.net.parameters(), lr=cfg.learning_rate)
+        self._net_dims = {"frame_dim": frame_dim, "hist_len": hist_len, "out_dim": priv_obs_dim}
+        # Base (unwrapped) env, used to drive the Stage-2 terminal log.  Resolved
+        # via getattr so the no-Isaac FakeEnv in tests works unchanged.
+        self._env_unwrapped = getattr(env, "unwrapped", env)
+        self._last_extras: dict = {}
         os.makedirs(out_dir, exist_ok=True)
 
     def _collect(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Roll out the frozen policy and collect (proprio_hist, priv_obs) pairs."""
         hists, privs = [], []
         obs_dict, _ = self.env.reset()
+        info: dict = {}
         for _ in range(self.cfg.rollout_steps):
             with torch.no_grad():
                 action = self.actor(obs_dict["policy"])
-            obs_dict, _, terminated, truncated, _ = self.env.step(action)
+            obs_dict, _, terminated, truncated, info = self.env.step(action)
             hists.append(obs_dict["proprio_hist"].detach())  # (N, T, D)
             privs.append(obs_dict["critic"].detach())        # (N, priv_dim)
+        # Keep the final step's info (env extras) for the per-iter Stage-2 log.
+        self._last_extras = info if isinstance(info, dict) else {}
         # (rollout_steps × N, ...)
         return torch.cat(hists, dim=0), torch.cat(privs, dim=0)
 
@@ -152,6 +166,28 @@ class ProprioAdaptTrainer:
                 steps += 1
         return total_loss / max(steps, 1)
 
+    def _save_ckpt(self, filename: str, it: int, loss: float) -> str:
+        """Atomically write a checkpoint to ``out_dir/filename``.
+
+        Keeps the ``"net"`` key that loaders (play/eval, test_algo) expect and
+        adds the iteration, loss, and network dims so a checkpoint is
+        self-describing.  Writes to a temp file then ``os.replace``s it into
+        place, so a crash mid-save cannot leave a truncated/corrupt checkpoint.
+        """
+        path = os.path.join(self.out_dir, filename)
+        tmp = path + ".tmp"
+        torch.save(
+            {
+                "net": self.net.state_dict(),
+                "iter": it,
+                "loss": loss,
+                "net_dims": self._net_dims,
+            },
+            tmp,
+        )
+        os.replace(tmp, path)
+        return path
+
     def train(self) -> str:
         """Run full Stage 2 training.  Returns path to the saved checkpoint."""
         print(
@@ -163,21 +199,44 @@ class ProprioAdaptTrainer:
             f"{'='*60}\n",
             flush=True,
         )
-        t0 = time.monotonic()
+        # Put the env into Stage-2 logging mode: its per-step log is suppressed
+        # and we drive the logger once per iter below (see env _get_rewards).
+        setattr(self._env_unwrapped, "_log_stage", 2)
+
+        loss = float("nan")
         for it in range(1, self.cfg.num_iters + 1):
             hists, privs = self._collect()
             loss = self._train_on_batch(hists, privs)
 
-            if it % self.cfg.log_interval == 0:
-                elapsed = time.monotonic() - t0
+            # Drive the env's terminal logger once per iter with the compact
+            # Stage-2 layout (adapt loss + frozen-teacher rollout health).  All
+            # access is getattr-guarded so the no-Isaac FakeEnv in tests no-ops.
+            setattr(self._env_unwrapped, "_current_epoch", it)
+            setattr(self._env_unwrapped, "_stage2_loss", loss)
+            logger = getattr(self._env_unwrapped, "_logger", None)
+            if logger is not None:
+                logger.log(
+                    getattr(self._env_unwrapped, "_global_steps", 0),
+                    self._last_extras,
+                    stage=2,
+                    iter_num=it,
+                    total_iters=self.cfg.num_iters,
+                    loss=loss,
+                )
+
+            # Intermediate checkpoints so an interrupted run loses at most
+            # save_interval iters.  The final iter is skipped here — it is saved
+            # canonically as proprio_adapt.pth below.
+            is_last = it == self.cfg.num_iters
+            if self.cfg.save_interval > 0 and it % self.cfg.save_interval == 0 and not is_last:
+                snap = self._save_ckpt(f"proprio_adapt_iter_{it:05d}.pth", it, loss)
+                self._save_ckpt("proprio_adapt_last.pth", it, loss)
                 print(
-                    f"  iter {it:>4}/{self.cfg.num_iters}  "
-                    f"loss {loss:.5f}  "
-                    f"elapsed {int(elapsed//60):02d}m{int(elapsed%60):02d}s",
+                    f"  [stage2] checkpoint → {os.path.basename(snap)} "
+                    f"(+ proprio_adapt_last.pth)  loss {loss:.5f}",
                     flush=True,
                 )
 
-        ckpt_path = os.path.join(self.out_dir, "proprio_adapt.pth")
-        torch.save({"net": self.net.state_dict()}, ckpt_path)
+        ckpt_path = self._save_ckpt("proprio_adapt.pth", self.cfg.num_iters, loss)
         print(f"\n[stage2] Saved adaptation network → {ckpt_path}\n", flush=True)
         return ckpt_path

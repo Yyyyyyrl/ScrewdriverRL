@@ -84,7 +84,8 @@ parser.add_argument(
     help=(
         "Directory for checkpoints, tensorboard logs and videos. "
         "Defaults to runs/<task>. Stage 1 writes <output>/<run-name>/nn/*.pth; "
-        "Stage 2 writes <output>/stage2_nn/proprio_adapt.pth."
+        "Stage 2 writes <output>/stage2_nn/proprio_adapt.pth (plus periodic "
+        "proprio_adapt_iter_*.pth and a rolling proprio_adapt_last.pth)."
     ),
 )
 parser.add_argument("--seed", type=int, default=42)
@@ -93,6 +94,12 @@ parser.add_argument("--video_interval", type=int, default=2000)
 # Stage 2 knobs
 parser.add_argument("--adapt_iters", type=int, default=500, help="[Stage 2] Training iterations.")
 parser.add_argument("--adapt_rollout_steps", type=int, default=512, help="[Stage 2] Rollout steps per iter.")
+parser.add_argument(
+    "--adapt_save_interval",
+    type=int,
+    default=50,
+    help="[Stage 2] Write an intermediate checkpoint every N iters (0 disables).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
 args.enable_cameras = args.video
@@ -344,6 +351,7 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     adapt_cfg = AdaptTrainCfg(
         rollout_steps=args.adapt_rollout_steps,
         num_iters=args.adapt_iters,
+        save_interval=args.adapt_save_interval,
     )
     stage2_dir = os.path.join(log_dir, "stage2_nn")
 
@@ -352,6 +360,7 @@ def run_stage2(env_cfg, log_dir: str) -> None:
         f"\n[Stage 2] Stage 1 ckpt     : {args.checkpoint}"
         f"\n[Stage 2] Adaptation iters : {adapt_cfg.num_iters}"
         f"\n[Stage 2] Rollout steps/it : {adapt_cfg.rollout_steps}"
+        f"\n[Stage 2] Save interval    : every {adapt_cfg.save_interval} iters"
         f"\n[Stage 2] Output dir       : {stage2_dir}\n",
         flush=True,
     )
