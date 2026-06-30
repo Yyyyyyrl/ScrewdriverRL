@@ -85,7 +85,8 @@ parser.add_argument(
         "Directory for checkpoints, tensorboard logs and videos. "
         "Defaults to runs/<task>. Stage 1 writes <output>/<run-name>/nn/*.pth; "
         "Stage 2 writes <output>/stage2_nn/proprio_adapt.pth (plus periodic "
-        "proprio_adapt_iter_*.pth and a rolling proprio_adapt_last.pth)."
+        "proprio_adapt_iter_*.pth and a rolling proprio_adapt_last.pth) and the "
+        "self-contained deployable bundle <output>/stage2_nn/deploy.pth."
     ),
 )
 parser.add_argument("--seed", type=int, default=42)
@@ -238,6 +239,66 @@ def _register_rl_games(env, agent_cfg: dict) -> None:
     )
 
 
+def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | None:
+    """Capture the actor + obs normaliser + deployment config for the deploy bundle.
+
+    Returns a dict consumed by ``ProprioAdaptTrainer`` to write ``deploy.pth``,
+    or ``None`` if the actor model could not be read (in which case Stage 2 still
+    saves the adapter-only checkpoint).  Reuses ``DeployPolicy``'s actor-state
+    canonicaliser so the bundle loads into the env-free deploy actor 1:1.
+    """
+    try:
+        from screwdriver_rl.deploy.policy import canonicalize_actor_state
+
+        model = getattr(player, "model", None)
+        if model is None:
+            return None
+        actor_state = canonicalize_actor_state(model.state_dict())
+
+        net = agent_cfg["params"]["network"]
+        cfg_section = agent_cfg["params"]["config"]
+        env_section = agent_cfg["params"].get("env", {})
+
+        obs_dim = int(env_cfg.observation_space.shape[0])
+        action_dim = int(env_cfg.action_space.shape[0])
+        euler_dim = max(0, obs_dim - 2 * action_dim)  # [finger_q, cur_targets, euler]
+
+        actor_arch = {
+            "mlp_units": list(net["mlp"]["units"]),
+            "activation": net["mlp"].get("activation", "elu"),
+            "obs_dim": obs_dim,
+            "action_dim": action_dim,
+            "normalize_input": bool(cfg_section.get("normalize_input", True)),
+            "clip_obs": float(env_section.get("clip_observations", 5.0)),
+        }
+
+        def _row(attr):
+            t = getattr(base_env, attr, None)
+            return None if t is None else t[0].detach().cpu().tolist()
+
+        home = _row("_home_targets")
+        if home is None:
+            home = _row("_default_finger_pos") or _row("_cur_targets")
+
+        config = {
+            "task": args.task,
+            "n_finger": action_dim,
+            "euler_dim": euler_dim or 3,
+            "action_delta_scale": float(getattr(env_cfg, "action_delta_scale", 0.05)),
+            "finger_lower": _row("_finger_lower"),
+            "finger_upper": _row("_finger_upper"),
+            "home_targets": home,
+            "prop_hist_len": int(env_cfg.prop_hist_len),
+            "history_obs_dim": int(env_cfg.history_obs_dim),
+            "privileged_obs_dim": int(env_cfg.privileged_obs_dim),
+        }
+        return {"actor": actor_state, "actor_arch": actor_arch, "config": config}
+    except Exception as exc:  # never let bundling abort Stage-2 training
+        print(f"[Stage 2] WARNING: could not assemble deploy bundle ({exc}); "
+              f"saving adapter-only checkpoint.", flush=True)
+        return None
+
+
 def run_stage1(env_cfg, log_dir: str) -> None:
     # Enable asymmetric observations: the actor sees the policy obs, the critic
     # additionally sees the privileged obs via RL-Games central_value_config.
@@ -355,6 +416,11 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     )
     stage2_dir = os.path.join(log_dir, "stage2_nn")
 
+    # Assemble a self-contained deployable bundle (actor + obs normaliser + config)
+    # so Stage 2 writes a HORA-style deploy.pth, not just the adapter.  All the
+    # pieces already live in the restored player / env; see docs/3-deployment.md.
+    deploy_meta = _build_deploy_meta(player, agent_cfg, env_cfg, env.unwrapped)
+
     print(
         f"\n[Stage 2] Task             : {args.task}"
         f"\n[Stage 2] Stage 1 ckpt     : {args.checkpoint}"
@@ -374,6 +440,7 @@ def run_stage2(env_cfg, log_dir: str) -> None:
         priv_obs_dim=env_cfg.privileged_obs_dim,
         frame_dim=env_cfg.history_obs_dim,
         hist_len=env_cfg.prop_hist_len,
+        deploy_meta=deploy_meta,
     )
     trainer.train()
 

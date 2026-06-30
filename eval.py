@@ -108,6 +108,21 @@ parser.add_argument(
     help="An episode counts as a success if it did NOT fall over (timed out upright) "
     "and accumulated at least this many net forward turns.",
 )
+parser.add_argument(
+    "--deploy_eval",
+    action="store_true",
+    help="Stage-2 deployment gate: replace the actor's ground-truth screwdriver "
+    "euler with the proprioceptive-adaptation network's PREDICTION (no privileged "
+    "obs), i.e. run the exact deploy-time inference path. Compare against the "
+    "oracle (true-euler) run to size the sim-to-deploy gap before hardware.",
+)
+parser.add_argument(
+    "--adapter_checkpoint",
+    type=str,
+    default=None,
+    help="[--deploy_eval] Path to the Stage-2 deploy.pth or proprio_adapt.pth. "
+    "Defaults to <checkpoint dir>/../stage2_nn/{deploy,proprio_adapt}.pth.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
 
@@ -205,6 +220,46 @@ def _safe(extras: dict, key: str) -> torch.Tensor | None:
     return v if isinstance(v, torch.Tensor) else None
 
 
+def _resolve_adapter_path(checkpoint: str, explicit: str | None) -> str | None:
+    """Find the Stage-2 adapter checkpoint for --deploy_eval."""
+    if explicit:
+        return explicit
+    # Stage-1 ckpts live in <run>/nn/*.pth; Stage-2 in <run>/stage2_nn/*.pth.
+    run_dir = os.path.dirname(os.path.dirname(os.path.abspath(checkpoint)))
+    for name in ("deploy.pth", "proprio_adapt.pth", "proprio_adapt_last.pth"):
+        cand = os.path.join(run_dir, "stage2_nn", name)
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def _load_adapter(path: str, device: str):
+    """Load a ProprioAdaptNet from a deploy.pth or proprio_adapt.pth bundle.
+
+    Returns ``(net.eval(), euler_dim)``.  Works for both the deployable bundle
+    (``{"adapter", "net_dims"}``) and the adapter-only checkpoint (``{"net",
+    "net_dims"}``).
+    """
+    from screwdriver_rl.algos.proprio_adapt import ProprioAdaptNet
+
+    state = torch.load(path, map_location=device)
+    nd = state["net_dims"]
+    sd = state.get("adapter", state.get("net"))
+    net = ProprioAdaptNet(
+        frame_dim=int(nd["frame_dim"]), hist_len=int(nd["hist_len"]), out_dim=int(nd["out_dim"])
+    ).to(device).eval()
+    net.load_state_dict(sd)
+    euler_dim = int(state.get("config", {}).get("euler_dim", 3))
+    return net, euler_dim
+
+
+def _obs_tensor(obses):
+    """Extract the actor obs tensor from the rl_games wrapper output (dict or tensor)."""
+    if isinstance(obses, dict):
+        return obses.get("obs", obses.get("policy"))
+    return obses
+
+
 def main() -> None:
     env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
@@ -218,6 +273,12 @@ def main() -> None:
     if args.no_pad_gate and hasattr(env_cfg, "require_pad_facing"):
         env_cfg.require_pad_facing = False
         print("[eval] Pad-facing contact gate: DISABLED (distance-only)", flush=True)
+
+    if args.deploy_eval:
+        # Maintain the proprio-history buffer the adapter reads (only updated when
+        # asymmetric_obs is on). The actor obs dim (policy) is unchanged.
+        env_cfg.asymmetric_obs = True
+        env_cfg.state_space = env_cfg.privileged_obs_dim
 
     env = gym.make(args.task, cfg=env_cfg, render_mode=None)
     base_env = env.unwrapped
@@ -284,6 +345,20 @@ def main() -> None:
         status = "OK" if (mean_abs > 1e-6 or abs(var_mean - 1.0) > 1e-3) else "SUSPECT (looks uninitialised!)"
         print(f"[eval] obs normaliser: |mean|={mean_abs:.4f} var={var_mean:.4f} -> {status}", flush=True)
 
+    # Stage-2 deployment gate: load the adapter that will substitute the euler.
+    adapter = None
+    euler_dim = 3
+    if args.deploy_eval:
+        adapter_path = _resolve_adapter_path(args.checkpoint, args.adapter_checkpoint)
+        if adapter_path is None:
+            raise FileNotFoundError(
+                "--deploy_eval needs a Stage-2 adapter; none found next to the "
+                "checkpoint. Pass --adapter_checkpoint <stage2_nn/deploy.pth>."
+            )
+        adapter, euler_dim = _load_adapter(adapter_path, args.rl_device)
+        print(f"[eval] DEPLOY GATE: euler from adapter prediction (no privileged obs)\n"
+              f"[eval] Adapter      : {adapter_path}  (euler_dim={euler_dim})", flush=True)
+
     max_ep = int(base_env.max_episode_length)
     num_steps = args.steps if args.steps is not None else 2 * max_ep
     is_det = not args.stochastic
@@ -342,6 +417,17 @@ def main() -> None:
     player.get_batch_size(obses, 1)
 
     for step in range(num_steps):
+        # Deployment gate: overwrite the actor's true euler (last euler_dim of the
+        # policy obs) with the adapter's prediction from proprio history, so the
+        # actor runs on exactly the signal it would have on hardware.
+        if adapter is not None:
+            hist = getattr(base_env, "_prop_hist_buf", None)
+            obs_t = _obs_tensor(obses)
+            if hist is not None and obs_t is not None:
+                with torch.no_grad():
+                    euler_hat = adapter(hist)[:, :euler_dim]
+                obs_t[:, -euler_dim:] = euler_hat
+
         actions = player.get_action(obses, is_deterministic=is_det)
         obses, _, _, _ = player.env_step(player.env, actions)
         ex = base_env.extras
