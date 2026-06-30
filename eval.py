@@ -329,6 +329,12 @@ def main() -> None:
     agent_cfg["params"]["load_path"] = args.checkpoint
     agent_cfg["params"]["config"]["player"]["deterministic"] = not args.stochastic
 
+    # Register the HORA-faithful latent network if the config selects it (no-op
+    # for the legacy ``actor_critic`` network).  Must run before ``Runner.load``.
+    from screwdriver_rl.algos.latent_network import LATENT_NETWORK_NAME, register_latent_network
+    if agent_cfg["params"].get("network", {}).get("name") == LATENT_NETWORK_NAME:
+        register_latent_network()
+
     runner = Runner(RlGamesAlgoObserver())
     runner.load(agent_cfg)
     runner.reset()
@@ -345,9 +351,16 @@ def main() -> None:
         status = "OK" if (mean_abs > 1e-6 or abs(var_mean - 1.0) > 1e-3) else "SUSPECT (looks uninitialised!)"
         print(f"[eval] obs normaliser: |mean|={mean_abs:.4f} var={var_mean:.4f} -> {status}", flush=True)
 
-    # Stage-2 deployment gate: load the adapter that will substitute the euler.
+    # Stage-2 deployment gate: load the adapter that substitutes the privileged
+    # signal the actor consumes at deploy.
     adapter = None
     euler_dim = 3
+    # HORA-faithful latent mode: the actor consumes [proprio, latent]; the gate
+    # drives it with the adapter's PREDICTED latent (vs env_mlp's true latent in
+    # the oracle run).  Legacy mode: the adapter substitutes the raw euler.
+    latent_mode = bool(getattr(base_env.cfg, "latent_conditioned", False))
+    deploy_a2c = None
+    deploy_proprio_dim = 0
     if args.deploy_eval:
         adapter_path = _resolve_adapter_path(args.checkpoint, args.adapter_checkpoint)
         if adapter_path is None:
@@ -356,8 +369,16 @@ def main() -> None:
                 "checkpoint. Pass --adapter_checkpoint <stage2_nn/deploy.pth>."
             )
         adapter, euler_dim = _load_adapter(adapter_path, args.rl_device)
-        print(f"[eval] DEPLOY GATE: euler from adapter prediction (no privileged obs)\n"
-              f"[eval] Adapter      : {adapter_path}  (euler_dim={euler_dim})", flush=True)
+        if latent_mode:
+            deploy_a2c = player.model.a2c_network
+            deploy_proprio_dim = int(getattr(deploy_a2c, "proprio_dim",
+                                             base_env.cfg.history_obs_dim))
+            print(f"[eval] DEPLOY GATE (latent): actor driven by adapter-predicted "
+                  f"latent (dim={int(adapter.head.out_features)}), no privileged obs\n"
+                  f"[eval] Adapter      : {adapter_path}", flush=True)
+        else:
+            print(f"[eval] DEPLOY GATE: euler from adapter prediction (no privileged obs)\n"
+                  f"[eval] Adapter      : {adapter_path}  (euler_dim={euler_dim})", flush=True)
 
     max_ep = int(base_env.max_episode_length)
     num_steps = args.steps if args.steps is not None else 2 * max_ep
@@ -417,18 +438,32 @@ def main() -> None:
     player.get_batch_size(obses, 1)
 
     for step in range(num_steps):
-        # Deployment gate: overwrite the actor's true euler (last euler_dim of the
-        # policy obs) with the adapter's prediction from proprio history, so the
-        # actor runs on exactly the signal it would have on hardware.
-        if adapter is not None:
-            hist = getattr(base_env, "_prop_hist_buf", None)
+        # Deployment gate: replace the privileged signal the actor consumes with
+        # the adapter's proprioceptive prediction, so the actor runs on exactly
+        # the signal it would have on hardware.
+        if adapter is not None and latent_mode:
+            # Latent gate: drive the *live* actor trunk with the predicted latent
+            # (the exact hardware inference path: mu(actor_mlp([norm(proprio),
+            # adapter(hist)]))).  The oracle run (no --deploy_eval) instead uses
+            # env_mlp(true priv).
             obs_t = _obs_tensor(obses)
-            if hist is not None and obs_t is not None:
-                with torch.no_grad():
-                    euler_hat = adapter(hist)[:, :euler_dim]
-                obs_t[:, -euler_dim:] = euler_hat
+            hist = getattr(base_env, "_prop_hist_buf", None)
+            with torch.no_grad():
+                xn = player.model.norm_obs(obs_t)
+                latent = adapter(hist)
+                merged = torch.cat([xn[:, :deploy_proprio_dim], latent], dim=-1)
+                mu = deploy_a2c.mu_act(deploy_a2c.mu(deploy_a2c.actor_mlp(merged)))
+                actions = torch.clamp(mu, -1.0, 1.0)
+        else:
+            if adapter is not None:
+                # Legacy euler-bridge gate: overwrite the last euler_dim columns.
+                hist = getattr(base_env, "_prop_hist_buf", None)
+                obs_t = _obs_tensor(obses)
+                if hist is not None and obs_t is not None:
+                    with torch.no_grad():
+                        obs_t[:, -euler_dim:] = adapter(hist)[:, :euler_dim]
+            actions = player.get_action(obses, is_deterministic=is_det)
 
-        actions = player.get_action(obses, is_deterministic=is_det)
         obses, _, _, _ = player.env_step(player.env, actions)
         ex = base_env.extras
 

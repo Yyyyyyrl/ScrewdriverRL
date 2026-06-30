@@ -433,12 +433,31 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
         finger_q = self.allegro.data.joint_pos[:, self._finger_joint_ids]
+        dr = self.cfg.domain_rand
+
+        if getattr(self.cfg, "latent_conditioned", False):
+            # HORA-faithful deployable mode: actor obs = [proprio, privileged].
+            # The raw euler is dropped from the actor obs; it lives inside the
+            # privileged tail, which the custom network encodes into a latent.
+            # Observation noise is applied only to the proprioceptive block (the
+            # real sensors); the privileged tail is fed clean so it stays the
+            # exact quantity the critic sees and the Stage-2 adapter regresses.
+            proprio = torch.cat([finger_q, self._cur_targets], dim=-1)
+            if dr.enabled and dr.obs_noise_std > 0.0:
+                proprio = proprio + torch.randn_like(proprio) * dr.obs_noise_std
+            priv = self._compute_privileged_obs()
+            result: dict[str, torch.Tensor] = {"policy": torch.cat([proprio, priv], dim=-1)}
+            if self.cfg.asymmetric_obs:
+                result["critic"] = priv
+                result["proprio_hist"] = self._prop_hist_buf.clone()
+            return result
+
+        # Legacy mode: the 3-D screwdriver euler is part of the actor obs.
         euler = self.screwdriver.data.joint_pos[:, self._screwdriver_euler_ids]
         obs = torch.cat([finger_q, self._cur_targets, euler], dim=-1)
-        dr = self.cfg.domain_rand
         if dr.enabled and dr.obs_noise_std > 0.0:
             obs = obs + torch.randn_like(obs) * dr.obs_noise_std
-        result: dict[str, torch.Tensor] = {"policy": obs}
+        result = {"policy": obs}
         if self.cfg.asymmetric_obs:
             result["critic"] = self._compute_privileged_obs()
             result["proprio_hist"] = self._prop_hist_buf.clone()

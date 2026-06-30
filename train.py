@@ -101,6 +101,14 @@ parser.add_argument(
     default=50,
     help="[Stage 2] Write an intermediate checkpoint every N iters (0 disables).",
 )
+parser.add_argument(
+    "--adapt_onpolicy",
+    action="store_true",
+    help="[Stage 2] Enable on-policy latent refinement (drive the frozen actor "
+    "with the adapter's predicted latent, ramped in). OFF by default: it "
+    "destabilises the upright screwdriver task (rollout collapse + rising "
+    "AdaptLoss as the mix ramps up). Only enable with a gentle schedule.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
 args.enable_cameras = args.video
@@ -144,6 +152,8 @@ except ImportError:  # very old Isaac Lab
 
 from rl_games.common import env_configurations, vecenv
 from rl_games.torch_runner import Runner
+
+from screwdriver_rl.algos.latent_network import LATENT_NETWORK_NAME, register_latent_network
 
 
 def _resolve_agent_cfg_path(task: str) -> str:
@@ -227,6 +237,12 @@ def _register_rl_games(env, agent_cfg: dict) -> None:
     obs_groups = env_section.get("obs_groups")
     concate_obs_group = env_section.get("concate_obs_groups", True)
 
+    # Register the HORA-faithful latent-conditioned network if the config selects
+    # it (no-op for the legacy ``actor_critic`` network).  Must run before
+    # ``Runner.load`` builds the model.
+    if agent_cfg["params"].get("network", {}).get("name") == LATENT_NETWORK_NAME:
+        register_latent_network()
+
     wrapped = RlGamesVecEnvWrapper(
         env, args.rl_device, clip_obs, clip_actions, obs_groups, concate_obs_group
     )
@@ -253,7 +269,6 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
         model = getattr(player, "model", None)
         if model is None:
             return None
-        actor_state = canonicalize_actor_state(model.state_dict())
 
         net = agent_cfg["params"]["network"]
         cfg_section = agent_cfg["params"]["config"]
@@ -261,12 +276,23 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
 
         obs_dim = int(env_cfg.observation_space.shape[0])
         action_dim = int(env_cfg.action_space.shape[0])
-        euler_dim = max(0, obs_dim - 2 * action_dim)  # [finger_q, cur_targets, euler]
+        # HORA-faithful latent design: the actor consumes [proprio(proprio_dim),
+        # latent(latent_dim)]; the deploy actor normalises only the proprio block,
+        # so the rl_games obs normaliser is sliced to it.  Legacy mode
+        # (latent_dim==0): the actor consumes the full obs incl. the raw euler.
+        latent_dim = int(net.get("latent_dim", 0))
+        proprio_dim = int(net.get("proprio_dim", obs_dim)) if latent_dim > 0 else obs_dim
+
+        actor_state = canonicalize_actor_state(
+            model.state_dict(), proprio_dim=proprio_dim if latent_dim > 0 else None
+        )
 
         actor_arch = {
             "mlp_units": list(net["mlp"]["units"]),
             "activation": net["mlp"].get("activation", "elu"),
             "obs_dim": obs_dim,
+            "proprio_dim": proprio_dim,
+            "latent_dim": latent_dim,
             "action_dim": action_dim,
             "normalize_input": bool(cfg_section.get("normalize_input", True)),
             "clip_obs": float(env_section.get("clip_observations", 5.0)),
@@ -283,7 +309,6 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
         config = {
             "task": args.task,
             "n_finger": action_dim,
-            "euler_dim": euler_dim or 3,
             "action_delta_scale": float(getattr(env_cfg, "action_delta_scale", 0.05)),
             "finger_lower": _row("_finger_lower"),
             "finger_upper": _row("_finger_upper"),
@@ -292,6 +317,8 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
             "history_obs_dim": int(env_cfg.history_obs_dim),
             "privileged_obs_dim": int(env_cfg.privileged_obs_dim),
         }
+        if latent_dim == 0:  # legacy euler-bridge bundle
+            config["euler_dim"] = max(0, obs_dim - 2 * action_dim) or 3
         return {"actor": actor_state, "actor_arch": actor_arch, "config": config}
     except Exception as exc:  # never let bundling abort Stage-2 training
         print(f"[Stage 2] WARNING: could not assemble deploy bundle ({exc}); "
@@ -413,6 +440,7 @@ def run_stage2(env_cfg, log_dir: str) -> None:
         rollout_steps=args.adapt_rollout_steps,
         num_iters=args.adapt_iters,
         save_interval=args.adapt_save_interval,
+        onpolicy_latent=args.adapt_onpolicy,
     )
     stage2_dir = os.path.join(log_dir, "stage2_nn")
 
@@ -421,9 +449,36 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     # pieces already live in the restored player / env; see docs/3-deployment.md.
     deploy_meta = _build_deploy_meta(player, agent_cfg, env_cfg, env.unwrapped)
 
+    # HORA-faithful latent mode: the adapter regresses the teacher latent
+    # ``tanh(env_mlp(normalize(priv)))`` the Stage-1 actor consumed, and (for
+    # on-policy refinement) the frozen actor can be driven by a supplied latent.
+    # Both closures reuse the live restored model so no rebuild is needed.
+    latent_dim = int(agent_cfg["params"]["network"].get("latent_dim", 0))
+    teacher_latent_fn = None
+    actor_with_latent_fn = None
+    if latent_dim > 0:
+        player.model.eval()
+        _model = player.model
+        _a2c = _model.a2c_network
+        _proprio_dim = int(_a2c.proprio_dim)
+
+        def teacher_latent_fn(policy_obs, _m=_model, _a=_a2c, _p=_proprio_dim):
+            with torch.no_grad():
+                x = _m.norm_obs(policy_obs)
+                return torch.tanh(_a.env_mlp(x[:, _p:]))
+
+        def actor_with_latent_fn(policy_obs, latent, _m=_model, _a=_a2c, _p=_proprio_dim):
+            with torch.no_grad():
+                x = _m.norm_obs(policy_obs)
+                merged = torch.cat([x[:, :_p], latent], dim=-1)
+                mu = _a.mu_act(_a.mu(_a.actor_mlp(merged)))
+                return torch.clamp(mu, -1.0, 1.0)
+
     print(
         f"\n[Stage 2] Task             : {args.task}"
         f"\n[Stage 2] Stage 1 ckpt     : {args.checkpoint}"
+        f"\n[Stage 2] Mode             : "
+        f"{'HORA latent (dim ' + str(latent_dim) + ')' if latent_dim > 0 else 'legacy (priv-vector)'}"
         f"\n[Stage 2] Adaptation iters : {adapt_cfg.num_iters}"
         f"\n[Stage 2] Rollout steps/it : {adapt_cfg.rollout_steps}"
         f"\n[Stage 2] Save interval    : every {adapt_cfg.save_interval} iters"
@@ -441,6 +496,9 @@ def run_stage2(env_cfg, log_dir: str) -> None:
         frame_dim=env_cfg.history_obs_dim,
         hist_len=env_cfg.prop_hist_len,
         deploy_meta=deploy_meta,
+        latent_dim=latent_dim or None,
+        teacher_latent_fn=teacher_latent_fn,
+        actor_with_latent_fn=actor_with_latent_fn,
     )
     trainer.train()
 

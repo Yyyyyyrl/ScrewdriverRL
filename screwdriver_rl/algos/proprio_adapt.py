@@ -1,18 +1,26 @@
 """Proprioceptive adaptation network and Stage 2 training loop.
 
-Stage 2 of the RMA pipeline:
-  1. Load the frozen Stage 1 actor.
-  2. Roll out the environment collecting (proprio_history, privileged_obs) pairs.
-  3. Train ProprioAdaptNet to predict privileged_obs from proprio_history alone,
-     so at deployment the policy can infer environment properties without
-     access to ground-truth state (friction, exact pose, etc.).
+Stage 2 of the RMA pipeline (HORA-faithful latent mode):
+  1. Load the frozen Stage 1 actor (incl. its privileged encoder ``env_mlp``).
+  2. Roll out the environment collecting (proprio_history, teacher_latent) pairs,
+     where ``teacher_latent = tanh(env_mlp(normalize(privileged)))`` is exactly
+     the latent the Stage-1 actor consumed.
+  3. Train ProprioAdaptNet to reproduce that latent from proprio_history alone,
+     so at deployment the frozen actor runs on a proprioceptively-inferred latent
+     (pure RMA) — no privileged/simulation-only state, no external tracker.
+  4. Write a self-contained, directly-deployable ``deploy.pth`` (the analogue of
+     HORA's ``stage2_nn/best.pth``) merging the Stage-1 actor + obs normaliser +
+     the trained adapter.  Consumed by ``screwdriver_rl/deploy/policy.py``.
 
 The adaptation network is a lightweight temporal conv (following HORA's
-ProprioAdaptTConv) that maps the last 30 policy steps of [finger_q, targets]
-to the 17-D privileged observation vector used by the Stage 1 critic.
+ProprioAdaptTConv) over the last 30 policy steps of [finger_q, targets].
+
+Legacy fallback: when no ``teacher_latent_fn`` is supplied the adapter instead
+regresses the raw privileged-obs vector (used by the no-Isaac unit tests).
 
 Usage (called from train.py --stage 2):
-  ProprioAdaptTrainer(env, stage1_checkpoint, cfg).train()
+  ProprioAdaptTrainer(env, frozen_actor, cfg, ..., deploy_meta=..., latent_dim=...,
+                      teacher_latent_fn=..., actor_with_latent_fn=...).train()
 """
 
 from __future__ import annotations
@@ -97,6 +105,27 @@ class AdaptTrainCfg:
     rolling ``proprio_adapt_last.pth``, so an interrupted run loses at most
     ``save_interval`` iterations of work instead of everything."""
 
+    # ---- On-policy latent refinement (HORA-faithful latent mode only) ----
+    onpolicy_latent: bool = False
+    """After a warmup, drive the frozen actor with the adapter's *predicted*
+    latent (ramped true→predicted) instead of the teacher latent, so the
+    collected proprio-history distribution matches deployment.
+
+    **Default OFF.**  On the screwdriver task this destabilises training: feeding
+    a not-yet-converged predicted latent to the frozen actor tips the tool over,
+    so the rollout collapses (oscillation / falls), the teacher-latent targets go
+    out-of-distribution, and ``AdaptLoss`` climbs as the mix coefficient ramps up
+    (observed collapse from ~iter 110 as alpha→1).  The upright constraint makes
+    this far more fragile than HORA's pure-rotation task.  Pure supervised
+    regression from healthy teacher-driven rollouts (OFF) is the safe default; the
+    residual sim-to-deploy distribution gap is then measured by the eval gate.
+    Opt in with ``train.py --adapt_onpolicy`` only with a gentle schedule."""
+    onpolicy_warmup_iters: int = 50
+    """Iterations of pure teacher-latent driving before refinement kicks in (let
+    the adapter learn a sane latent first)."""
+    onpolicy_ramp_iters: int = 100
+    """Iterations to ramp the mix coefficient 0→1 (teacher→predicted) after warmup."""
+
 
 # ---------------------------------------------------------------------------
 # Trainer
@@ -108,44 +137,86 @@ class ProprioAdaptTrainer:
     def __init__(
         self,
         env,
-        stage1_actor_fn,  # callable: obs_tensor → action_tensor (frozen policy)
+        stage1_actor_fn,  # callable: obs_tensor → action_tensor (frozen policy, true priv)
         cfg: AdaptTrainCfg,
         out_dir: str,
         device: str = "cuda:0",
         priv_obs_dim: int = 17,
         frame_dim: int = 24,
         hist_len: int = 30,
+        deploy_meta: dict | None = None,
+        latent_dim: int | None = None,
+        teacher_latent_fn=None,        # callable: policy_obs → teacher latent (N, latent_dim)
+        actor_with_latent_fn=None,     # callable: (policy_obs, latent) → action (for on-policy)
     ) -> None:
         self.env = env
         self.actor = stage1_actor_fn
         self.cfg = cfg
         self.out_dir = out_dir
         self.device = device
+        self.deploy_meta = deploy_meta
 
-        self.net = ProprioAdaptNet(frame_dim=frame_dim, hist_len=hist_len, out_dim=priv_obs_dim).to(device)
+        # HORA-faithful latent mode: the adapter regresses the teacher *latent*
+        # ``tanh(env_mlp(priv))`` (out_dim = latent_dim) rather than the raw
+        # privileged vector.  Falls back to the legacy priv-vector target when no
+        # ``teacher_latent_fn`` is given (keeps the FakeEnv tests working).
+        self._latent_mode = teacher_latent_fn is not None and latent_dim is not None
+        self.teacher_latent_fn = teacher_latent_fn
+        self.actor_with_latent_fn = actor_with_latent_fn
+        out_dim = int(latent_dim) if self._latent_mode else int(priv_obs_dim)
+
+        self.net = ProprioAdaptNet(frame_dim=frame_dim, hist_len=hist_len, out_dim=out_dim).to(device)
         self.optim = torch.optim.Adam(self.net.parameters(), lr=cfg.learning_rate)
-        self._net_dims = {"frame_dim": frame_dim, "hist_len": hist_len, "out_dim": priv_obs_dim}
+        self._net_dims = {"frame_dim": frame_dim, "hist_len": hist_len, "out_dim": out_dim}
         # Base (unwrapped) env, used to drive the Stage-2 terminal log.  Resolved
         # via getattr so the no-Isaac FakeEnv in tests works unchanged.
         self._env_unwrapped = getattr(env, "unwrapped", env)
         self._last_extras: dict = {}
         os.makedirs(out_dir, exist_ok=True)
 
-    def _collect(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Roll out the frozen policy and collect (proprio_hist, priv_obs) pairs."""
-        hists, privs = [], []
+    def _onpolicy_alpha(self, it: int) -> float:
+        """Mix coefficient for on-policy latent refinement (0=teacher, 1=predicted)."""
+        if not (self._latent_mode and self.cfg.onpolicy_latent
+                and self.actor_with_latent_fn is not None):
+            return 0.0
+        if it <= self.cfg.onpolicy_warmup_iters:
+            return 0.0
+        ramp = max(1, self.cfg.onpolicy_ramp_iters)
+        return float(min(1.0, (it - self.cfg.onpolicy_warmup_iters) / ramp))
+
+    def _collect(self, it: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
+        """Roll out the frozen policy and collect (proprio_hist, target) pairs.
+
+        ``target`` is the teacher latent in latent mode, else the privileged obs.
+        With on-policy refinement (after warmup) the env is stepped using the
+        adapter's predicted latent (ramped in), so the collected history matches
+        the deployment distribution; the regression target stays the teacher latent.
+        """
+        hists, targets = [], []
         obs_dict, _ = self.env.reset()
         info: dict = {}
+        alpha = self._onpolicy_alpha(it)
         for _ in range(self.cfg.rollout_steps):
+            policy_obs = obs_dict["policy"]
             with torch.no_grad():
-                action = self.actor(obs_dict["policy"])
+                if self._latent_mode and alpha > 0.0:
+                    pred_lat = self.net(obs_dict["proprio_hist"])
+                    teacher_lat = self.teacher_latent_fn(policy_obs)
+                    used_lat = (1.0 - alpha) * teacher_lat + alpha * pred_lat
+                    action = self.actor_with_latent_fn(policy_obs, used_lat)
+                else:
+                    action = self.actor(policy_obs)
             obs_dict, _, terminated, truncated, info = self.env.step(action)
             hists.append(obs_dict["proprio_hist"].detach())  # (N, T, D)
-            privs.append(obs_dict["critic"].detach())        # (N, priv_dim)
+            if self._latent_mode:
+                with torch.no_grad():
+                    targets.append(self.teacher_latent_fn(obs_dict["policy"]).detach())
+            else:
+                targets.append(obs_dict["critic"].detach())  # (N, priv_dim)
         # Keep the final step's info (env extras) for the per-iter Stage-2 log.
         self._last_extras = info if isinstance(info, dict) else {}
         # (rollout_steps × N, ...)
-        return torch.cat(hists, dim=0), torch.cat(privs, dim=0)
+        return torch.cat(hists, dim=0), torch.cat(targets, dim=0)
 
     def _train_on_batch(self, hists: torch.Tensor, privs: torch.Tensor) -> float:
         """One pass of supervised regression on the collected batch."""
@@ -188,6 +259,29 @@ class ProprioAdaptTrainer:
         os.replace(tmp, path)
         return path
 
+    def _save_deploy(self, filename: str, it: int, loss: float) -> str | None:
+        """Write the self-contained, directly-deployable ``deploy.pth`` bundle.
+
+        Merges the Stage-1 actor + obs-normaliser + deployment config captured in
+        ``deploy_meta`` (see ``train.py:_build_deploy_meta``) with the trained
+        adaptation network.  This is the ScrewdriverRL analogue of HORA's
+        ``stage2_nn/best.pth`` — ``screwdriver_rl/deploy/policy.py:DeployPolicy``
+        consumes it with neither Isaac nor rl_games.  No-op (returns ``None``)
+        when no ``deploy_meta`` was provided.
+        """
+        if self.deploy_meta is None:
+            return None
+        bundle = dict(self.deploy_meta)
+        bundle["adapter"] = self.net.state_dict()
+        bundle["net_dims"] = self._net_dims
+        bundle["iter"] = it
+        bundle["loss"] = loss
+        path = os.path.join(self.out_dir, filename)
+        tmp = path + ".tmp"
+        torch.save(bundle, tmp)
+        os.replace(tmp, path)
+        return path
+
     def train(self) -> str:
         """Run full Stage 2 training.  Returns path to the saved checkpoint."""
         print(
@@ -203,9 +297,18 @@ class ProprioAdaptTrainer:
         # and we drive the logger once per iter below (see env _get_rewards).
         setattr(self._env_unwrapped, "_log_stage", 2)
 
+        if self._latent_mode:
+            print(
+                f"  Mode: HORA-faithful latent (adapter → {self._net_dims['out_dim']}-D teacher latent)"
+                f"  |  on-policy refinement: "
+                f"{'on' if (self.cfg.onpolicy_latent and self.actor_with_latent_fn is not None) else 'off'}"
+                f"\n  Deploy bundle: {'deploy.pth will be written' if self.deploy_meta else 'DISABLED (no deploy_meta)'}\n",
+                flush=True,
+            )
+
         loss = float("nan")
         for it in range(1, self.cfg.num_iters + 1):
-            hists, privs = self._collect()
+            hists, privs = self._collect(it)
             loss = self._train_on_batch(hists, privs)
 
             # Drive the env's terminal logger once per iter with the compact
@@ -231,12 +334,20 @@ class ProprioAdaptTrainer:
             if self.cfg.save_interval > 0 and it % self.cfg.save_interval == 0 and not is_last:
                 snap = self._save_ckpt(f"proprio_adapt_iter_{it:05d}.pth", it, loss)
                 self._save_ckpt("proprio_adapt_last.pth", it, loss)
+                deploy_last = self._save_deploy("deploy_last.pth", it, loss)
                 print(
                     f"  [stage2] checkpoint → {os.path.basename(snap)} "
-                    f"(+ proprio_adapt_last.pth)  loss {loss:.5f}",
+                    f"(+ proprio_adapt_last.pth"
+                    f"{' + deploy_last.pth' if deploy_last else ''})  loss {loss:.5f}",
                     flush=True,
                 )
 
         ckpt_path = self._save_ckpt("proprio_adapt.pth", self.cfg.num_iters, loss)
-        print(f"\n[stage2] Saved adaptation network → {ckpt_path}\n", flush=True)
+        deploy_path = self._save_deploy("deploy.pth", self.cfg.num_iters, loss)
+        print(f"\n[stage2] Saved adaptation network → {ckpt_path}", flush=True)
+        if deploy_path:
+            print(f"[stage2] Saved deployable bundle → {deploy_path}\n", flush=True)
+        else:
+            print("[stage2] WARNING: no deploy_meta → adapter-only checkpoint (not "
+                  "directly deployable).\n", flush=True)
         return ckpt_path

@@ -11,9 +11,17 @@ params:
   model:
     name: continuous_a2c_logstd
 
+  # HORA-faithful deployable actor: the policy obs is [proprio(32),
+  # privileged(19)]; the custom network (screwdriver_rl/algos/latent_network.py)
+  # encodes the privileged tail into a latent_dim-D bottleneck and feeds
+  # [proprio, latent] to the MLP below.  The Stage-2 adapter reproduces that
+  # latent proprioceptively, so the trained policy deploys directly.
   network:
-    name: actor_critic
+    name: priv_latent_actor_critic
     separate: False
+    proprio_dim: 32
+    latent_dim: 8
+    priv_mlp_units: [256, 128]
     space:
       continuous:
         mu_activation: None

@@ -129,7 +129,10 @@ class LinkerCurriculumPhaseCfg:
 class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     """Linker Hand L20 (left) continuous screwdriver rotation task.
 
-    Observation space (35-D): [finger_q(16), cur_targets(16), euler(3)]
+    Observation space (51-D, latent-conditioned/deployable):
+      [finger_q(16), cur_targets(16), privileged(19)].  A custom rl_games network
+      encodes the privileged tail into a low-D latent; the raw euler is no longer
+      a standalone actor input (it lives at privileged[0:3]).
     Action space (16-D): HORA-style delta targets for the 16 independent finger
       DOFs (index/middle/ring/pinky x 3 + thumb x 4); 5 mimic distal joints follow
       via COUPLED_JOINTS.
@@ -138,9 +141,17 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     """
 
     # ---- Gym spaces ----
-    observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(35,), dtype=np.float32)
+    # HORA-faithful deployable mode: the actor obs is [finger_q(16),
+    # cur_targets(16), privileged(19)] = 51-D (the raw euler is no longer a
+    # standalone obs; it lives inside the privileged tail the network encodes).
+    # The shape is finalised in __post_init__ once privileged_obs_dim is known
+    # (it bumps +2 under geometry DR).  Box(51) is the default (no geometry DR).
+    observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(51,), dtype=np.float32)
     action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(16,), dtype=np.float32)
     state_space = 0
+
+    # HORA-faithful latent-conditioned actor (deployable). See base cfg.
+    latent_conditioned: bool = True
 
     # ---- Active fingers (full five-finger grasp) ----
     fingers: tuple[str, ...] = ("index", "middle", "ring", "pinky", "thumb")
@@ -412,4 +423,14 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
                 manifest = json.load(f)
             self.pregrasp_positions_buckets = seed_pregrasp_buckets(
                 self.pregrasp_positions, manifest, _FLEX_WEIGHTS
+            )
+
+        # Finalise the actor obs space for the latent-conditioned (deployable)
+        # mode: [proprio(history_obs_dim) , privileged(privileged_obs_dim)].
+        # history_obs_dim = 2 * n_finger_dofs = 32; privileged_obs_dim is 19
+        # (or 21 under geometry DR, bumped just above).
+        if self.latent_conditioned:
+            obs_dim = self.history_obs_dim + self.privileged_obs_dim
+            self.observation_space = gym.spaces.Box(
+                low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
             )

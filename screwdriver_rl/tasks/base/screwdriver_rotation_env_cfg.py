@@ -403,6 +403,13 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     # RMA / asymmetric observations
     # ------------------------------------------------------------------
     asymmetric_obs: bool = False
+    latent_conditioned: bool = False
+    """HORA-faithful deployable mode.  When True the actor observation is
+    ``[finger_q(D), cur_targets(D), privileged]`` (the raw 3-D euler is dropped);
+    a custom rl_games network encodes the privileged tail into a low-D latent so
+    the Stage-2 adapter can reproduce it proprioceptively at deploy.  When False
+    the legacy mode is used: ``[finger_q, cur_targets, euler]``.  The deployable
+    LinkerL20 task sets this True (see its cfg ``__post_init__``)."""
     privileged_obs_dim: int = MISSING
     """3 euler + 3 angvel + 3 rel-pos + 4 quat + 1 friction +
     num_fingers fingertip-dist (= 14 + len(fingers)).  Hand-specific."""
