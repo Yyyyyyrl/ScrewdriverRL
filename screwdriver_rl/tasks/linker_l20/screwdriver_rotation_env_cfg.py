@@ -49,16 +49,20 @@ from screwdriver_rl.utils.variants import seed_pregrasp_buckets
 
 
 # Fraction of the radial flexion delta applied to each joint of a finger's
-# pregrasp tuple (semantic order; abduction joint gets 0, flexion joints share
-# it).  Used by ``utils.variants.seed_pregrasp_buckets`` (see plan §3d): the
-# index finger stabilises the cap, so handle length is not grasp-neutral and
-# postures are bucketed over both diameter and length.
+# pregrasp tuple.  Used by ``utils.variants.seed_pregrasp_buckets`` (see plan
+# §3d).  The index finger stabilises the cap top, so it should NOT follow handle
+# diameter; handle length is handled by a per-bucket fixed-base root z-offset in
+# ``__post_init__`` below.
 _FLEX_WEIGHTS = {
-    "index":  (0.0, 0.5, 0.5),
+    "index":  (0.0, 0.0, 0.0),
     "middle": (0.0, 0.5, 0.5),
     "ring":   (0.0, 0.5, 0.5),
     "pinky":  (0.0, 0.5, 0.5),
-    "thumb":  (0.0, 0.5, 0.5, 0.0),
+    # The refined palm-closer posture already puts thumb_cmc_roll near its upper
+    # guard margin and thumb_cmc_pitch near its lower guard margin.  Do not use
+    # those two joints for diameter bucket compensation; put the small reach bias
+    # into yaw + MCP where the URDF limits still have useful authority.
+    "thumb":  (0.2, 0.0, 0.0, 0.8),
 }
 
 
@@ -371,23 +375,23 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             # the palm sits closer while the index terminal/front pad still
             # presses near the cap center.  Middle/ring/pinky stack down one
             # handle side and the thumb opposes them.  Only *_distal meshes
-            # touch the screwdriver.
+            # touch the screwdriver.  The joint solve keeps every URDF joint at
+            # least 0.10 rad from its hard limit.
             pos=(0.15107654, -0.06682857, 1.32253946),
             rot=(0.44578500, -0.47244983, -0.22820989, 0.72524971),
             joint_pos={
                 # index / middle / ring / pinky: roll, pitch, pip, dip(=0.8917*pip)
-                "index_mcp_roll": 0.130000, "index_mcp_pitch": 0.179608,
-                "index_pip": 1.371321, "index_dip": 1.222807,
-                "middle_mcp_roll": -0.130000, "middle_mcp_pitch": 0.205776,
-                "middle_pip": 1.351135, "middle_dip": 1.204807,
-                "ring_mcp_roll": -0.057778, "ring_mcp_pitch": 0.462712,
-                "ring_pip": 1.204709, "ring_dip": 1.074239,
-                "pinky_mcp_roll": 0.078981, "pinky_mcp_pitch": 0.665494,
-                "pinky_pip": 1.024866, "pinky_dip": 0.913873,
-                # All joints retain at least 0.04 rad of URDF-limit margin.
-                "thumb_cmc_yaw": 0.672749, "thumb_cmc_roll": 1.180000,
-                "thumb_cmc_pitch": 0.040000, "thumb_mcp": 0.941868,
-                "thumb_ip": 1.094356,
+                "index_mcp_roll": 0.070000, "index_mcp_pitch": 0.140535,
+                "index_pip": 1.379901, "index_dip": 1.230458,
+                "middle_mcp_roll": -0.070000, "middle_mcp_pitch": 0.184823,
+                "middle_pip": 1.354472, "middle_dip": 1.207783,
+                "ring_mcp_roll": -0.070000, "ring_mcp_pitch": 0.449762,
+                "ring_pip": 1.207458, "ring_dip": 1.076690,
+                "pinky_mcp_roll": 0.045669, "pinky_mcp_pitch": 0.654302,
+                "pinky_pip": 1.027913, "pinky_dip": 0.916590,
+                "thumb_cmc_yaw": 0.673745, "thumb_cmc_roll": 1.120000,
+                "thumb_cmc_pitch": 0.100000, "thumb_mcp": 0.876434,
+                "thumb_ip": 1.018329,
             },
         ),
         actuators={
@@ -405,11 +409,11 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     # Must stay in sync with init_state.joint_pos above.
     pregrasp_positions: dict[str, tuple[float, ...]] = field(
         default_factory=lambda: {
-            "index":  (0.130000, 0.179608, 1.371321),
-            "middle": (-0.130000, 0.205776, 1.351135),
-            "ring":   (-0.057778, 0.462712, 1.204709),
-            "pinky":  (0.078981, 0.665494, 1.024866),
-            "thumb":  (0.672749, 1.180000, 0.040000, 0.941868),
+            "index":  (0.070000, 0.140535, 1.379901),
+            "middle": (-0.070000, 0.184823, 1.354472),
+            "ring":   (-0.070000, 0.449762, 1.207458),
+            "pinky":  (0.045669, 0.654302, 1.027913),
+            "thumb":  (0.673745, 1.120000, 0.100000, 0.876434),
         }
     )
 
@@ -426,6 +430,15 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             self.pregrasp_positions_buckets = seed_pregrasp_buckets(
                 self.pregrasp_positions, manifest, _FLEX_WEIGHTS
             )
+            base_length = float(manifest["base"]["length"])
+            root_offsets = [(0.0, 0.0, 0.0)] * int(manifest["num_buckets"])
+            for variant in manifest["variants"]:
+                root_offsets[int(variant["bucket"])] = (
+                    0.0,
+                    0.0,
+                    float(variant["length"]) - base_length,
+                )
+            self.pregrasp_root_pos_offsets_buckets = root_offsets
 
         # Finalise the actor obs space for the latent-conditioned (deployable)
         # mode: [proprio(history_obs_dim) , privileged(privileged_obs_dim)].
