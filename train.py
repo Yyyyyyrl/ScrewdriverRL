@@ -402,9 +402,36 @@ def run_stage1(env_cfg, log_dir: str) -> None:
     env.close()
 
 
+def _assert_checkpoint_matches_task(ckpt_path: str, env_cfg) -> None:
+    """Fail fast if the Stage-1 checkpoint's privileged width doesn't match this task.
+
+    The DR and non-DR LinkerL20 phase checkpoints share a basename (differing only by
+    the ``runs/<task>/`` output dir), so it is easy to feed the wrong one.  Their
+    latent-encoder input differs (19 vs 21), which would otherwise crash cryptically
+    deep inside ``player.restore`` with an ``env_mlp``/normaliser shape mismatch.
+    """
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    except Exception:
+        return  # let player.restore surface any genuine load error
+    model = ckpt.get("model") if isinstance(ckpt, dict) else None
+    w = model.get("a2c_network.env_mlp.0.weight") if isinstance(model, dict) else None
+    if w is None:
+        return  # legacy (non-latent) checkpoint — nothing to compare
+    ckpt_priv, task_priv = int(w.shape[1]), int(env_cfg.privileged_obs_dim)
+    if ckpt_priv != task_priv:
+        raise ValueError(
+            f"Stage-1 checkpoint privileged dim {ckpt_priv} != task '{args.task}' "
+            f"privileged_obs_dim {task_priv}\n  checkpoint: {ckpt_path}\n"
+            "This checkpoint was trained for a different task (DR vs non-DR). "
+            "Pass the --checkpoint that matches --task."
+        )
+
+
 def run_stage2(env_cfg, log_dir: str) -> None:
     if not args.checkpoint:
         raise ValueError("--checkpoint pointing to the Stage 1 .pth is required for Stage 2.")
+    _assert_checkpoint_matches_task(args.checkpoint, env_cfg)
 
     env_cfg.asymmetric_obs = True
     env_cfg.state_space = env_cfg.privileged_obs_dim

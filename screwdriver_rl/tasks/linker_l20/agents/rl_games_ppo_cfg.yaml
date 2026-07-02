@@ -12,10 +12,12 @@ params:
     name: continuous_a2c_logstd
 
   # HORA-faithful deployable actor: the policy obs is [proprio(32),
-  # privileged(19)]; the custom network (screwdriver_rl/algos/latent_network.py)
-  # encodes the privileged tail into a latent_dim-D bottleneck and feeds
-  # [proprio, latent] to the MLP below.  The Stage-2 adapter reproduces that
-  # latent proprioceptively, so the trained policy deploys directly.
+  # privileged(19; 21 under geometry DR)]; the custom network
+  # (screwdriver_rl/algos/latent_network.py) encodes the privileged tail into a
+  # latent_dim-D bottleneck and feeds [proprio, latent] to the MLP below.  The
+  # Stage-2 adapter reproduces that latent proprioceptively, so the trained policy
+  # deploys directly.  proprio_dim is fixed (32); the privileged width is derived
+  # from the env obs space, so this same config serves the DR and non-DR tasks.
   network:
     name: priv_latent_actor_critic
     separate: False
@@ -43,10 +45,10 @@ params:
 
   # Stage 1 asymmetric critic.
   # Activated when the environment's state_space > 0 (i.e. --stage 1).
-  # The critic sees the 19-D privileged observation (exact screwdriver pose,
-  # velocity, friction, fingertip distances) while the actor only sees the
-  # 35-D policy observation.  rl_games reads both dims from the env spaces, so
-  # the network below adapts automatically.
+  # The critic sees the full privileged observation (19-D, or 21-D under geometry
+  # DR: screwdriver pose, velocity, friction, fingertip forces, + geometry scales)
+  # while the actor consumes [proprio(32), latent(8)].  rl_games reads both dims
+  # from the env spaces, so the network below adapts automatically.
   central_value_config:
     minibatch_size: 8192
     mini_epochs: 4
