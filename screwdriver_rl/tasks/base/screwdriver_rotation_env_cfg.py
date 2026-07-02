@@ -563,6 +563,14 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     posture + home target from its bucket row instead of the single shared
     ``pregrasp_positions``.  Built by the hand cfg's ``__post_init__``."""
 
+    pregrasp_root_pos_offsets_buckets: list | None = None
+    """Optional per-bucket hand-root position offset ``(x, y, z)`` in the world
+    frame, one tuple per manifest bucket id.  When set AND
+    ``domain_rand.randomize_geometry`` is True, the env shifts each env's hand root
+    by its bucket's offset at reset so the grasp tracks the per-variant handle
+    *length* (the cap rises with a longer handle, so the hand rises with it).  Built
+    by the hand cfg's ``__post_init__`` alongside ``pregrasp_positions_buckets``."""
+
     # ------------------------------------------------------------------
     # Domain randomisation
     # ------------------------------------------------------------------

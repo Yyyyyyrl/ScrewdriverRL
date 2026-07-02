@@ -161,6 +161,12 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         # row by bucket; otherwise it is the single shared ``(n_joints,)`` vector.
         self._pregrasp_pos: dict[str, torch.Tensor] = self._make_pregrasp_table()
 
+        # Per-bucket hand-root offset (world xyz) for handle-length compensation.
+        # ``(num_buckets, 3)`` under geometry DR with a cfg table, else ``None``.
+        self._pregrasp_root_offset: torch.Tensor | None = (
+            self._make_pregrasp_root_offset_table()
+        )
+
         # ---- Continuous-turn tracking ----
         self._policy_dt: float = float(cfg.decimation) * float(cfg.sim.dt)
         self._prev_z = self.screwdriver.data.joint_pos[
@@ -624,6 +630,10 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         # ---- Hand ----
         root = self.allegro.data.default_root_state[env_ids].clone()
         root[:, :3] += self.scene.env_origins[env_ids]
+        # Per-bucket length compensation: shift the whole hand (world frame) so the
+        # grasp tracks each env's handle length; the cap rises with a longer handle.
+        if self._pregrasp_root_offset is not None:
+            root[:, :3] += self._pregrasp_root_offset[self._env_bucket_idx[env_ids]]
         self.allegro.write_root_pose_to_sim(root[:, :7], env_ids=env_ids)
         self.allegro.write_root_velocity_to_sim(root[:, 7:], env_ids=env_ids)
 
@@ -1192,3 +1202,16 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             )
             for finger in self.FINGER_JOINT_NAMES
         }
+
+    def _make_pregrasp_root_offset_table(self) -> torch.Tensor | None:
+        """Per-bucket hand-root offset (world xyz), ``(num_buckets, 3)`` or ``None``.
+
+        Active only under geometry DR with a ``pregrasp_root_pos_offsets_buckets``
+        cfg table and per-env bucket assignments; reset gathers each env's row by
+        ``_env_bucket_idx`` and shifts the hand root so the grasp tracks the
+        per-variant handle length.
+        """
+        offsets = getattr(self.cfg, "pregrasp_root_pos_offsets_buckets", None)
+        if offsets is None or getattr(self, "_env_bucket_idx", None) is None:
+            return None
+        return torch.tensor(offsets, dtype=torch.float32, device=self.device)
