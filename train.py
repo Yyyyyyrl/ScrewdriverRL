@@ -69,12 +69,13 @@ parser.add_argument(
     type=int,
     default=0,
     help=(
-        "[Stage 1] Seed the curriculum step counter so a resumed run starts in a "
-        "later phase instead of Phase 0.  The counter is process state, not saved "
+        "[Stage 1 only] Seed the curriculum step counter so a resumed run starts in "
+        "a later phase instead of Phase 0.  The counter is process state, not saved "
         "in the checkpoint, so a plain --checkpoint resume restarts the curriculum "
         "at Phase 0.  To fine-tune a final-phase policy (e.g. for the anti-wobble "
         "tweak), pass a value >= the last phase's step_start so it stays in the "
-        "final phase.  0 (default) = start from Phase 0."
+        "final phase.  0 (default) = start from Phase 0.  (Stage 2 uses "
+        "--stage2_phase instead.)"
     ),
 )
 parser.add_argument(
@@ -108,6 +109,16 @@ parser.add_argument(
     "with the adapter's predicted latent, ramped in). OFF by default: it "
     "destabilises the upright screwdriver task (rollout collapse + rising "
     "AdaptLoss as the mix ramps up). Only enable with a gentle schedule.",
+)
+parser.add_argument(
+    "--stage2_phase",
+    type=str,
+    default="final",
+    help="[Stage 2] Curriculum phase to train the adapter under. 'final' (default) "
+    "pins the last phase — the deployment regime (matches --eval_phase final); "
+    "'none' leaves the counter at 0 (Phase 1, the pre-pin behaviour); an integer "
+    "pins that phase index. The teacher/adapter then see the pinned phase's "
+    "termination + episode length; per-env dynamics diversity still comes from DR.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
@@ -437,6 +448,34 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     env_cfg.state_space = env_cfg.privileged_obs_dim
 
     env = gym.make(args.task, cfg=env_cfg, render_mode=None)
+
+    # Pin the curriculum phase for adaptation.  Stage 2 is a frozen actor + a pure
+    # latent-MSE, so it ignores the per-phase reward weights; the only phase effect
+    # on its data is termination + episode length.  Deployment == the final phase, so
+    # by default we seed the global step counter past the last phase's step_start (the
+    # env selects the phase from _global_steps every step).  Per-env dynamics diversity
+    # still comes from domain randomisation, which is phase-independent.
+    base_env = env.unwrapped
+    _phases = getattr(env_cfg, "curriculum_phases", None)
+    if _phases:
+        _spec = str(args.stage2_phase).strip().lower()
+        _idx = (len(_phases) - 1) if _spec == "final" else (
+            None if _spec in ("none", "") else int(_spec)
+        )
+        if _idx is not None:
+            if not 0 <= _idx < len(_phases):
+                raise ValueError(
+                    f"--stage2_phase {args.stage2_phase} out of range for "
+                    f"{len(_phases)} curriculum phases (use 'final', 'none', or 0..{len(_phases) - 1})."
+                )
+            base_env._global_steps = int(_phases[_idx].step_start)
+            base_env._update_curriculum()  # apply now so the first reset uses this phase
+            print(
+                f"[Stage 2] Curriculum pinned to phase {_idx + 1}/{len(_phases)} "
+                f"(_global_steps={base_env._global_steps:,}, episode_length_s="
+                f"{env_cfg.episode_length_s}); --stage2_phase={args.stage2_phase}",
+                flush=True,
+            )
 
     # Build the frozen Stage 1 actor via RL-Games player.
     agent_cfg = _load_agent_cfg(env.unwrapped.num_envs, args.rl_device, args.seed, log_dir)
