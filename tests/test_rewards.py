@@ -122,6 +122,47 @@ def test_shaft_spin_delta_ignores_precession():
     assert abs(spin.item()) < 1e-5
 
 
+def test_force_window_trapezoid():
+    f = torch.tensor([0.0, 0.1, 0.3, 0.5, 2.0, 4.0, 6.0, 8.0, 10.0])
+    w = R.force_window(f, f_min=0.1, f_lo=0.5, f_hi=4.0, f_max=8.0)
+    assert w[0].item() == 0.0            # below f_min
+    assert w[1].item() == 0.0            # at f_min
+    assert abs(w[2].item() - 0.5) < 1e-6  # halfway up the rise
+    assert w[3].item() == 1.0            # at f_lo
+    assert w[4].item() == 1.0            # inside the flat top
+    assert w[5].item() == 1.0            # at f_hi
+    assert abs(w[6].item() - 0.5) < 1e-6  # halfway down the fall
+    assert w[7].item() == 0.0            # at f_max
+    assert w[8].item() == 0.0            # above f_max
+
+
+def test_excess_force():
+    f = torch.tensor([0.0, 4.0, 8.0, 10.0])
+    e = R.excess_force(f, f_max=8.0)
+    assert torch.allclose(e, torch.tensor([0.0, 0.0, 0.0, 2.0]))
+
+
+def test_soft_count_gate():
+    scores = torch.tensor([[1.0, 1.0, 0.0, 0.0], [0.5, 0.0, 0.0, 0.0]])
+    g = R.soft_count_gate(scores, target=2.0)
+    assert abs(g[0].item() - 1.0) < 1e-6   # 2 fingers -> fully open
+    assert abs(g[1].item() - 0.25) < 1e-6  # half a finger -> 0.25
+    # Saturates at 1 even when more than the target engage.
+    g2 = R.soft_count_gate(torch.tensor([[1.0, 1.0, 1.0]]), target=2.0)
+    assert g2[0].item() == 1.0
+
+
+def test_home_deviation_deadband():
+    q = torch.tensor([[0.0, 0.5, -0.5]])
+    home = torch.zeros(1, 3)
+    # |dev|-0.1 clamped -> [0, 0.4, 0.4]; squared sum = 0.16 + 0.16 = 0.32
+    c = R.home_deviation(q, home, deadband=0.1)
+    assert abs(c.item() - 0.32) < 1e-6
+    # Motion within the deadband is free.
+    c0 = R.home_deviation(torch.tensor([[0.05, -0.05]]), torch.zeros(1, 2), deadband=0.1)
+    assert c0.item() == 0.0
+
+
 def test_near_contact_score_thumb_weighting():
     near = torch.tensor([[1.0, 0.0, 0.5]])  # index, middle, thumb
     score = R.near_contact_score(near, thumb_index=2, non_thumb_indices=[0, 1], top_k=1)
