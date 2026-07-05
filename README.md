@@ -204,6 +204,26 @@ python -m pytest tests/ -q
 
 ---
 
+## Deployment (real hand)
+
+Stage 2 writes a self-contained `stage2_nn/deploy.pth`; `screwdriver_rl/deploy/`
+runs it on a physical LinkerHand L20/G20 (left) via the LinkerHand SDK — no
+Isaac/ROS needed on the deploy box. Full runbook: **`docs/DEPLOY.md`**
+(design notes: `docs/3-deployment.md`).
+
+```bash
+# Offline dry-run (echo simulator, any machine):
+python -m screwdriver_rl.deploy.deploy_linker --checkpoint <stage2_nn/deploy.pth> \
+    --dry-run --max-ticks 50 --record /tmp/dry.csv
+# One-time hardware calibration (per-joint direction test → overlay JSON):
+python -m screwdriver_rl.deploy.hand_check wiggle --out linker_calib.json
+# Live (direct CAN, 10 Hz, bounded + recorded):
+python -m screwdriver_rl.deploy.deploy_linker --checkpoint <stage2_nn/deploy.pth> \
+    --calib linker_calib.json --max-ticks 100 --record run1.csv
+```
+
+---
+
 ## Linker Hand L20 — bring-up status
 
 The Linker task is wired, stable, and trainable. A few items still benefit from viewport tuning before/while training (all noted in `screwdriver_rl/tasks/linker_l20/screwdriver_rotation_env_cfg.py`):
