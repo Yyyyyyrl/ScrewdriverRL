@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "note": "hand_check wiggle 2026-07-06 11:33 G20 left",
+  "joints": {
+    "index_mcp_roll": {
+      "flip": false
+    },
+    "index_mcp_pitch": {
+      "flip": false
+    },
+    "index_pip": {
+      "flip": false
+    },
+    "middle_mcp_roll": {
+      "flip": false
+    },
+    "middle_mcp_pitch": {
+      "flip": false
+    },
+    "middle_pip": {
+      "flip": false
+    },
+    "ring_mcp_roll": {
+      "flip": false
+    },
+    "ring_mcp_pitch": {
+      "flip": false
+    },
+    "ring_pip": {
+      "flip": false
+    },
+    "pinky_mcp_roll": {
+      "flip": false
+    },
+    "pinky_mcp_pitch": {
+      "flip": false
+    },
+    "pinky_pip": {
+      "flip": false
+    },
+    "thumb_cmc_yaw": {
+      "flip": false
+    },
+    "thumb_cmc_roll": {
+      "flip": false
+    },
+    "thumb_cmc_pitch": {
+      "flip": false
+    },
+    "thumb_mcp": {
+      "flip": false
+    }
+  }
+}
