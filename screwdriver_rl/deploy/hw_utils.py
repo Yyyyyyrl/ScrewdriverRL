@@ -78,12 +78,12 @@ def bootstrap_sdk(sdk_root: str | None = None) -> str:
     """Make the LinkerHand SDK importable; returns the scripts dir added to path.
 
     Resolution order: explicit ``sdk_root`` arg > ``$LINKERHAND_SDK_ROOT`` >
-    ``/home/fresh/Workspace/linkerhand-ros-sdk``.  The SDK's Python packages
+    ``/home/user/linkerhand-ros-sdk``.  The SDK's Python packages
     live under ``<root>/linker_hand_sdk_ros/scripts`` (top-level ``LinkerHand``
     package, which itself imports its own top-level ``utils``/``core`` — avoid
     running from a cwd that shadows those names).
     """
-    root = sdk_root or os.environ.get("LINKERHAND_SDK_ROOT") or "/home/fresh/Workspace/linkerhand-ros-sdk"
+    root = sdk_root or os.environ.get("LINKERHAND_SDK_ROOT") or "/home/user/linkerhand-ros-sdk"
     scripts = os.path.join(root, "linker_hand_sdk_ros", "scripts")
     if not os.path.isdir(os.path.join(scripts, "LinkerHand")):
         raise FileNotFoundError(
