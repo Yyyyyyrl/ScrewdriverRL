@@ -29,7 +29,7 @@ def _reset_calibration():
 
 
 def _sdk_mapping_path():
-    root = os.environ.get("LINKERHAND_SDK_ROOT", "/home/fresh/Workspace/linkerhand-ros-sdk")
+    root = os.environ.get("LINKERHAND_SDK_ROOT", "/home/user/linkerhand-ros-sdk")
     return Path(root) / "linker_hand_sdk_ros" / "scripts" / "LinkerHand" / "utils" / "mapping.py"
 
 
