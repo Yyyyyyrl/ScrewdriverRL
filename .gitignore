@@ -27,6 +27,8 @@ logs/
 checkpoints/
 wandb/
 outputs/
+*.webm
+*.csv
 
 # Local editor and OS files
 .idea/
