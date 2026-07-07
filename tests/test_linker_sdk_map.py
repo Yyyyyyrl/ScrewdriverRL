@@ -210,3 +210,40 @@ def test_pregrasp_matches_env_cfg():
     flat = [x for f in fingers for x in found[f]]
     assert flat == pytest.approx(sdkmap.PREGRASP_16, abs=1e-9), (
         "PREGRASP_16 drifted from the env cfg pregrasp_positions — update linker_sdk_map.py")
+
+
+# --------------------------------------------------------------------------- #
+# Calibration overlay lo/hi (absolute-angle mapping) support.
+# --------------------------------------------------------------------------- #
+
+def test_overlay_lo_hi_absolute_identity():
+    """lo/hi == the slot's SDK arc range makes the map absolute (arc == clamp(v))."""
+    overlay = {"joints": {"index_pip": {
+        "lo": sdkmap.L20_L_MIN[16], "hi": sdkmap.L20_L_MAX[16]}}}
+    sdkmap.apply_calibration(overlay)
+    for v in (0.0, 0.5, 1.0, 1.08):
+        arc = sdkmap.joints16_to_sdk_arc([v if js.name == "index_pip" else js.lo
+                                          for js in sdkmap.active_joints()])
+        assert arc[16] == pytest.approx(v, abs=1e-9)
+    # beyond the SDK range the command clamps to the physical limit
+    arc = sdkmap.joints16_to_sdk_arc([1.57 if js.name == "index_pip" else js.lo
+                                      for js in sdkmap.active_joints()])
+    assert arc[16] == pytest.approx(sdkmap.L20_L_MAX[16], abs=1e-9)
+
+
+def test_overlay_lo_hi_roundtrip_inverse():
+    overlay = {"joints": {"middle_pip": {"lo": 0.0, "hi": 1.08},
+                          "index_mcp_roll": {"lo": -0.26, "hi": 0.26}}}
+    sdkmap.apply_calibration(overlay)
+    t16 = [0.5 * (js.lo + js.hi) for js in sdkmap.active_joints()]
+    rt = sdkmap.sdk_range_to_joints16(sdkmap.joints16_to_sdk_range(t16))
+    assert rt == pytest.approx(t16, abs=0.01)
+
+
+def test_overlay_lo_hi_validation():
+    with pytest.raises(ValueError, match="must be a number"):
+        sdkmap.build_joint_table({"joints": {"index_pip": {"lo": "x"}}})
+    with pytest.raises(ValueError, match="must be a number"):
+        sdkmap.build_joint_table({"joints": {"index_pip": {"hi": True}}})
+    with pytest.raises(ValueError, match="hi > lo"):
+        sdkmap.build_joint_table({"joints": {"index_pip": {"lo": 1.0, "hi": 0.5}}})
