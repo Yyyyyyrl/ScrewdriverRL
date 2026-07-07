@@ -51,6 +51,15 @@ test on the real hand and writes a small **calibration overlay** (JSON) that
 
     {"version": 1, "joints": {"index_mcp_roll": {"flip": true},
                               "thumb_cmc_pitch": {"slot": 0, "flip": false}}}
+
+The overlay may also override a joint's **mapping range** (``lo``/``hi``, in
+our training-URDF radians).  Setting a joint's ``lo``/``hi`` to its SDK slot's
+calibrated arc range (``L20_L_MIN/MAX[slot]``) turns the fraction map into an
+**absolute-angle map** for that joint (``arc == clamp(value, lo, hi)``): the
+physical angle then matches the policy's angle instead of its range fraction.
+Measured on hardware 2026-07-06, the default fraction map leaves the four
+fingertips 0.20–0.36 rad straighter than sim at the pregrasp (URDF pip range
+0..1.57 vs SDK tip arc 0..1.08) — see ``linker_calib_absolute.json``.
 """
 
 from __future__ import annotations
@@ -154,7 +163,7 @@ DEFAULT_JOINTS: tuple[JointSpec, ...] = (
 
 N_FINGER_JOINTS = len(DEFAULT_JOINTS)  # 16
 
-_JOINT_KEYS = frozenset({"flip", "slot"})
+_JOINT_KEYS = frozenset({"flip", "slot", "lo", "hi"})
 _TOP_KEYS = frozenset({"version", "note", "joints"})
 
 _active_joints: tuple[JointSpec, ...] = DEFAULT_JOINTS
@@ -204,6 +213,15 @@ def build_joint_table(overlay: Mapping | None = None) -> list[JointSpec]:
                 if slot in _RESERVED_SLOTS:
                     raise ValueError(f"calibration overlay: joint {name!r} slot {slot} is reserved")
                 js = js._replace(slot=slot)
+            for key in ("lo", "hi"):
+                if key in spec:
+                    v = spec[key]
+                    if isinstance(v, bool) or not isinstance(v, (int, float)):
+                        raise ValueError(f"calibration overlay: joint {name!r} {key} must be a number")
+                    js = js._replace(**{key: float(v)})
+            if js.hi <= js.lo:
+                raise ValueError(
+                    f"calibration overlay: joint {name!r} needs hi > lo, got [{js.lo}, {js.hi}]")
             table[name] = js
     result = [table[js.name] for js in DEFAULT_JOINTS]  # preserve semantic order
     slots = [js.slot for js in result]
