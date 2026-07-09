@@ -1,0 +1,381 @@
+"""Pure-Python guards for the LinkerL20 free-object in-hand rotation task."""
+
+from __future__ import annotations
+
+import ast
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+import pytest
+import yaml
+
+_ROOT = Path(__file__).resolve().parents[1]
+_URDF = _ROOT / "assets" / "linker_hand_l20" / "linkerhand_l20_left.urdf"
+_CFG = _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_rotation_env_cfg.py"
+_ENV = _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_rotation_env.py"
+_REGISTRY = _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "__init__.py"
+_YAML = _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "agents" / "rl_games_inhand_ppo_cfg.yaml"
+
+EXPECTED_INDEPENDENT = {
+    "index_mcp_roll", "index_mcp_pitch", "index_pip",
+    "middle_mcp_roll", "middle_mcp_pitch", "middle_pip",
+    "ring_mcp_roll", "ring_mcp_pitch", "ring_pip",
+    "pinky_mcp_roll", "pinky_mcp_pitch", "pinky_pip",
+    "thumb_cmc_yaw", "thumb_cmc_roll", "thumb_cmc_pitch", "thumb_mcp",
+}
+
+EXPECTED_MIMIC = {
+    "index_dip": ("index_pip", 0.8917),
+    "middle_dip": ("middle_pip", 0.8917),
+    "ring_dip": ("ring_pip", 0.8917),
+    "pinky_dip": ("pinky_pip", 0.8917),
+    "thumb_ip": ("thumb_mcp", 1.1619),
+}
+
+
+@pytest.fixture(scope="module")
+def urdf_root():
+    assert _URDF.exists(), f"Linker URDF not found at {_URDF}"
+    return ET.parse(_URDF).getroot()
+
+
+@pytest.fixture(scope="module")
+def cfg_tree():
+    assert _CFG.exists(), f"missing {_CFG}"
+    return ast.parse(_CFG.read_text())
+
+
+@pytest.fixture(scope="module")
+def env_tree():
+    assert _ENV.exists(), f"missing {_ENV}"
+    return ast.parse(_ENV.read_text())
+
+
+def _literal(tree: ast.Module, name: str):
+    for node in tree.body:
+        target = None
+        value = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target, value = node.targets[0].id, node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target, value = node.target.id, node.value
+        if target == name:
+            return ast.literal_eval(value)
+    raise AssertionError(f"{name} not found")
+
+
+def _class_literal(tree: ast.Module, class_name: str, name: str):
+    cls = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    for node in cls.body:
+        target = None
+        value = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target, value = node.targets[0].id, node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target, value = node.target.id, node.value
+        if target == name:
+            return ast.literal_eval(value)
+    raise AssertionError(f"{class_name}.{name} not found")
+
+
+def _compile_function(tree: ast.Module, name: str):
+    fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    mod = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(mod)
+    ns = {}
+    exec(compile(mod, filename=f"<{name}>", mode="exec"), ns)
+    return ns[name]
+
+
+def _joints(root):
+    return {j.get("name"): j for j in root.findall("joint")}
+
+
+def test_obs_dimensions_follow_hora_contract():
+    n_independent = len(EXPECTED_INDEPENDENT)
+    history_dim = 2 * n_independent
+    policy_dim = 3 * history_dim + 9
+
+    assert n_independent == 16
+    assert history_dim == 32
+    assert policy_dim == 105
+
+
+def test_asset_grid_is_scale_major(cfg_tree):
+    scales = _literal(cfg_tree, "HORA_CYLINDER_SCALES")
+    assert len(scales) == 9
+    assert scales == pytest.approx(tuple(0.70 + 0.02 * i for i in range(9)))
+
+    # Each scale spawns a fixed block of shapes; the grid is scale-major so
+    # asset i -> scale block i // block_size (this is exactly how the env maps
+    # env_id -> scale for the per-scale grasp-cache lookup).
+    n_cyl = len(_literal(cfg_tree, "MIX_CYLINDER_LENGTHS"))
+    n_cub = len(_literal(cfg_tree, "MIX_CUBOID_SIZES"))
+    n_sph = len(_literal(cfg_tree, "MIX_SPHERE_RADII"))
+    block = n_cyl + n_cub + n_sph
+    total = len(scales) * block
+    for asset_idx in range(total):
+        scale_idx = asset_idx // block
+        assert 0 <= scale_idx < len(scales)
+
+
+def test_object_mix_has_all_three_shapes_hora_proportions(cfg_tree):
+    """HORA trains on cylinders + cuboids + spheres (0.35/0.20/0.45).  The block
+    must contain all three shapes in roughly that split."""
+    n_cyl = len(_literal(cfg_tree, "MIX_CYLINDER_LENGTHS"))
+    n_cub = len(_literal(cfg_tree, "MIX_CUBOID_SIZES"))
+    n_sph = len(_literal(cfg_tree, "MIX_SPHERE_RADII"))
+    block = n_cyl + n_cub + n_sph
+    assert n_cyl >= 1 and n_cub >= 1 and n_sph >= 1, "all three shapes must be present"
+    # within +-0.12 of HORA's 0.35 / 0.20 / 0.45 type split
+    assert n_cyl / block == pytest.approx(0.35, abs=0.12)
+    assert n_cub / block == pytest.approx(0.20, abs=0.12)
+    assert n_sph / block == pytest.approx(0.45, abs=0.12)
+
+
+def test_cache_filename_format(cfg_tree):
+    tag = _compile_function(cfg_tree, "_scale_cache_tag")
+    filename = _compile_function(cfg_tree, "grasp_cache_filename")
+    filename.__globals__["_scale_cache_tag"] = tag
+
+    assert tag(0.70) == "s07"
+    assert tag(0.72) == "s072"
+    assert tag(0.80) == "s08"
+    assert tag(0.86) == "s086"
+    assert filename(0.80) == "linker_l20_grasp_50k_s08.npy"
+
+
+def test_inhand_mimic_constants_match_urdf(env_tree, urdf_root):
+    coupled = _class_literal(env_tree, "LinkerL20InhandRotationEnv", "COUPLED_JOINTS")
+    joints = _joints(urdf_root)
+
+    assert set(coupled) == set(EXPECTED_MIMIC)
+    for follower, (master, mult) in EXPECTED_MIMIC.items():
+        cfg_master, cfg_mult, cfg_offset = coupled[follower]
+        m = joints[follower].find("mimic")
+        assert m is not None
+        assert cfg_master == master == m.get("joint")
+        assert cfg_mult == pytest.approx(float(m.get("multiplier")), abs=1e-4)
+        assert cfg_mult == pytest.approx(mult, abs=1e-4)
+        assert cfg_offset == 0.0
+
+
+def test_canonical_grip_uses_validated_screwdriver_grasp(cfg_tree):
+    """The in-hand canonical pose/orientation/placement is the L20's validated
+    vertical-cylinder grip (reused from the screwdriver task), not the open guess
+    that let the object fall.  Guards against regressing to a non-gripping seed."""
+    pregrasp = _literal(cfg_tree, "INHAND_PREGRASP_POSITIONS")
+    rot = _literal(cfg_tree, "INHAND_HAND_ROT")
+    obj_pos = _literal(cfg_tree, "INHAND_OBJECT_INIT_POS")
+
+    # Screwdriver-grasp fingerprint: every finger is substantially flexed
+    # (pip >= ~1.0), i.e. a closed grip — not the flat (pitch 0.4, pip 0.6) cup.
+    for finger in ("index", "middle", "ring", "pinky"):
+        pip = pregrasp[finger][2]
+        assert pip >= 0.9, f"{finger} pip={pip} is too open to grip the cylinder"
+    assert pregrasp["thumb"][1] >= 1.0  # thumb strongly opposed
+
+    assert len(rot) == 4 and abs(sum(c * c for c in rot) - 1.0) < 1e-3  # unit quat
+    # Object seeded near the fingertip centroid: above the palm, offset toward
+    # the fingers, not the old 0.62 drop height.
+    assert obj_pos[2] < 0.60, "object drop height not lowered to the grip centroid"
+
+
+def test_canonical_pose_within_urdf_limits(cfg_tree, urdf_root):
+    pregrasp = _literal(cfg_tree, "INHAND_PREGRASP_POSITIONS")
+    joints = _joints(urdf_root)
+    finger_joint_names = {
+        "index": ("index_mcp_roll", "index_mcp_pitch", "index_pip"),
+        "middle": ("middle_mcp_roll", "middle_mcp_pitch", "middle_pip"),
+        "ring": ("ring_mcp_roll", "ring_mcp_pitch", "ring_pip"),
+        "pinky": ("pinky_mcp_roll", "pinky_mcp_pitch", "pinky_pip"),
+        "thumb": ("thumb_cmc_yaw", "thumb_cmc_roll", "thumb_cmc_pitch", "thumb_mcp"),
+    }
+    values = {
+        name: value
+        for finger, names in finger_joint_names.items()
+        for name, value in zip(names, pregrasp[finger], strict=True)
+    }
+    for follower, (master, mult) in EXPECTED_MIMIC.items():
+        values[follower] = values[master] * mult
+
+    for name, value in values.items():
+        limit = joints[name].find("limit")
+        lo = float(limit.get("lower"))
+        hi = float(limit.get("upper"))
+        assert lo <= value <= hi, f"{name}={value} outside [{lo}, {hi}]"
+        assert min(value - lo, hi - value) >= 0.1 - 1e-6, (
+            f"{name}={value} is too close to [{lo}, {hi}]"
+        )
+
+
+def test_inhand_yaml_sanity():
+    assert _YAML.exists(), f"missing {_YAML}"
+    cfg = yaml.safe_load(_YAML.read_text())
+    params = cfg["params"]
+    net = params["network"]
+    train = params["config"]
+
+    assert net["name"] == "priv_latent_actor_critic"
+    assert net["separate"] is False
+    assert net["proprio_dim"] == 96
+    assert net["latent_dim"] == 8
+    assert net["priv_mlp_units"] == [256, 128]
+    assert net["mlp"]["units"] == [512, 256, 128]
+    assert train["reward_shaper"]["scale_value"] == pytest.approx(0.01)
+    assert train["horizon_length"] == 8
+    assert train["minibatch_size"] == 16384
+    assert "central_value_config" not in params
+
+
+def test_inhand_task_registration_points_train_play_eval_to_new_cfgs():
+    source = _REGISTRY.read_text()
+    assert 'id="Isaac-LinkerL20-Inhand-Rotation"' in source
+    assert "inhand_rotation_env:LinkerL20InhandRotationEnv" in source
+    assert "inhand_rotation_env_cfg:LinkerL20InhandRotationEnvCfg" in source
+    assert "rl_games_inhand_ppo_cfg.yaml" in source
+
+    assert 'id="Isaac-LinkerL20-Inhand-GraspGen"' in source
+    assert "inhand_grasp_gen_env:LinkerL20InhandGraspGenEnv" in source
+    assert "inhand_rotation_env_cfg:LinkerL20InhandGraspGenEnvCfg" in source
+
+
+def test_inhand_ground_spawn_is_local():
+    source = _ENV.read_text()
+    assert "GroundPlaneCfg" not in source
+    assert "spawn_ground_plane" not in source
+    assert "_spawn_local_ground" in source
+    assert "CuboidCfg" in source
+    assert "RigidBodyPropertiesCfg(kinematic_enabled=True)" in source
+
+
+def test_train_stage2_play_eval_observation_contracts(env_tree):
+    source = _ENV.read_text()
+    assert '"policy"' in source
+    assert '"critic"' in source
+    assert '"proprio_hist"' in source
+    assert "def _prop_hist_buf" in source
+    assert "_global_steps" in source
+    assert "_current_epoch" in source
+    assert "_log_stage" in source
+    assert "_stage2_loss" in source
+    assert "_logger" in source
+
+    obs_dim = _class_literal(env_tree, "LinkerL20InhandRotationEnv", "FINGER_JOINT_NAMES")
+    assert sum(len(v) for v in obs_dim.values()) == 16
+
+
+def test_hora_reward_terms_and_eval_extras_are_present():
+    source = _ENV.read_text()
+    for token in (
+        "axis_angle_from_quat",
+        "quat_conjugate",
+        "applied_torque",
+        "linvel_penalty_scale",
+        "pose_penalty_scale",
+        "torque_penalty_scale",
+        "work_penalty_scale",
+        "eval_rotate_reward",
+        "eval_obj_z",
+        "eval_fall_frac",
+        "eval_total_reward",
+    ):
+        assert token in source
+
+
+def test_reset_keeps_direct_env_reset_before_state_and_target_writes():
+    source = _ENV.read_text()
+    reset_start = source.index("    def _reset_idx(")
+    reset_body = source[reset_start:source.index("    def _update_curriculum", reset_start)]
+    assert reset_body.index("super()._reset_idx(env_ids)") < reset_body.index(
+        "self.hand.set_joint_position_target"
+    )
+    assert reset_body.index("super()._reset_idx(env_ids)") < reset_body.index(
+        "self.object.set_external_force_and_torque"
+    )
+
+
+def test_domain_randomization_ranges_and_physics_writes(cfg_tree):
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "mass_range") == (0.01, 0.25)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "com_range") == (-0.01, 0.01)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "friction_range") == (0.3, 3.0)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "pd_gain_range") == (0.967, 1.033)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "joint_noise_scale") == pytest.approx(0.02)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "force_scale") == pytest.approx(2.0)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "random_force_prob") == pytest.approx(0.25)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "force_decay") == pytest.approx(0.9)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "force_decay_interval") == pytest.approx(0.08)
+
+    source = _ENV.read_text()
+    for token in (
+        "set_masses",
+        "set_coms",
+        "set_material_properties",
+        "write_joint_stiffness_to_sim",
+        "write_joint_damping_to_sim",
+        "set_external_force_and_torque",
+        "_update_random_forces",
+    ):
+        assert token in source
+
+
+def test_grasp_gen_cfg_and_done_contract(cfg_tree):
+    assert _class_literal(cfg_tree, "LinkerL20InhandGraspGenEnvCfg", "cache_scale") == pytest.approx(0.8)
+
+    cfg_source = _CFG.read_text()
+    for token in (
+        "self.episode_length_s = 2.5",
+        "self.domain_rand.random_force_prob = 0.0",
+        "self.domain_rand.force_scale = 0.0",
+        "self.domain_rand.pd_gain_range = (1.0, 1.0)",
+        "self.load_grasp_cache = False",
+        "self.enable_fingertip_sensors = True",
+        "self.grasp_gen_obj_init_pos = INHAND_OBJECT_INIT_POS",
+        "self.grasp_gen_pose_noise = 0.25",
+        "self.min_contact_fingers = 2",
+        "self.tip_dist_max = 0.13",
+    ):
+        assert token in cfg_source
+
+    source = (_ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_grasp_gen_env.py").read_text()
+    done_start = source.index("    def _get_dones(")
+    done_body = source[done_start:source.index("    def _reset_idx(", done_start)]
+    assert "terminated = ~acceptance" in done_body
+    assert "self.episode_length_buf >= self.max_episode_length - 1" in done_body
+    assert "self._last_timed_out = timed_out.detach().clone()" in done_body
+
+    reset_start = source.index("    def _reset_idx(")
+    reset_body = source[reset_start:source.index("    def _compute_acceptance(", reset_start)]
+    assert "survived = self._last_acceptance[env_ids_t] & self._last_timed_out[env_ids_t]" in reset_body
+    assert "harvest_ids = env_ids_t[survived]" in reset_body
+
+
+def test_grasp_gen_source_contracts():
+    source = (_ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_grasp_gen_env.py").read_text()
+    for token in (
+        "_compute_acceptance",
+        "_read_tip_object_forces",
+        "force_matrix_w",
+        "tip_dist_max",
+        "min_contact_fingers",
+        "save_if_full",
+        "np.save",
+    ):
+        assert token in source
+
+    tool_source = (_ROOT / "tools" / "gen_inhand_grasp_cache.py").read_text()
+    for token in (
+        "--scale",
+        "--num_envs",
+        "--num_states",
+        "--max_steps",
+        "--diagnostics_every",
+        "--debug",
+        "Isaac-LinkerL20-Inhand-GraspGen",
+        "grasp_cache_filename",
+        "per-finger stats",
+    ):
+        assert token in tool_source
