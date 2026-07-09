@@ -224,9 +224,46 @@ class RotationTrainingLogger:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _render_inhand_body(m) -> list[str]:
+        """Compact body for the HORA free-object in-hand rotation task.
+
+        The mounted-screwdriver metrics (tilt, contact gate, turns) do not apply;
+        the in-hand env emits its own ``eval_*`` keys (rotation reward about the
+        target axis, object height / fall fraction, and the four penalty terms),
+        so it gets a dedicated block instead of the screwdriver layout rendering
+        every field as ``nan``.
+        """
+        rot_rew   = m("eval_rotate_reward")
+        obj_z     = m("eval_obj_z")
+        fall      = m("eval_fall_frac")
+        linvel_c  = m("eval_linvel_cost")
+        pose_c    = m("eval_pose_cost")
+        torque_c  = m("eval_torque_cost")
+        work_c    = m("eval_work_cost")
+        fall_warn = " ⚠ DROPPING" if fall > 0.3 else ""
+        return [
+            f"  {_W}Rotation{_N}",
+            (
+                # RotateReward is the clipped angular-velocity reward (target 0.5).
+                f"    RotateReward {_colour(rot_rew, 0.05, 0.3):>14}  "
+                f"ObjZ {obj_z:>7.3f}  "
+                f"FallFrac {_colour(fall, 0.3, 0.02, invert=True):>14}{fall_warn}"
+            ),
+            f"  {_W}Penalties (pre-weight){_N}",
+            (
+                f"    LinVel {linvel_c:>8.3f}  PoseDev {pose_c:>8.3f}  "
+                f"Torque {torque_c:>8.3f}  Work {work_c:>8.3f}"
+            ),
+        ]
+
+    @staticmethod
     def _render_body(m, extras: dict[str, Any]) -> list[str]:
-        """Per-task body: the force-window LinkerL20 layout (``eval_in_window``)
-        and the distance/motion-gated Allegro layout (otherwise)."""
+        """Per-task body: the HORA in-hand layout (``eval_rotate_reward``), the
+        force-window LinkerL20 layout (``eval_in_window``), and the
+        distance/motion-gated Allegro layout (otherwise)."""
+        if "eval_rotate_reward" in extras:
+            return RotationTrainingLogger._render_inhand_body(m)
+
         fwd_turns = m("eval_total_turns")
         net_turns  = m("eval_net_turns")
         osc_ratio  = m("eval_osc_ratio")
