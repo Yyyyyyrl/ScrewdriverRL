@@ -333,6 +333,8 @@ def test_hora_reward_terms_and_eval_extras_are_present():
         "eval_rotate_reward",
         "eval_obj_z",
         "eval_fall_frac",
+        "eval_ep_len",
+        "eval_hold_frac",
         "eval_total_reward",
     ):
         assert token in source

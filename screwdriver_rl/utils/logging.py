@@ -236,6 +236,8 @@ class RotationTrainingLogger:
         rot_rew   = m("eval_rotate_reward")
         obj_z     = m("eval_obj_z")
         fall      = m("eval_fall_frac")
+        ep_len    = m("eval_ep_len")
+        hold      = m("eval_hold_frac")
         linvel_c  = m("eval_linvel_cost")
         pose_c    = m("eval_pose_cost")
         torque_c  = m("eval_torque_cost")
@@ -248,6 +250,13 @@ class RotationTrainingLogger:
                 f"    RotateReward {_colour(rot_rew, 0.05, 0.3):>14}  "
                 f"ObjZ {obj_z:>7.3f}  "
                 f"FallFrac {_colour(fall, 0.3, 0.02, invert=True):>14}{fall_warn}"
+            ),
+            f"  {_W}Episodes (completed){_N}",
+            (
+                # EpLen = mean steps at episode end (timeout = max, 400 by default);
+                # HoldFrac = fraction of episodes that timed out still holding.
+                f"    EpLen {_colour(ep_len, 50.0, 300.0):>14}  "
+                f"HoldFrac {_colour(hold, 0.1, 0.6):>14}"
             ),
             f"  {_W}Penalties (pre-weight){_N}",
             (

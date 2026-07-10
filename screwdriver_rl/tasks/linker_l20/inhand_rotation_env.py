@@ -188,6 +188,14 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             dtype=self.episode_length_buf.dtype,
         )
 
+        # Completed-episode stats (count-weighted EMA over ~20k episodes), fed to
+        # the training logger: mean length at done and the fraction of episodes
+        # that reached timeout still holding the object.  The first reset batch
+        # is skipped — episode_length_buf starts randomized, not at real lengths.
+        self._ep_len_ema: float = float("nan")
+        self._hold_frac_ema: float = float("nan")
+        self._ep_stats_started: bool = False
+
         self._current_epoch: int = 0
         self._log_stage: int = 1
         self._stage2_loss: float = float("nan")
@@ -323,6 +331,12 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 "eval_torque_cost": torque_cost.detach(),
                 "eval_work_cost": work_cost.detach(),
                 "eval_total_reward": reward.detach(),
+                "eval_ep_len": torch.full(
+                    (self.num_envs,), self._ep_len_ema, device=self.device
+                ),
+                "eval_hold_frac": torch.full(
+                    (self.num_envs,), self._hold_frac_ema, device=self.device
+                ),
                 "eval_curriculum_phase": torch.ones(self.num_envs, device=self.device),
                 "eval_num_phases": torch.ones(self.num_envs, device=self.device),
             }
@@ -345,6 +359,8 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             env_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
         else:
             env_ids = env_ids.to(dtype=torch.long, device=self.device)
+
+        self._update_episode_stats(env_ids)
 
         super()._reset_idx(env_ids)
 
@@ -393,6 +409,29 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         )
         self._randomise_pd_gains(env_ids)
         self._hist_reset_mask[env_ids] = True
+
+    def _update_episode_stats(self, env_ids: torch.Tensor) -> None:
+        """Fold the lengths of the episodes ending now into the logger EMAs.
+
+        Must run BEFORE ``super()._reset_idx`` zeroes ``episode_length_buf``.
+        """
+        if not self._ep_stats_started:
+            self._ep_stats_started = True  # first batch = randomized buf, skip
+            return
+        n = int(env_ids.numel())
+        if n == 0:
+            return
+        lengths = self.episode_length_buf[env_ids].float()
+        held = (self.episode_length_buf[env_ids] >= self.max_episode_length - 1).float()
+        batch_len = float(lengths.mean().item())
+        batch_held = float(held.mean().item())
+        if self._ep_len_ema != self._ep_len_ema:  # NaN -> first real batch
+            self._ep_len_ema = batch_len
+            self._hold_frac_ema = batch_held
+            return
+        alpha = min(1.0, n / 20000.0)
+        self._ep_len_ema += alpha * (batch_len - self._ep_len_ema)
+        self._hold_frac_ema += alpha * (batch_held - self._hold_frac_ema)
 
     def _update_curriculum(self) -> None:
         self._curriculum_phase = self.cfg.curriculum_phases[0]
