@@ -113,6 +113,21 @@ INHAND_HAND_ROT: tuple[float, float, float, float] = _quat_mul(
 # canonical fallback use this.
 INHAND_OBJECT_INIT_POS: tuple[float, float, float] = (0.040, -0.187, 0.545)
 
+# Rotation axis (world frame) = NEGATIVE palm normal.  HORA rewards rotation
+# about world -z with a FLAT palm-up hand, i.e. about -(palm normal); with the
+# palm tilted by INHAND_PALM_TILT_DEG the axis must tilt with it (this reduces
+# to HORA's (0, 0, -1) at zero tilt).  Rewarding rotation about plain world -z
+# with the tilted palm made policies roll the object "downhill" toward the
+# thumb — a spin-fast-and-drop equilibrium (rotate-reward 0.35/step but 100%
+# of episodes ending in falls at ~40 steps).  If learning stalls with rotation
+# reward pinned at/below zero, flip the sign: the natural gait direction can
+# mirror on a left hand.
+INHAND_ROT_AXIS: tuple[float, float, float] = (
+    -math.sin(math.radians(INHAND_PALM_TILT_DEG)),
+    0.0,
+    -math.cos(math.radians(INHAND_PALM_TILT_DEG)),
+)
+
 INHAND_MIMIC_JOINTS: dict[str, tuple[str, float, float]] = {
     "index_dip": ("index_pip", 0.8917, 0.0),
     "middle_dip": ("middle_pip", 0.8917, 0.0),
@@ -403,7 +418,7 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     action_clip: float = 1.0
     joint_target_margin: float = 0.0
 
-    rot_axis: tuple[float, float, float] = (0.0, 0.0, -1.0)
+    rot_axis: tuple[float, float, float] = INHAND_ROT_AXIS
     rotate_reward_scale: float = 1.0
     angvel_clip: tuple[float, float] = (-0.5, 0.5)
     linvel_penalty_scale: float = -0.3

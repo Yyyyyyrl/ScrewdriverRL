@@ -235,6 +235,16 @@ def test_canonical_grip_is_palm_up_fingertip_opposition(cfg_tree):
     # never on the palm and never at the old top-grasp drop height.
     assert 0.50 < obj_pos[2] < 0.60
 
+    # Rotation axis = -(palm normal), tilting with the palm (HORA rotates about
+    # world -z with a FLAT palm; rewarding -z with a tilted palm rolled the
+    # object downhill off the thumb).
+    cfg_source = _CFG.read_text()
+    assert "rot_axis: tuple[float, float, float] = INHAND_ROT_AXIS" in cfg_source
+    assert "-math.sin(math.radians(INHAND_PALM_TILT_DEG))" in cfg_source
+    assert "-math.cos(math.radians(INHAND_PALM_TILT_DEG))" in cfg_source
+    axis = (-math.sin(tilt), 0.0, -math.cos(tilt))
+    assert axis == pytest.approx(tuple(-c for c in palm_normal_w), abs=1e-6)
+
 
 def test_canonical_pose_within_urdf_limits(cfg_tree, urdf_root):
     pregrasp = _literal(cfg_tree, "INHAND_PREGRASP_POSITIONS")
