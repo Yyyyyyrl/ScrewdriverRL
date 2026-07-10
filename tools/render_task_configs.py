@@ -40,6 +40,7 @@ DEFAULT_TASK_IDS: tuple[str, ...] = (
     "Isaac-Allegro-4F-Screwdriver-Rotation-Direct-v0",
     "Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0",
     "Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0",
+    "Isaac-LinkerL20-Inhand-Rotation",
 )
 
 
@@ -119,6 +120,32 @@ parser.add_argument(
     help="Only write individual view PNGs, not the per-task contact_sheet.png.",
 )
 parser.add_argument(
+    "--canonical",
+    action="store_true",
+    help=(
+        "Disable grasp-cache reset sampling (load_grasp_cache=False) so tasks "
+        "render their canonical pregrasp pose instead of cached grasp states."
+    ),
+)
+parser.add_argument(
+    "--env_index",
+    type=str,
+    default="0",
+    help=(
+        "Comma-separated env indices to render (each gets its own camera focus "
+        "and PNG subdirectory when more than one is given)."
+    ),
+)
+parser.add_argument(
+    "--settle_steps",
+    type=int,
+    default=0,
+    help=(
+        "Step the env this many zero-action policy steps after reset before "
+        "capturing, so renders show the physically settled grasp."
+    ),
+)
+parser.add_argument(
     "--show_viewport",
     action="store_true",
     help="Open the Isaac Sim viewport instead of the default headless offscreen render.",
@@ -176,10 +203,15 @@ def _discover_screwdriver_tasks() -> list[str]:
     registered = {
         spec.id
         for spec in registry.values()
-        if "Screwdriver-Rotation" in spec.id
+        if "Screwdriver-Rotation" in spec.id or "Inhand" in spec.id
     }
     known = [task_id for task_id in DEFAULT_TASK_IDS if not registered or task_id in registered]
-    extras = sorted(registered.difference(DEFAULT_TASK_IDS))
+    # GraspGen variants are renderable via --task but not part of the default sweep.
+    extras = sorted(
+        task_id
+        for task_id in registered.difference(DEFAULT_TASK_IDS)
+        if "GraspGen" not in task_id
+    )
     return known + extras
 
 
@@ -201,7 +233,12 @@ def _expand_task_args(raw_tasks: Iterable[str] | None) -> list[str]:
 
     # Preserve user order while removing duplicates.
     deduped = list(dict.fromkeys(expanded))
-    unknown = [task_id for task_id in deduped if task_id not in discovered]
+    registry = getattr(gym, "registry", None) or gym.envs.registry
+    unknown = [
+        task_id
+        for task_id in deduped
+        if task_id not in discovered and task_id not in registry
+    ]
     if unknown:
         available = "\n  ".join(discovered)
         raise ValueError(
@@ -260,11 +297,15 @@ def _camera_eye(
 
 def _compute_focus(base_env, env_idx: int = 0) -> tuple[np.ndarray, float]:
     points = []
-    for attr_name in ("allegro", "screwdriver"):
+    for attr_name in ("allegro", "screwdriver", "object"):
         asset = getattr(base_env, attr_name, None)
         if asset is None:
             continue
-        body_pos = asset.data.body_state_w[env_idx, :, :3].detach().cpu().numpy()
+        data = asset.data
+        if hasattr(data, "body_state_w"):
+            body_pos = data.body_state_w[env_idx, :, :3].detach().cpu().numpy()
+        else:  # RigidObject
+            body_pos = data.root_pos_w[env_idx : env_idx + 1, :3].detach().cpu().numpy()
         points.append(body_pos)
 
     if not points:
@@ -375,7 +416,75 @@ def _configure_env(task_id: str):
         env_cfg.domain_rand.enabled = False
     if not args.random_start and hasattr(env_cfg, "randomize_obj_start"):
         env_cfg.randomize_obj_start = False
+    if args.canonical and hasattr(env_cfg, "load_grasp_cache"):
+        env_cfg.load_grasp_cache = False
     return env_cfg
+
+
+def _parse_env_indices(raw: str) -> list[int]:
+    indices = [int(token) for token in raw.split(",") if token.strip() != ""]
+    if not indices:
+        raise ValueError("--env_index needs at least one index")
+    return list(dict.fromkeys(indices))
+
+
+def _settle(env, base_env, steps: int) -> dict | None:
+    """Run zero-action policy steps so the grasp physically settles."""
+    if steps <= 0:
+        return None
+    import torch
+
+    obj = getattr(base_env, "object", None)
+    z_before = None
+    if obj is not None:
+        z_before = (obj.data.root_pos_w[:, 2] - base_env.scene.env_origins[:, 2]).detach().clone()
+    actions = torch.zeros(
+        (base_env.num_envs, int(base_env.cfg.action_space.shape[0])),
+        dtype=torch.float32,
+        device=base_env.device,
+    )
+    resets = torch.zeros(base_env.num_envs, dtype=torch.bool, device=base_env.device)
+    for _ in range(steps):
+        _, _, terminated, truncated, _ = env.step(actions)
+        resets |= terminated.to(resets.device, dtype=torch.bool) | truncated.to(
+            resets.device, dtype=torch.bool
+        )
+    info = {"settle_steps": steps, "reset_frac": float(resets.float().mean().item())}
+    if obj is not None and z_before is not None:
+        z_after = obj.data.root_pos_w[:, 2] - base_env.scene.env_origins[:, 2]
+        info["obj_z_before_mean"] = float(z_before.mean().item())
+        info["obj_z_after_mean"] = float(z_after.mean().item())
+        info["obj_z_drop_mean"] = float((z_before - z_after).mean().item())
+    print(f"[render] settle: {info}", flush=True)
+    return info
+
+
+def _grasp_state_info(base_env, env_idx: int) -> dict | None:
+    """Fingertip/object world-state dump for in-hand tasks (feeds posture tuning)."""
+    obj = getattr(base_env, "object", None)
+    tip_ids = getattr(base_env, "_fingertip_body_ids", None)
+    hand = getattr(base_env, "hand", None)
+    if obj is None or tip_ids is None or hand is None:
+        return None
+    origin = base_env.scene.env_origins[env_idx].detach().cpu().numpy()
+    tips = hand.data.body_state_w[env_idx, tip_ids, :3].detach().cpu().numpy() - origin
+    obj_pos = obj.data.root_pos_w[env_idx].detach().cpu().numpy() - origin
+    obj_quat = obj.data.root_quat_w[env_idx].detach().cpu().numpy()
+    fingers = list(getattr(base_env, "fingers", range(len(tip_ids))))
+    tip_map = {str(f): [round(float(v), 4) for v in p] for f, p in zip(fingers, tips)}
+    centroid = tips.mean(axis=0)
+    info = {
+        "fingertips_env_local": tip_map,
+        "fingertip_centroid": [round(float(v), 4) for v in centroid],
+        "object_pos_env_local": [round(float(v), 4) for v in obj_pos],
+        "object_quat_wxyz": [round(float(v), 4) for v in obj_quat],
+        "tip_to_object_dist": {
+            str(f): round(float(np.linalg.norm(p - obj_pos)), 4)
+            for f, p in zip(fingers, tips)
+        },
+    }
+    print(f"[render] env {env_idx} grasp state: {json.dumps(info)}", flush=True)
+    return info
 
 
 def _render_task(task_id: str, views: list[tuple[str, float, float]]) -> dict:
@@ -388,53 +497,82 @@ def _render_task(task_id: str, views: list[tuple[str, float, float]]) -> dict:
         "views": [],
     }
 
+    env_indices = _parse_env_indices(args.env_index)
+
     try:
         print(f"[render] Creating env: {task_id}", flush=True)
         env = gym.make(task_id, cfg=env_cfg, render_mode="rgb_array")
         base_env = env.unwrapped
         env.reset(seed=args.seed)
 
-        target, radius = _compute_focus(base_env, env_idx=0)
-        distance = args.distance
-        if distance is None:
-            distance = max(args.min_distance, radius * args.radius_scale)
+        settle_info = _settle(env, base_env, args.settle_steps)
+        if settle_info is not None:
+            result["settle"] = settle_info
 
-        frames: list[np.ndarray] = []
-        labels: list[str] = []
+        bad = [i for i in env_indices if not 0 <= i < base_env.num_envs]
+        if bad:
+            raise ValueError(f"--env_index {bad} out of range for num_envs={base_env.num_envs}")
+
         camera_path = base_env.cfg.viewer.cam_prim_path
-        target_tuple = tuple(float(x) for x in target)
+        result["envs"] = []
 
-        for view_name, azimuth, elevation in views:
-            eye = _camera_eye(target, distance, azimuth, elevation)
-            base_env.sim.set_camera_view(eye, target_tuple, camera_prim_path=camera_path)
-            frame = _capture_rgb(env, args.warmup_frames)
+        for env_idx in env_indices:
+            env_dir = task_dir if len(env_indices) == 1 else task_dir / f"env{env_idx}"
+            env_result = {"env_index": env_idx, "views": []}
 
-            png_path = task_dir / f"{_slugify(view_name)}.png"
-            _save_png(png_path, frame)
-            print(f"[render] Wrote {png_path}", flush=True)
+            grasp_state = _grasp_state_info(base_env, env_idx)
+            if grasp_state is not None:
+                env_result["grasp_state"] = grasp_state
 
-            frames.append(frame)
-            labels.append(f"{view_name}  az={azimuth:g}  el={elevation:g}")
-            result["views"].append(
-                {
-                    "name": view_name,
-                    "azimuth_deg": azimuth,
-                    "elevation_deg": elevation,
-                    "eye": list(eye),
-                    "target": list(target_tuple),
-                    "file": str(png_path),
-                }
-            )
+            target, radius = _compute_focus(base_env, env_idx=env_idx)
+            distance = args.distance
+            if distance is None:
+                distance = max(args.min_distance, radius * args.radius_scale)
 
-        if not args.no_contact_sheet:
-            sheet = _make_contact_sheet(frames, labels)
-            sheet_path = task_dir / "contact_sheet.png"
-            _save_png(sheet_path, sheet)
-            result["contact_sheet"] = str(sheet_path)
-            print(f"[render] Wrote {sheet_path}", flush=True)
+            frames: list[np.ndarray] = []
+            labels: list[str] = []
+            target_tuple = tuple(float(x) for x in target)
 
-        result["camera_distance"] = distance
-        result["focus_radius"] = radius
+            for view_name, azimuth, elevation in views:
+                eye = _camera_eye(target, distance, azimuth, elevation)
+                base_env.sim.set_camera_view(eye, target_tuple, camera_prim_path=camera_path)
+                frame = _capture_rgb(env, args.warmup_frames)
+
+                png_path = env_dir / f"{_slugify(view_name)}.png"
+                _save_png(png_path, frame)
+                print(f"[render] Wrote {png_path}", flush=True)
+
+                frames.append(frame)
+                labels.append(f"env{env_idx} {view_name}  az={azimuth:g}  el={elevation:g}")
+                env_result["views"].append(
+                    {
+                        "name": view_name,
+                        "azimuth_deg": azimuth,
+                        "elevation_deg": elevation,
+                        "eye": list(eye),
+                        "target": list(target_tuple),
+                        "file": str(png_path),
+                    }
+                )
+
+            if not args.no_contact_sheet:
+                sheet = _make_contact_sheet(frames, labels)
+                sheet_path = env_dir / "contact_sheet.png"
+                _save_png(sheet_path, sheet)
+                env_result["contact_sheet"] = str(sheet_path)
+                print(f"[render] Wrote {sheet_path}", flush=True)
+
+            env_result["camera_distance"] = distance
+            env_result["focus_radius"] = radius
+            result["envs"].append(env_result)
+
+        # Backwards-compatible top-level fields for the single-env case.
+        first = result["envs"][0]
+        result["views"] = first["views"]
+        if "contact_sheet" in first:
+            result["contact_sheet"] = first["contact_sheet"]
+        result["camera_distance"] = first["camera_distance"]
+        result["focus_radius"] = first["focus_radius"]
         return result
     finally:
         if env is not None:
@@ -466,10 +604,22 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    ok = False
     try:
         main()
+        ok = True
     except Exception:
         traceback.print_exc()
         raise
     finally:
+        # simulation_app.close() sometimes hangs indefinitely on shutdown; all
+        # outputs are already flushed by now, so force-exit if it does (keeping
+        # the success/failure exit code).
+        import os
+        import threading
+
+        exit_code = 0 if ok else 1
+        watchdog = threading.Timer(60.0, lambda: os._exit(exit_code))
+        watchdog.daemon = True
+        watchdog.start()
         simulation_app.close()

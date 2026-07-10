@@ -9,6 +9,7 @@ and the observation/reward contracts match the existing two-stage RMA pipeline.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import field
 
 import gymnasium as gym
@@ -50,30 +51,67 @@ HORA_CYLINDER_SCALES: tuple[float, ...] = (
     0.86,
 )
 
-# Canonical pregrasp = the LinkerL20's VALIDATED five-finger vertical-cylinder
-# grip (reused from the screwdriver task's proven grasp).  A palm-up cup guess
-# left the cylinder resting on the finger backs (no grip); this closed grip holds
-# a vertical cylinder in 100% of envs with thumb + finger opposition, which the
-# grasp-gen then perturbs (+-0.25 rad) and filters into the cache.  Paired with
-# INHAND_HAND_ROT (the same grasp's hand orientation) and INHAND_OBJECT_INIT_POS
-# (the grip's fingertip centroid); see the calibration in the plan/verification.
+# Canonical pregrasp = HORA-style palm-up fingertip cage.  The hand sits near
+# the ground with the palm facing up (tilted INHAND_PALM_TILT_DEG about the
+# finger axis so the thumb can oppose across the object like a human grip);
+# the object is held in the air by the fingertip pads ONLY — four fingers on
+# the upper (pinky-edge) side, thumb pressing from the lower (thumb-edge) side,
+# object never resting on the palm.  Joint values were fit offline (URDF FK)
+# so all five fingertip pads lie on a ~3.6 cm sphere around the cage centre
+# with the thumb diametrically opposite the four fingers, then validated by
+# physics settling in tools/render_task_configs.py renders.  The grasp-gen
+# perturbs this pose (+-0.25 rad) and filters the settled states into the cache.
 INHAND_PREGRASP_POSITIONS: dict[str, tuple[float, ...]] = {
-    "index": (0.070000, 0.140535, 1.379901),
-    "middle": (-0.070000, 0.184823, 1.354472),
-    "ring": (-0.070000, 0.449762, 1.207458),
-    "pinky": (0.045669, 0.654302, 1.027913),
-    "thumb": (0.673745, 1.120000, 0.100000, 0.876434),
+    "index": (-0.0130, 0.5500, 0.6200),
+    "middle": (-0.0132, 0.4936, 0.5830),
+    "ring": (-0.0137, 0.5504, 0.5791),
+    "pinky": (0.0249, 0.5629, 0.6056),
+    "thumb": (0.6503, 1.0393, 0.5800, 0.4500),
 }
 
-# Hand base orientation (wxyz): the validated grip's palm-toward-object pose.
-INHAND_HAND_ROT: tuple[float, float, float, float] = (
-    0.44578500, -0.47244983, -0.22820989, 0.72524971,
+# Palm tilt about the finger axis (deg).  0 would be palm flat up (HORA
+# Allegro); the L20 thumb opposes the fingers best with the thumb edge
+# dropped ~45 deg so gravity loads the thumb pad.
+INHAND_PALM_TILT_DEG: float = 45.0
+
+
+def _quat_from_axis_angle(
+    axis: tuple[float, float, float], angle_rad: float
+) -> tuple[float, float, float, float]:
+    norm = math.sqrt(sum(a * a for a in axis))
+    half = 0.5 * angle_rad
+    s = math.sin(half) / norm
+    return (math.cos(half), axis[0] * s, axis[1] * s, axis[2] * s)
+
+
+def _quat_mul(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> tuple[float, float, float, float]:
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+# Hand base orientation (wxyz), HORA composition ``Quat(Y, -90deg+tilt) *
+# Quat(X, +90deg)``.  In the L20 base frame the fingers extend along +Z, the
+# palm normal is +X and the thumb edge is -Y; this composition maps the palm
+# normal to world up (tilted by INHAND_PALM_TILT_DEG toward +X), the fingers
+# to world -Y, and drops the thumb edge to the lower (+X) side.
+INHAND_HAND_ROT: tuple[float, float, float, float] = _quat_mul(
+    _quat_from_axis_angle((0.0, 1.0, 0.0), math.radians(-90.0 + INHAND_PALM_TILT_DEG)),
+    _quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(90.0)),
 )
 
-# Object reset position (env-local), = the grip's measured fingertip centroid
-# with a small upward margin so the cylinder settles down into the grip.  Both
-# the grasp-gen drop and the main-env canonical fallback use this.
-INHAND_OBJECT_INIT_POS: tuple[float, float, float] = (-0.170, 0.050, 0.570)
+# Object reset position (env-local) = the pregrasp's fingertip-cage centre with
+# a small upward margin so the dropped object settles down into the fingertip
+# cage (never onto the palm).  Both the grasp-gen drop and the main-env
+# canonical fallback use this.
+INHAND_OBJECT_INIT_POS: tuple[float, float, float] = (0.040, -0.187, 0.545)
 
 INHAND_MIMIC_JOINTS: dict[str, tuple[str, float, float]] = {
     "index_dip": ("index_pip", 0.8917, 0.0),
@@ -89,8 +127,22 @@ def _scale_cache_tag(scale: float) -> str:
     return f"s{body}"
 
 
-def grasp_cache_filename(scale: float, name: str = "linker_l20") -> str:
-    return f"{name}_grasp_50k_{_scale_cache_tag(scale)}.npy"
+# Grasp caches are keyed by (scale, SHAPE, PROTOTYPE).  Cylinder-only caches
+# replayed onto spheres/cubes gave ~76% dead-on-arrival resets, and even
+# same-shape caches mixing prototypes (3 cylinder lengths / 2 cuboid sizes /
+# 4 sphere radii) stayed ~52% DOA — a fingertip cage has millimetre tolerance,
+# so a grasp settled on one prototype rarely transfers to another.  Every
+# training prototype therefore gets its own cache file.
+INHAND_CACHE_SHAPES: tuple[str, ...] = ("cylinder", "cuboid", "sphere")
+_SHAPE_CACHE_TAGS: dict[str, str] = {"cylinder": "cyl", "cuboid": "cub", "sphere": "sph"}
+
+
+def grasp_cache_filename(
+    scale: float, name: str = "linker_l20", shape: str = "cylinder", proto: int = 0
+) -> str:
+    return (
+        f"{name}_grasp_{_SHAPE_CACHE_TAGS[shape]}{int(proto)}_{_scale_cache_tag(scale)}.npy"
+    )
 
 
 def _joint_pos_with_mimics(
@@ -216,21 +268,59 @@ def _mixed_block(scale: float) -> list:
     return block
 
 
-def _build_object(scales: tuple[float, ...], kind: str) -> tuple[RigidObjectCfg, list[int]]:
-    """Build the multi-asset object grid and the parallel per-asset scale index.
+def _cuboid_block(scale: float) -> list:
+    return [
+        sim_utils.CuboidCfg(
+            size=(bx * scale, by * scale, bz * scale), **copy.deepcopy(_shape_common())
+        )
+        for (bx, by, bz) in MIX_CUBOID_SIZES
+    ]
 
-    ``kind='mixed'`` -> cylinders+cuboids+spheres (main task); ``kind='cylinder'``
-    -> cylinders only (grasp-cache generation).  The returned ``scale_idx[i]`` is
-    the index into ``scales`` of asset ``i`` (in spawn order), so the env can
-    recover each env's scale from ``asset_idx = env_id % n_assets`` regardless of
-    the block composition.
+
+def _sphere_block(scale: float) -> list:
+    return [
+        sim_utils.SphereCfg(radius=r * scale, **copy.deepcopy(_shape_common()))
+        for r in MIX_SPHERE_RADII
+    ]
+
+
+def _build_object(
+    scales: tuple[float, ...], kind: str
+) -> tuple[RigidObjectCfg, list[int], list[int], list[int]]:
+    """Build the multi-asset object grid and the parallel per-asset scale,
+    shape and within-shape prototype indices.
+
+    ``kind='mixed'`` -> cylinders+cuboids+spheres (main task); a single-shape
+    kind (``'cylinder'``/``'cuboid'``/``'sphere'``) spawns only that shape's
+    training prototypes (grasp-cache generation).  For asset ``i`` in spawn
+    order, ``scale_idx[i]`` indexes ``scales``, ``shape_idx[i]`` indexes
+    ``INHAND_CACHE_SHAPES`` and ``proto_idx[i]`` is the prototype within that
+    shape (e.g. which cylinder length), so the env can recover each env's
+    (scale, shape, prototype) from ``asset_idx = env_id % n_assets``.
     """
+    single = {
+        "cylinder": lambda s: _cylinder_block(s, MIX_CYLINDER_LENGTHS),
+        "cuboid": _cuboid_block,
+        "sphere": _sphere_block,
+    }
+    n_cyl, n_cub, n_sph = len(MIX_CYLINDER_LENGTHS), len(MIX_CUBOID_SIZES), len(MIX_SPHERE_RADII)
     assets: list = []
     scale_idx: list[int] = []
+    shape_idx: list[int] = []
+    proto_idx: list[int] = []
     for si, s in enumerate(scales):
-        block = _mixed_block(s) if kind == "mixed" else _cylinder_block(s, HORA_CYLINDER_LENGTHS)
+        if kind == "mixed":
+            block = _mixed_block(s)
+            block_shapes = [0] * n_cyl + [1] * n_cub + [2] * n_sph
+            block_protos = list(range(n_cyl)) + list(range(n_cub)) + list(range(n_sph))
+        else:
+            block = single[kind](s)
+            block_shapes = [INHAND_CACHE_SHAPES.index(kind)] * len(block)
+            block_protos = list(range(len(block)))
         assets.extend(block)
         scale_idx.extend([si] * len(block))
+        shape_idx.extend(block_shapes)
+        proto_idx.extend(block_protos)
     cfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object",
         spawn=sim_utils.MultiAssetSpawnerCfg(
@@ -241,7 +331,7 @@ def _build_object(scales: tuple[float, ...], kind: str) -> tuple[RigidObjectCfg,
             lin_vel=(0.0, 0.0, 0.0), ang_vel=(0.0, 0.0, 0.0),
         ),
     )
-    return cfg, scale_idx
+    return cfg, scale_idx, shape_idx, proto_idx
 
 
 def _make_object_cfg(
@@ -320,7 +410,9 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     pose_penalty_scale: float = -0.3
     torque_penalty_scale: float = -0.1
     work_penalty_scale: float = -2.0
-    reset_height_threshold: float = 0.52
+    # Fall-termination / grasp-acceptance height: ~3 cm below the settled cage
+    # centre (grasp-gen settled median z = 0.5485 at scale 0.8).
+    reset_height_threshold: float = 0.515
 
     fingers: tuple[str, ...] = ("index", "middle", "ring", "pinky", "thumb")
     pregrasp_positions: dict[str, tuple[float, ...]] = field(
@@ -330,11 +422,14 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
 
     object_scales: tuple[float, ...] = HORA_CYLINDER_SCALES
     object_lengths: tuple[float, ...] = HORA_CYLINDER_LENGTHS
-    # "mixed" = cylinders+cuboids+spheres (main task); grasp-gen overrides to
-    # "cylinder".  object_cfg + object_asset_scale_idx are (re)built in __post_init__.
+    # "mixed" = cylinders+cuboids+spheres (main task); grasp-gen overrides to a
+    # single shape.  object_cfg + object_asset_{scale,shape}_idx are (re)built
+    # in __post_init__.
     object_kind: str = "mixed"
     object_cfg: RigidObjectCfg = None
     object_asset_scale_idx: list[int] = None
+    object_asset_shape_idx: list[int] = None
+    object_asset_proto_idx: list[int] = None
 
     grasp_cache_dir: str = str(ASSET_ROOT / "grasp_cache")
     grasp_cache_name: str = "linker_l20"
@@ -346,9 +441,26 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     )
 
     enable_fingertip_sensors: bool = False
+    # Extra contact sensor over every NON-distal hand link (palm, metacarpals,
+    # proximal/middle phalanges) used by the grasp-gen fingertip-only filter.
+    enable_nontip_sensors: bool = False
     grasp_gen_obj_init_pos: tuple[float, float, float] = INHAND_OBJECT_INIT_POS
     grasp_gen_pose_noise: float = 0.25
-    min_contact_fingers: int = 2
+    # Human-like opposition grip: the thumb fingertip must press the object and
+    # at least this many of the other four fingertips must also be in contact.
+    require_thumb_contact: bool = True
+    min_other_finger_contacts: int = 2
+    # Fingertip-ONLY hold: reject states where the object touches the palm or
+    # any non-distal finger link (the object must float in the fingertip cage).
+    forbid_nontip_contact: bool = True
+    nontip_force_eps: float = 1.0e-4
+    # Ignore the acceptance criteria for the first few grasp-gen steps so the
+    # dropped object may transiently graze non-distal links while settling.
+    grasp_gen_grace_steps: int = 5
+    # Grasp-gen acceptance needs the object this far ABOVE the fall threshold:
+    # without it the harvest keeps mid-slide states sitting barely above the
+    # threshold, which then fall immediately when used as training resets.
+    grasp_gen_accept_z_margin: float = 0.02
     # Fingertip-to-object-CENTRE sanity bound for grasp acceptance.  The L20
     # ``*_distal`` body origins sit ~0.10 m from the object centre at contact (the
     # origin is at the proximal end of the distal link, not the pad), so HORA's
@@ -357,12 +469,15 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     tip_dist_max: float = 0.13
 
     def _rebuild_object(self) -> None:
-        """(Re)build ``object_cfg`` + ``object_asset_scale_idx`` from the current
-        ``object_scales`` / ``object_kind``.  Called by ``__post_init__`` and by the
-        grasp-cache tool after it pins a single scale."""
-        self.object_cfg, self.object_asset_scale_idx = _build_object(
-            self.object_scales, self.object_kind
-        )
+        """(Re)build ``object_cfg`` + ``object_asset_{scale,shape}_idx`` from the
+        current ``object_scales`` / ``object_kind``.  Called by ``__post_init__``
+        and by the grasp-cache tool after it pins a single scale/shape."""
+        (
+            self.object_cfg,
+            self.object_asset_scale_idx,
+            self.object_asset_shape_idx,
+            self.object_asset_proto_idx,
+        ) = _build_object(self.object_scales, self.object_kind)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -379,14 +494,18 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
 @configclass
 class LinkerL20InhandGraspGenEnvCfg(LinkerL20InhandRotationEnvCfg):
     cache_scale: float = 0.8
+    cache_shape: str = "cylinder"
 
     def __post_init__(self) -> None:
-        # Grasp-cache generation runs on CYLINDERS at a single pinned scale.
-        self.object_kind = "cylinder"
+        # Grasp-cache generation runs on ONE shape's training prototypes at a
+        # single pinned scale (one cache file per (scale, shape) pair).
+        self.object_kind = str(self.cache_shape)
         self.object_scales = (float(self.cache_scale),)
         self.object_cfg = None
         self.object_asset_scale_idx = None
-        super().__post_init__()  # builds the cylinder-only grid + scale index
+        self.object_asset_shape_idx = None
+        self.object_asset_proto_idx = None
+        super().__post_init__()  # builds the single-shape grid + indices
         self.episode_length_s = 2.5
         self.curriculum_phases = [
             InhandCurriculumPhaseCfg(
@@ -396,13 +515,21 @@ class LinkerL20InhandGraspGenEnvCfg(LinkerL20InhandRotationEnvCfg):
                 episode_length_s=2.5,
             )
         ]
-        self.domain_rand.enabled = True
+        # HORA generates grasps at NOMINAL dynamics (mass 0.05, friction 1.0,
+        # no randomisation) and replays them under training DR.  Generating
+        # under randomised mass/friction skews the cache toward states that
+        # only hold for that draw (e.g. feather-weight objects).
+        self.domain_rand.enabled = False
         self.domain_rand.random_force_prob = 0.0
         self.domain_rand.force_scale = 0.0
         self.domain_rand.pd_gain_range = (1.0, 1.0)
         self.load_grasp_cache = False
         self.enable_fingertip_sensors = True
+        self.enable_nontip_sensors = True
         self.grasp_gen_obj_init_pos = INHAND_OBJECT_INIT_POS
         self.grasp_gen_pose_noise = 0.25
-        self.min_contact_fingers = 2
+        self.require_thumb_contact = True
+        self.min_other_finger_contacts = 2
+        self.forbid_nontip_contact = True
+        self.grasp_gen_grace_steps = 5
         self.tip_dist_max = 0.13

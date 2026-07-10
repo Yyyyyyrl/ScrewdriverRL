@@ -140,12 +140,20 @@ def test_cache_filename_format(cfg_tree):
     tag = _compile_function(cfg_tree, "_scale_cache_tag")
     filename = _compile_function(cfg_tree, "grasp_cache_filename")
     filename.__globals__["_scale_cache_tag"] = tag
+    filename.__globals__["_SHAPE_CACHE_TAGS"] = _literal(cfg_tree, "_SHAPE_CACHE_TAGS")
 
     assert tag(0.70) == "s07"
     assert tag(0.72) == "s072"
     assert tag(0.80) == "s08"
     assert tag(0.86) == "s086"
-    assert filename(0.80) == "linker_l20_grasp_50k_s08.npy"
+    # One cache per (scale, shape, prototype): fingertip cages have millimetre
+    # tolerance, so grasp states do not transfer across shapes OR prototypes
+    # (cylinder caches on spheres were ~85% dead-on-arrival at reset; even
+    # same-shape caches mixing prototypes stayed ~52%).
+    assert _literal(cfg_tree, "INHAND_CACHE_SHAPES") == ("cylinder", "cuboid", "sphere")
+    assert filename(0.80) == "linker_l20_grasp_cyl0_s08.npy"
+    assert filename(0.80, shape="cuboid", proto=1) == "linker_l20_grasp_cub1_s08.npy"
+    assert filename(0.70, shape="sphere", proto=3) == "linker_l20_grasp_sph3_s07.npy"
 
 
 def test_inhand_mimic_constants_match_urdf(env_tree, urdf_root):
@@ -163,25 +171,69 @@ def test_inhand_mimic_constants_match_urdf(env_tree, urdf_root):
         assert cfg_offset == 0.0
 
 
-def test_canonical_grip_uses_validated_screwdriver_grasp(cfg_tree):
-    """The in-hand canonical pose/orientation/placement is the L20's validated
-    vertical-cylinder grip (reused from the screwdriver task), not the open guess
-    that let the object fall.  Guards against regressing to a non-gripping seed."""
+def _quat_rotate(q, v):
+    w, x, y, z = q
+    # v' = v + 2*q_vec x (q_vec x v + w*v)
+    t = (
+        2.0 * (y * v[2] - z * v[1]),
+        2.0 * (z * v[0] - x * v[2]),
+        2.0 * (x * v[1] - y * v[0]),
+    )
+    return (
+        v[0] + w * t[0] + (y * t[2] - z * t[1]),
+        v[1] + w * t[1] + (z * t[0] - x * t[2]),
+        v[2] + w * t[2] + (x * t[1] - y * t[0]),
+    )
+
+
+def test_canonical_grip_is_palm_up_fingertip_opposition(cfg_tree):
+    """The in-hand canonical pose is the HORA-style palm-up fingertip cage:
+    palm normal up (tilted INHAND_PALM_TILT_DEG about the finger axis, thumb
+    edge down), fingers along world -Y, object seeded at the fingertip-cage
+    centre in the air.  Guards against regressing to a palm-down / top grasp."""
+    import math
+
     pregrasp = _literal(cfg_tree, "INHAND_PREGRASP_POSITIONS")
-    rot = _literal(cfg_tree, "INHAND_HAND_ROT")
     obj_pos = _literal(cfg_tree, "INHAND_OBJECT_INIT_POS")
+    tilt_deg = _literal(cfg_tree, "INHAND_PALM_TILT_DEG")
 
-    # Screwdriver-grasp fingerprint: every finger is substantially flexed
-    # (pip >= ~1.0), i.e. a closed grip — not the flat (pitch 0.4, pip 0.6) cup.
+    quat_from_axis_angle = _compile_function(cfg_tree, "_quat_from_axis_angle")
+    quat_mul = _compile_function(cfg_tree, "_quat_mul")
+    quat_from_axis_angle.__globals__["math"] = math
+    quat_mul.__globals__["math"] = math
+
+    # INHAND_HAND_ROT is computed at module level; recompute it here from the
+    # same helpers and the tilt constant (the HORA composition).
+    rot = quat_mul(
+        quat_from_axis_angle((0.0, 1.0, 0.0), math.radians(-90.0 + tilt_deg)),
+        quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(90.0)),
+    )
+    assert abs(sum(c * c for c in rot) - 1.0) < 1e-6  # unit quat
+
+    tilt = math.radians(tilt_deg)
+    palm_normal_w = _quat_rotate(rot, (1.0, 0.0, 0.0))   # L20 palm normal = +X
+    fingers_w = _quat_rotate(rot, (0.0, 0.0, 1.0))       # fingers = +Z
+    thumb_edge_w = _quat_rotate(rot, (0.0, -1.0, 0.0))   # thumb edge = -Y
+
+    assert palm_normal_w == pytest.approx((math.sin(tilt), 0.0, math.cos(tilt)), abs=1e-6)
+    assert palm_normal_w[2] > 0.5, "palm must face up"
+    assert fingers_w == pytest.approx((0.0, -1.0, 0.0), abs=1e-6)
+    assert thumb_edge_w[2] < -0.5, "thumb edge must be the lower edge (gravity loads the thumb)"
+    assert 20.0 <= tilt_deg <= 60.0
+
+    # Opposition-grip fingerprint: the thumb is swung across the palm
+    # (cmc_yaw + cmc_roll both engaged) while the four fingers are in a
+    # moderate fingertip curl, not the fully closed screwdriver wrap.
+    assert pregrasp["thumb"][0] >= 0.4, "thumb cmc_yaw not opposed"
+    assert pregrasp["thumb"][1] >= 0.5, "thumb cmc_roll not opposed"
     for finger in ("index", "middle", "ring", "pinky"):
-        pip = pregrasp[finger][2]
-        assert pip >= 0.9, f"{finger} pip={pip} is too open to grip the cylinder"
-    assert pregrasp["thumb"][1] >= 1.0  # thumb strongly opposed
+        pitch, pip = pregrasp[finger][1], pregrasp[finger][2]
+        assert 0.2 <= pitch <= 1.0, f"{finger} mcp_pitch={pitch} outside fingertip-cage band"
+        assert 0.2 <= pip <= 1.0, f"{finger} pip={pip} outside fingertip-cage band"
 
-    assert len(rot) == 4 and abs(sum(c * c for c in rot) - 1.0) < 1e-3  # unit quat
-    # Object seeded near the fingertip centroid: above the palm, offset toward
-    # the fingers, not the old 0.62 drop height.
-    assert obj_pos[2] < 0.60, "object drop height not lowered to the grip centroid"
+    # Object seeded in the air at the fingertip cage (hand root is at z=0.5),
+    # never on the palm and never at the old top-grasp drop height.
+    assert 0.50 < obj_pos[2] < 0.60
 
 
 def test_canonical_pose_within_urdf_limits(cfg_tree, urdf_root):
@@ -324,18 +376,25 @@ def test_domain_randomization_ranges_and_physics_writes(cfg_tree):
 
 def test_grasp_gen_cfg_and_done_contract(cfg_tree):
     assert _class_literal(cfg_tree, "LinkerL20InhandGraspGenEnvCfg", "cache_scale") == pytest.approx(0.8)
+    assert _class_literal(cfg_tree, "LinkerL20InhandGraspGenEnvCfg", "cache_shape") == "cylinder"
 
     cfg_source = _CFG.read_text()
     for token in (
         "self.episode_length_s = 2.5",
+        # HORA generates grasps at NOMINAL dynamics; DR stays off in grasp-gen.
+        "self.domain_rand.enabled = False",
         "self.domain_rand.random_force_prob = 0.0",
         "self.domain_rand.force_scale = 0.0",
         "self.domain_rand.pd_gain_range = (1.0, 1.0)",
         "self.load_grasp_cache = False",
         "self.enable_fingertip_sensors = True",
+        "self.enable_nontip_sensors = True",
         "self.grasp_gen_obj_init_pos = INHAND_OBJECT_INIT_POS",
         "self.grasp_gen_pose_noise = 0.25",
-        "self.min_contact_fingers = 2",
+        "self.require_thumb_contact = True",
+        "self.min_other_finger_contacts = 2",
+        "self.forbid_nontip_contact = True",
+        "self.grasp_gen_grace_steps = 5",
         "self.tip_dist_max = 0.13",
     ):
         assert token in cfg_source
@@ -343,7 +402,8 @@ def test_grasp_gen_cfg_and_done_contract(cfg_tree):
     source = (_ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_grasp_gen_env.py").read_text()
     done_start = source.index("    def _get_dones(")
     done_body = source[done_start:source.index("    def _reset_idx(", done_start)]
-    assert "terminated = ~acceptance" in done_body
+    assert "terminated = ~acceptance & ~in_grace" in done_body
+    assert "self.cfg.grasp_gen_grace_steps" in done_body
     assert "self.episode_length_buf >= self.max_episode_length - 1" in done_body
     assert "self._last_timed_out = timed_out.detach().clone()" in done_body
 
@@ -358,17 +418,27 @@ def test_grasp_gen_source_contracts():
     for token in (
         "_compute_acceptance",
         "_read_tip_object_forces",
+        "_read_nontip_object_forces",
         "force_matrix_w",
         "tip_dist_max",
-        "min_contact_fingers",
+        "require_thumb_contact",
+        "min_other_finger_contacts",
+        "forbid_nontip_contact",
+        "nontip_force_eps",
+        "grasp_gen_accept_z_margin",
         "save_if_full",
         "np.save",
     ):
         assert token in source
 
+    env_source = _ENV.read_text()
+    for token in ("NONTIP_BODY_NAMES", "enable_nontip_sensors", "contact_nontip"):
+        assert token in env_source
+
     tool_source = (_ROOT / "tools" / "gen_inhand_grasp_cache.py").read_text()
     for token in (
         "--scale",
+        "--shape",
         "--num_envs",
         "--num_states",
         "--max_steps",
@@ -377,5 +447,7 @@ def test_grasp_gen_source_contracts():
         "Isaac-LinkerL20-Inhand-GraspGen",
         "grasp_cache_filename",
         "per-finger stats",
+        "thumb contact mean",
+        "nontip force mean",
     ):
         assert token in tool_source

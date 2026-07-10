@@ -65,6 +65,21 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         "thumb_ip": ("thumb_mcp", 1.1619, 0.0),
     }
 
+    # Every hand link that is NOT a fingertip (palm, metacarpals, proximal and
+    # middle phalanges).  The grasp-gen fingertip-only filter rejects any state
+    # where the object touches one of these.  One single-body ContactSensor is
+    # created per link: a multi-body regex sensor breaks PhysX filtered-force
+    # views (it expects one filter entry per matched body).
+    NONTIP_BODY_NAMES = (
+        "hand_base_link",
+        "index_metacarpals", "index_proximal", "index_middle",
+        "middle_metacarpals", "middle_proximal", "middle_middle",
+        "ring_metacarpals", "ring_proximal", "ring_middle",
+        "pinky_metacarpals", "pinky_proximal", "pinky_middle",
+        "thumb_metacarpals_base1", "thumb_metacarpals_base2",
+        "thumb_metacarpals", "thumb_proximal",
+    )
+
     SELF_COLLISION_FILTER_PAIRS = [
         ("hand_base_link", "index_proximal"),
         ("hand_base_link", "middle_proximal"),
@@ -128,9 +143,17 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         asset_scale_idx = torch.tensor(
             cfg.object_asset_scale_idx, dtype=torch.long, device=self.device
         )
+        asset_shape_idx = torch.tensor(
+            cfg.object_asset_shape_idx, dtype=torch.long, device=self.device
+        )
+        asset_proto_idx = torch.tensor(
+            cfg.object_asset_proto_idx, dtype=torch.long, device=self.device
+        )
         n_assets = max(len(asset_scale_idx), 1)
         asset_idx = torch.arange(self.num_envs, device=self.device) % n_assets
         self._env_scale_idx = asset_scale_idx[asset_idx]
+        self._env_shape_idx = asset_shape_idx[asset_idx]
+        self._env_proto_idx = asset_proto_idx[asset_idx]
         scale_values = torch.tensor(cfg.object_scales, dtype=torch.float32, device=self.device)
         self._env_scale = scale_values[self._env_scale_idx]
 
@@ -197,6 +220,21 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 )
                 self.scene.sensors[f"contact_{finger}"] = sensor
                 self._finger_sensors.append(sensor)
+
+        self._nontip_sensors: list[ContactSensor] = []
+        if self.cfg.enable_nontip_sensors:
+            for body in self.NONTIP_BODY_NAMES:
+                sensor = ContactSensor(
+                    ContactSensorCfg(
+                        prim_path=f"{self.cfg.robot_cfg.prim_path}/{body}",
+                        history_length=0,
+                        update_period=0.0,
+                        track_air_time=False,
+                        filter_prim_paths_expr=[self.cfg.object_cfg.prim_path],
+                    )
+                )
+                self.scene.sensors[f"contact_nontip_{body}"] = sensor
+                self._nontip_sensors.append(sensor)
 
         _spawn_local_ground()
         self._finalize_scene()
@@ -310,7 +348,7 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
 
         super()._reset_idx(env_ids)
 
-        finger_q, obj_pos_local, obj_quat = self._sample_reset_rows(env_ids)
+        finger_q, finger_target, obj_pos_local, obj_quat = self._sample_reset_rows(env_ids)
 
         root = self.hand.data.default_root_state[env_ids].clone()
         root[:, :3] += self.scene.env_origins[env_ids]
@@ -323,7 +361,14 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         if self._coupled_mult is not None:
             masters = jpos[:, self._coupled_master_joint_ids]
             jpos[:, self._coupled_follower_ids] = masters * self._coupled_mult + self._coupled_offset
-        self.hand.set_joint_position_target(jpos, env_ids=env_ids)
+        # Command the cached PD TARGETS (not the measured pose): the
+        # target-position gap re-applies the squeeze that holds the grasp.
+        jtarget = jpos.clone()
+        jtarget[:, self._finger_joint_ids] = finger_target
+        if self._coupled_mult is not None:
+            masters_t = jtarget[:, self._coupled_master_joint_ids]
+            jtarget[:, self._coupled_follower_ids] = masters_t * self._coupled_mult + self._coupled_offset
+        self.hand.set_joint_position_target(jtarget, env_ids=env_ids)
         self.hand.write_joint_state_to_sim(jpos, jvel, env_ids=env_ids)
 
         obj_pose = torch.zeros((len(env_ids), 7), dtype=torch.float32, device=self.device)
@@ -335,7 +380,7 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             env_ids=env_ids,
         )
 
-        self._cur_targets[env_ids] = finger_q
+        self._cur_targets[env_ids] = finger_target
         self._init_pose_buf[env_ids] = finger_q
         self._obj_pos_prev[env_ids] = obj_pose[:, :3].detach()
         self._obj_quat_prev[env_ids] = obj_pose[:, 3:7].detach()
@@ -374,23 +419,40 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             dim=-1,
         )
 
-    def _load_grasp_caches(self) -> dict[int, torch.Tensor]:
-        caches: dict[int, torch.Tensor] = {}
+    def _load_grasp_caches(self) -> dict[tuple[int, int, int], torch.Tensor]:
+        """Caches keyed by (scale_idx, shape_idx, proto_idx) — one file per
+        object prototype present in the grid (fingertip cages do not transfer
+        between prototypes)."""
+        caches: dict[tuple[int, int, int], torch.Tensor] = {}
         if not self.cfg.load_grasp_cache:
             return caches
+        from .inhand_rotation_env_cfg import INHAND_CACHE_SHAPES
+
         root = Path(self.cfg.grasp_cache_dir)
-        missing: list[tuple[int, Path]] = []
+        shape_protos = sorted(
+            set(zip(self.cfg.object_asset_shape_idx, self.cfg.object_asset_proto_idx))
+        )
+        missing: list[tuple[tuple[int, int, int], Path]] = []
         for i, scale in enumerate(self.cfg.object_scales):
-            path = root / grasp_cache_filename(scale, self.cfg.grasp_cache_name)
-            if not path.exists():
-                missing.append((i, path))
-                continue
-            arr = np.load(path)
-            if arr.ndim != 2 or arr.shape[1] != 23:
-                raise ValueError(f"Invalid grasp cache shape {arr.shape} in {path}; expected (N, 23)")
-            caches[i] = torch.as_tensor(arr, dtype=torch.float32, device=self.device)
+            for si, pi in shape_protos:
+                path = root / grasp_cache_filename(
+                    scale, self.cfg.grasp_cache_name, INHAND_CACHE_SHAPES[si], pi
+                )
+                if not path.exists():
+                    missing.append(((i, si, pi), path))
+                    continue
+                arr = np.load(path)
+                if arr.ndim != 2 or arr.shape[1] != 39:
+                    raise ValueError(
+                        f"Invalid grasp cache shape {arr.shape} in {path}; expected "
+                        "(N, 39) = [q(16), pd_targets(16), obj pose(7)] — regenerate "
+                        "stale caches with tools/gen_inhand_grasp_cache.py"
+                    )
+                caches[(i, si, pi)] = torch.as_tensor(
+                    arr, dtype=torch.float32, device=self.device
+                )
         if missing and caches:
-            lines = "\n".join(f"  scale_idx={i}: {p}" for i, p in missing)
+            lines = "\n".join(f"  (scale,shape,proto)={k}: {p}" for k, p in missing)
             raise FileNotFoundError(
                 "Missing LinkerL20 in-hand grasp cache file(s):\n"
                 f"{lines}\nGenerate them with tools/gen_inhand_grasp_cache.py."
@@ -405,26 +467,36 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
 
     def _sample_reset_rows(
         self, env_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns (finger_q, finger_target, obj_pos, obj_quat).  ``finger_target``
+        is the cached PD command that produced the grasp's squeeze; the canonical
+        fallback uses the pose itself (geometrically supportive cage)."""
         finger_q = self._default_finger_pos[env_ids].clone()
+        finger_target = finger_q.clone()
         obj_pos = self._canonical_obj_pos.unsqueeze(0).expand(len(env_ids), -1).clone()
         obj_quat = self._canonical_obj_quat.unsqueeze(0).expand(len(env_ids), -1).clone()
         if not self._grasp_cache:
-            return finger_q, obj_pos, obj_quat
+            return finger_q, finger_target, obj_pos, obj_quat
 
-        for scale_idx_t in torch.unique(self._env_scale_idx[env_ids]):
-            scale_idx = int(scale_idx_t.item())
-            cache = self._grasp_cache.get(scale_idx)
+        env_scale = self._env_scale_idx[env_ids]
+        env_shape = self._env_shape_idx[env_ids]
+        env_proto = self._env_proto_idx[env_ids]
+        key_code = (env_scale * 100 + env_shape) * 100 + env_proto
+        for code_t in torch.unique(key_code):
+            code = int(code_t.item())
+            cache = self._grasp_cache.get((code // 10000, (code // 100) % 100, code % 100))
             if cache is None:
                 continue
-            mask = self._env_scale_idx[env_ids] == scale_idx
+            mask = key_code == code
             local = torch.nonzero(mask, as_tuple=False).squeeze(-1)
             rows = torch.randint(0, cache.shape[0], (len(local),), device=self.device)
             sample = cache[rows]
-            finger_q[local] = sample[:, : self.num_finger_dofs]
-            obj_pos[local] = sample[:, self.num_finger_dofs : self.num_finger_dofs + 3]
-            obj_quat[local] = sample[:, self.num_finger_dofs + 3 : self.num_finger_dofs + 7]
-        return finger_q, obj_pos, obj_quat
+            nd = self.num_finger_dofs
+            finger_q[local] = sample[:, :nd]
+            finger_target[local] = sample[:, nd : 2 * nd]
+            obj_pos[local] = sample[:, 2 * nd : 2 * nd + 3]
+            obj_quat[local] = sample[:, 2 * nd + 3 : 2 * nd + 7]
+        return finger_q, finger_target, obj_pos, obj_quat
 
     def _default_object_mass(self) -> torch.Tensor:
         mass = getattr(self.object.data, "default_mass", None)

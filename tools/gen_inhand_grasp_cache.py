@@ -9,8 +9,20 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Generate LinkerL20 in-hand grasp cache states.")
 parser.add_argument("--scale", type=float, default=0.8)
+parser.add_argument(
+    "--shape",
+    type=str,
+    default="cylinder",
+    choices=("cylinder", "cuboid", "sphere"),
+    help="Object shape to generate the cache on (one cache file per scale per shape).",
+)
 parser.add_argument("--num_envs", type=int, default=8192)
-parser.add_argument("--num_states", type=int, default=50000)
+parser.add_argument(
+    "--num_states",
+    type=int,
+    default=12500,
+    help="Accepted states to collect PER PROTOTYPE (one cache file per prototype).",
+)
 parser.add_argument("--out", type=str, default="assets/grasp_cache")
 parser.add_argument("--max_steps", type=int, default=0, help="Stop after this many env steps without saving; 0 disables.")
 parser.add_argument("--diagnostics_every", type=int, default=0, help="Print grasp acceptance diagnostics every N steps.")
@@ -42,17 +54,20 @@ except ImportError:
 from screwdriver_rl.tasks.linker_l20.inhand_rotation_env_cfg import grasp_cache_filename
 
 
-def _configure_scale(env_cfg, scale: float) -> None:
-    # Cache generation runs on CYLINDERS only, at one pinned scale.
+def _configure_scale(env_cfg, scale: float, shape: str) -> None:
+    # Cache generation runs on ONE shape's training prototypes at one pinned
+    # scale, with domain randomisation OFF (HORA generates at nominal dynamics).
     env_cfg.cache_scale = float(scale)
-    env_cfg.object_kind = "cylinder"
+    env_cfg.cache_shape = str(shape)
+    env_cfg.object_kind = str(shape)
     env_cfg.object_scales = (float(scale),)
-    env_cfg._rebuild_object()  # rebuilds object_cfg + object_asset_scale_idx
+    env_cfg._rebuild_object()  # rebuilds object_cfg + asset scale/shape indices
     env_cfg.load_grasp_cache = False
     env_cfg.enable_fingertip_sensors = True
     env_cfg.episode_length_s = 2.5
     if env_cfg.curriculum_phases:
         env_cfg.curriculum_phases[0].episode_length_s = 2.5
+    env_cfg.domain_rand.enabled = False
     env_cfg.domain_rand.random_force_prob = 0.0
     env_cfg.domain_rand.force_scale = 0.0
     env_cfg.domain_rand.pd_gain_range = (1.0, 1.0)
@@ -92,6 +107,10 @@ def _debug_report(base_env, steps: int) -> None:
         f"\n  acceptance mean          : {mean_extra('eval_grasp_acceptance'):.3f}"
         f"\n  all tips close mean      : {mean_extra('eval_tip_close'):.3f}"
         f"\n  contact fingers mean     : {mean_extra('eval_contact_fingers'):.3f}"
+        f"\n  thumb contact mean       : {mean_extra('eval_thumb_contact'):.3f}"
+        f"\n  other contacts mean      : {mean_extra('eval_other_contacts'):.3f}"
+        f"\n  nontip force mean        : {mean_extra('eval_nontip_force'):.5f}"
+        f"\n  tips-only mean           : {mean_extra('eval_tips_only'):.3f}"
         f"\n  object high mean         : {mean_extra('eval_obj_high'):.3f}"
         f"\n  per-finger stats         : {''.join(finger_lines)}\n",
         flush=True,
@@ -101,14 +120,20 @@ def _debug_report(base_env, steps: int) -> None:
 def main() -> None:
     task = "Isaac-LinkerL20-Inhand-GraspGen"
     env_cfg = parse_env_cfg(task, device=args.device, num_envs=args.num_envs)
-    _configure_scale(env_cfg, args.scale)
+    _configure_scale(env_cfg, args.scale, args.shape)
     env = gym.make(task, cfg=env_cfg, render_mode="human" if args.debug else None)
     base_env = env.unwrapped
 
-    out = Path(args.out) / grasp_cache_filename(args.scale, env_cfg.grasp_cache_name)
+    def out_path(proto: int) -> Path:
+        return Path(args.out) / grasp_cache_filename(
+            args.scale, env_cfg.grasp_cache_name, args.shape, proto
+        )
+
+    n_protos = int(max(env_cfg.object_asset_proto_idx)) + 1
     print(
-        f"[grasp-cache] scale={args.scale} num_envs={base_env.num_envs} "
-        f"target={args.num_states} out={out}",
+        f"[grasp-cache] scale={args.scale} shape={args.shape} protos={n_protos} "
+        f"num_envs={base_env.num_envs} target={args.num_states}/proto "
+        f"out={out_path(0)} ...",
         flush=True,
     )
 
@@ -127,24 +152,45 @@ def main() -> None:
             diag_every = 25 if args.debug else int(args.diagnostics_every)
             if diag_every > 0 and steps % diag_every == 0:
                 _debug_report(base_env, steps)
-            if base_env.save_if_full(out, n=args.num_states):
-                print(f"[grasp-cache] saved {args.num_states} states to {out}", flush=True)
+            if base_env.save_if_full(out_path, n=args.num_states):
+                print(
+                    f"[grasp-cache] saved {args.num_states} states/proto to "
+                    f"{n_protos} file(s): {out_path(0).parent}",
+                    flush=True,
+                )
                 break
             if steps % 100 == 0:
-                rows = sum(t.shape[0] for t in base_env._harvest_rows)
-                print(f"[grasp-cache] steps={steps} cached={rows}/{args.num_states}", flush=True)
+                counts = base_env.harvest_counts()
+                print(
+                    f"[grasp-cache] steps={steps} cached/proto="
+                    f"{list(counts.values())} target={args.num_states}",
+                    flush=True,
+                )
             if args.max_steps > 0 and steps >= args.max_steps:
-                rows = sum(t.shape[0] for t in base_env._harvest_rows)
+                counts = base_env.harvest_counts()
                 _debug_report(base_env, steps)
                 raise RuntimeError(
-                    f"Reached --max_steps={args.max_steps} with {rows}/{args.num_states} cached states."
+                    f"Reached --max_steps={args.max_steps} with per-proto counts "
+                    f"{counts} (target {args.num_states})."
                 )
     finally:
         env.close()
 
 
 if __name__ == "__main__":
+    ok = False
     try:
         main()
+        ok = True
     finally:
+        # simulation_app.close() sometimes hangs indefinitely on shutdown; the
+        # cache file is already saved by now, so force-exit if it does (keeping
+        # the success/failure exit code for callers like the 9-scale loop).
+        import os
+        import threading
+
+        exit_code = 0 if ok else 1
+        watchdog = threading.Timer(60.0, lambda: os._exit(exit_code))
+        watchdog.daemon = True
+        watchdog.start()
         simulation_app.close()
