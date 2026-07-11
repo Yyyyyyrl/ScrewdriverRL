@@ -288,6 +288,7 @@ def test_inhand_yaml_sanity():
     assert net["priv_mlp_units"] == [256, 128]
     assert net["mlp"]["units"] == [512, 256, 128]
     assert train["reward_shaper"]["scale_value"] == pytest.approx(0.01)
+    assert train["gamma"] == pytest.approx(0.995)
     assert train["horizon_length"] == 8
     assert train["minibatch_size"] == 16384
     assert "central_value_config" not in params
@@ -340,6 +341,7 @@ def test_hora_reward_terms_and_eval_extras_are_present():
         "pose_penalty_scale",
         "torque_penalty_scale",
         "work_penalty_scale",
+        "fall_penalty",
         "eval_rotate_reward",
         "eval_obj_z",
         "eval_fall_frac",

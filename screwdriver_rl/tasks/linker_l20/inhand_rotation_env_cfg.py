@@ -421,6 +421,13 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     rot_axis: tuple[float, float, float] = INHAND_ROT_AXIS
     rotate_reward_scale: float = 1.0
     angvel_clip: tuple[float, float] = (-0.5, 0.5)
+    # One-off reward at the fall-termination step.  HORA has no fall penalty
+    # (its flat-palm grasps rarely fall); with the tilted fingertip cage,
+    # three training runs converged to a spin-fast-and-drop equilibrium
+    # (rotate-reward ~0.37/step, 100% of episodes ending in falls at ~50
+    # steps) because dropping cost nothing.  Standard IsaacGymEnvs in-hand
+    # practice (AllegroHand fallPenalty).
+    fall_penalty: float = -10.0
     linvel_penalty_scale: float = -0.3
     pose_penalty_scale: float = -0.3
     torque_penalty_scale: float = -0.1

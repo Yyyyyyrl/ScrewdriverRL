@@ -311,16 +311,17 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         torque_cost = torch.sum(tau**2, dim=-1)
         work_cost = torch.sum(tau * qdot, dim=-1) ** 2
 
+        obj_z = obj_pos[:, 2] - self.scene.env_origins[:, 2]
+        fall = obj_z < float(self.cfg.reset_height_threshold)
+
         reward = (
             rotate_reward
             + float(self.cfg.linvel_penalty_scale) * linvel_cost
             + float(self.cfg.pose_penalty_scale) * pose_cost
             + float(self.cfg.torque_penalty_scale) * torque_cost
             + float(self.cfg.work_penalty_scale) * work_cost
+            + float(self.cfg.fall_penalty) * fall.float()
         )
-
-        obj_z = obj_pos[:, 2] - self.scene.env_origins[:, 2]
-        fall = obj_z < float(self.cfg.reset_height_threshold)
         self.extras.update(
             {
                 "eval_rotate_reward": rotate_reward.detach(),

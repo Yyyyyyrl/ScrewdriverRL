@@ -54,7 +54,9 @@ params:
     reward_shaper:
       scale_value: 0.01
     normalize_advantage: True
-    gamma: 0.99
+    # 0.995 (HORA uses 0.99): effective horizon ~200 steps so holding a grasp
+    # to the 400-step timeout outvalues spinning fast and dropping at ~50.
+    gamma: 0.995
     tau: 0.95
     # HORA starts at lr=5e-3 / kl=0.02. If the LinkerL20 port shows early
     # instability, use the fallback ladder 5e-3 -> 1e-3 with kl_threshold 0.008.
