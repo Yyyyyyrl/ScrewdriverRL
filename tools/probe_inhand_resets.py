@@ -67,6 +67,13 @@ def main() -> None:
         env_cfg.domain_rand.enabled = False
     env = gym.make(TASK, cfg=env_cfg, render_mode=None)
     base = env.unwrapped
+    # Pin the FINAL curriculum phase (cf. play.py): a fresh env starts in
+    # phase 1 where the rotation reward has weight 0, which would zero the
+    # reported rotate-reward and soften termination-relevant reward terms.
+    phases = getattr(base.cfg, "curriculum_phases", None)
+    if phases:
+        base._curriculum_phase = phases[-1]
+        base._global_steps = int(phases[-1].step_start)
 
     player = None
     obses = None
@@ -135,14 +142,13 @@ def main() -> None:
                 act = player.get_action(obs_t, is_deterministic=True)
             obses, _, dones, _ = player.env_step(player.env, act)
             terminated = dones.to(device, dtype=torch.bool)
-            timed_out = base.episode_length_buf >= base.max_episode_length - 1
-            fall = terminated & ~timed_out
         else:
             _, _, term, trunc, _ = env.step(actions)
-            term = term.to(device, dtype=torch.bool)
-            terminated = term | trunc.to(device, dtype=torch.bool)
-            fall = term
+            terminated = term.to(device, dtype=torch.bool) | trunc.to(device, dtype=torch.bool)
         ep_len += 1
+        # Fall vs timeout from the externally tracked length (episode_length_buf
+        # is already reset by the time env.step returns for done envs).
+        fall = terminated & (ep_len < base.max_episode_length - 1)
         rr = base.extras.get("eval_rotate_reward")
         if rr is not None:
             rot_sum += rr.to(device).sum()
