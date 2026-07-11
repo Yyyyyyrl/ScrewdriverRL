@@ -359,6 +359,7 @@ def test_hora_reward_terms_and_eval_extras_are_present():
         "torque_penalty_scale",
         "work_penalty_scale",
         "fall_penalty",
+        "hold_bonus",
         "eval_rotate_reward",
         "eval_obj_z",
         "eval_fall_frac",

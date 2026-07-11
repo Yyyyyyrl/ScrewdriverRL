@@ -428,6 +428,13 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     # steps) because dropping cost nothing.  Standard IsaacGymEnvs in-hand
     # practice (AllegroHand fallPenalty).
     fall_penalty: float = -10.0
+    # Per-step bonus while the object is held.  Without it the phase-1
+    # (rotation weight 0) reward is penalties-only, and terminating early is
+    # cheaper than living with a negative income stream — the policy learns
+    # reward suicide (HoldFrac climbs for ~50 epochs while the critic is
+    # uninformed, then collapses to 0).  Sized so holding is clearly net
+    # positive but rotation (up to +0.5/step) still dominates in phase 3.
+    hold_bonus: float = 0.2
     linvel_penalty_scale: float = -0.3
     pose_penalty_scale: float = -0.3
     torque_penalty_scale: float = -0.1

@@ -326,6 +326,7 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             + float(self.cfg.torque_penalty_scale) * torque_cost
             + float(self.cfg.work_penalty_scale) * work_cost
             + float(self.cfg.fall_penalty) * fall.float()
+            + float(self.cfg.hold_bonus) * (~fall).float()
         )
         self.extras.update(
             {
