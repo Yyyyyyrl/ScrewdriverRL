@@ -331,6 +331,23 @@ def test_train_stage2_play_eval_observation_contracts(env_tree):
     assert sum(len(v) for v in obs_dim.values()) == 16
 
 
+def test_hold_first_curriculum_is_wired():
+    """Full rotation reward from step 0 collapses into spin-and-drop
+    (HoldFrac -> 0 by ~200 epochs); the default curriculum must learn to hold
+    first and the env must actually consume reward_turn_weight."""
+    source = _ENV.read_text()
+    # Phase selection + rotation-reward gating.
+    assert "for phase in phases:" in source
+    assert "if self._global_steps >= phase.step_start:" in source
+    assert "CURRICULUM TRANSITION" in source
+    assert "self._curriculum_phase.reward_turn_weight" in source
+
+    cfg_source = _CFG.read_text()
+    assert "InhandCurriculumPhaseCfg(step_start=0, reward_turn_weight=0.0)" in cfg_source
+    assert "reward_turn_weight=0.3" in cfg_source
+    assert "reward_turn_weight=1.0" in cfg_source
+
+
 def test_hora_reward_terms_and_eval_extras_are_present():
     source = _ENV.read_text()
     for token in (

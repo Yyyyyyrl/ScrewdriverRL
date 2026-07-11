@@ -298,10 +298,15 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         obj_linvel = (obj_pos - self._obj_pos_prev) / max(self._policy_dt, 1e-6)
 
         raw_rotate = torch.sum(obj_angvel * self._rot_axis, dim=-1)
-        rotate_reward = float(self.cfg.rotate_reward_scale) * torch.clamp(
-            raw_rotate,
-            min=float(self.cfg.angvel_clip[0]),
-            max=float(self.cfg.angvel_clip[1]),
+        turn_weight = float(self._curriculum_phase.reward_turn_weight)
+        rotate_reward = (
+            turn_weight
+            * float(self.cfg.rotate_reward_scale)
+            * torch.clamp(
+                raw_rotate,
+                min=float(self.cfg.angvel_clip[0]),
+                max=float(self.cfg.angvel_clip[1]),
+            )
         )
         linvel_cost = torch.linalg.norm(obj_linvel, ord=1, dim=-1)
         finger_q = self.hand.data.joint_pos[:, self._finger_joint_ids]
@@ -338,8 +343,14 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 "eval_hold_frac": torch.full(
                     (self.num_envs,), self._hold_frac_ema, device=self.device
                 ),
-                "eval_curriculum_phase": torch.ones(self.num_envs, device=self.device),
-                "eval_num_phases": torch.ones(self.num_envs, device=self.device),
+                "eval_curriculum_phase": torch.full(
+                    (self.num_envs,),
+                    float(self.cfg.curriculum_phases.index(self._curriculum_phase) + 1),
+                    device=self.device,
+                ),
+                "eval_num_phases": torch.full(
+                    (self.num_envs,), float(len(self.cfg.curriculum_phases)), device=self.device
+                ),
             }
         )
         if self._log_stage == 1:
@@ -435,7 +446,25 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         self._hold_frac_ema += alpha * (batch_held - self._hold_frac_ema)
 
     def _update_curriculum(self) -> None:
-        self._curriculum_phase = self.cfg.curriculum_phases[0]
+        """Select the curriculum phase from the global step count (same pattern
+        as the screwdriver task): the latest phase whose ``step_start`` has been
+        reached is active; transitions print a banner."""
+        phases = self.cfg.curriculum_phases
+        active = phases[0]
+        for phase in phases:
+            if self._global_steps >= phase.step_start:
+                active = phase
+        if active is not self._curriculum_phase:
+            print(
+                f"\n{'=' * 60}\n"
+                f"  CURRICULUM TRANSITION @ {self._global_steps:,} steps\n"
+                f"  turn_weight : {self._curriculum_phase.reward_turn_weight}"
+                f"  ->  {active.reward_turn_weight}\n"
+                f"{'=' * 60}\n",
+                flush=True,
+            )
+            self._curriculum_phase = active
+            self.cfg.episode_length_s = active.episode_length_s
 
     def _make_obs_frame(self) -> torch.Tensor:
         finger_q = self.hand.data.joint_pos[:, self._finger_joint_ids]

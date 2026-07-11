@@ -458,8 +458,21 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     load_grasp_cache: bool = True
 
     domain_rand: InhandDomainRandCfg = field(default_factory=InhandDomainRandCfg)
+    # Hold-first curriculum (one epoch = 65,536 global env steps at 8192 envs
+    # x horizon 8).  With full rotation reward from step 0 the policy trades
+    # every hold away for max-rate spinning before it ever learns a stable
+    # gait (HoldFrac collapses to 0 by ~200 epochs); learning to HOLD under
+    # the fall penalty first, then ramping the rotation weight, routes around
+    # that local optimum.
     curriculum_phases: list[InhandCurriculumPhaseCfg] = field(
-        default_factory=lambda: [InhandCurriculumPhaseCfg()]
+        default_factory=lambda: [
+            # ~epoch 0-500: hold only (fall penalty + regularisers).
+            InhandCurriculumPhaseCfg(step_start=0, reward_turn_weight=0.0),
+            # ~epoch 500-2000: gentle rotation on top of the hold.
+            InhandCurriculumPhaseCfg(step_start=32_768_000, reward_turn_weight=0.3),
+            # ~epoch 2000+: full HORA rotation reward.
+            InhandCurriculumPhaseCfg(step_start=131_072_000, reward_turn_weight=1.0),
+        ]
     )
 
     enable_fingertip_sensors: bool = False
