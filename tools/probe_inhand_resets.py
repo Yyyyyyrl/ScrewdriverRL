@@ -27,6 +27,12 @@ parser.add_argument(
     "--checkpoint", type=str, default=None,
     help="rl_games .pth to evaluate; omit for the zero-action reset-quality baseline.",
 )
+parser.add_argument(
+    "--adapter_checkpoint", type=str, default=None,
+    help="Stage-2 deploy.pth / proprio_adapt.pth: drive the actor with the "
+    "adapter's PREDICTED latent (deployment inference path) instead of the "
+    "privileged-obs latent, to size the oracle-vs-deploy gap.",
+)
 parser.add_argument("--num_envs", type=int, default=810)
 parser.add_argument("--steps", type=int, default=900)
 parser.add_argument(
@@ -117,6 +123,20 @@ def main() -> None:
     else:
         env.reset()
 
+    adapter = None
+    if args.adapter_checkpoint:
+        if player is None:
+            raise SystemExit("--adapter_checkpoint requires --checkpoint")
+        from screwdriver_rl.algos.proprio_adapt import ProprioAdaptNet
+
+        state = torch.load(args.adapter_checkpoint, map_location=args.rl_device, weights_only=False)
+        nd = state["net_dims"]
+        adapter = ProprioAdaptNet(
+            frame_dim=int(nd["frame_dim"]), hist_len=int(nd["hist_len"]), out_dim=int(nd["out_dim"])
+        ).to(args.rl_device).eval()
+        adapter.load_state_dict(state.get("adapter", state.get("net")))
+        print(f"[probe] DEPLOY mode: actor driven by adapter latent ({args.adapter_checkpoint})")
+
     base.episode_length_buf[:] = 0
 
     n = base.num_envs
@@ -139,7 +159,17 @@ def main() -> None:
         if player is not None:
             obs_t = obses.get("obs") if isinstance(obses, dict) else obses
             with torch.no_grad():
-                act = player.get_action(obs_t, is_deterministic=True)
+                if adapter is not None:
+                    # Deployment path (cf. play.py _play_deploy): normalised
+                    # proprio + adapter-predicted latent -> deterministic action.
+                    a2c = player.model.a2c_network
+                    xn = player.model.norm_obs(obs_t)
+                    latent = adapter(base._prop_hist_buf)
+                    merged = torch.cat([xn[:, : int(a2c.proprio_dim)], latent], dim=-1)
+                    mu = a2c.mu_act(a2c.mu(a2c.actor_mlp(merged)))
+                    act = torch.clamp(mu, -1.0, 1.0)
+                else:
+                    act = player.get_action(obs_t, is_deterministic=True)
             obses, _, dones, _ = player.env_step(player.env, act)
             terminated = dones.to(device, dtype=torch.bool)
         else:
