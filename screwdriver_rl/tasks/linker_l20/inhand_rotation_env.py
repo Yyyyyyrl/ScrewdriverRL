@@ -162,7 +162,7 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             cfg.grasp_gen_obj_init_pos, dtype=torch.float32, device=self.device
         )
         self._canonical_obj_quat = torch.tensor(
-            (1.0, 0.0, 0.0, 0.0), dtype=torch.float32, device=self.device
+            cfg.grasp_gen_obj_init_rot, dtype=torch.float32, device=self.device
         )
 
         self._obs_hist = torch.zeros(
@@ -528,6 +528,15 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 f"{lines}\nGenerate them with tools/gen_inhand_grasp_cache.py."
             )
         if missing:
+            if self.cfg.require_complete_grasp_cache:
+                lines = "\n".join(
+                    f"  (scale,shape,proto)={k}: {p}" for k, p in missing
+                )
+                raise FileNotFoundError(
+                    "Complete grasp caches are required for this task, but no "
+                    "cache files were found:\n"
+                    f"{lines}\nGenerate them with tools/gen_inhand_grasp_cache.py."
+                )
             print(
                 "[inhand-reset] No grasp caches found; using canonical pose fallback. "
                 "Generate caches with tools/gen_inhand_grasp_cache.py before training.",

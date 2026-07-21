@@ -79,7 +79,11 @@ class LinkerL20InhandGraspGenEnv(LinkerL20InhandRotationEnv):
         obj_pose[:, :3] = self.scene.env_origins[env_ids_t] + torch.tensor(
             self.cfg.grasp_gen_obj_init_pos, dtype=torch.float32, device=self.device
         )
-        obj_pose[:, 3] = 1.0
+        obj_pose[:, 3:7] = torch.tensor(
+            self.cfg.grasp_gen_obj_init_rot,
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.object.write_root_pose_to_sim(obj_pose, env_ids=env_ids_t)
         self.object.write_root_velocity_to_sim(
             torch.zeros((len(env_ids_t), 6), dtype=torch.float32, device=self.device),
