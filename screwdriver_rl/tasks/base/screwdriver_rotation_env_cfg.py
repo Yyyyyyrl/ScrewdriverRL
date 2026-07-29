@@ -212,6 +212,31 @@ class DomainRandCfg:
     """Multiplicative scale on the base tilt-joint damping (base 0.003)."""
 
     # ------------------------------------------------------------------
+    # Per-episode calibration / placement error
+    # ------------------------------------------------------------------
+    reset_root_pos_noise_m: float = 0.0
+    """Uniform hand-root x/y placement error (m); phase-scaled per reset."""
+
+    reset_root_z_noise_m: float = 0.0
+    """Uniform hand-root axial placement error (m); phase-scaled per reset."""
+
+    reset_root_tilt_noise_rad: float = 0.0
+    """Uniform hand-root roll/pitch error (rad); phase-scaled per reset."""
+
+    reset_root_yaw_noise_rad: float = 0.0
+    """Uniform hand-root yaw error (rad); phase-scaled per reset."""
+
+    reset_screwdriver_tilt_noise_rad: float = 0.0
+    """Uniform mounted-screwdriver x/y tilt error (rad); phase-scaled per reset."""
+
+    joint_zero_bias_rad: float = 0.0
+    """Per-joint, per-episode encoder zero-point bias (rad).
+
+    The bias is constant throughout an episode and affects policy/history
+    proprioception only, matching a quasi-static hardware calibration offset.
+    """
+
+    # ------------------------------------------------------------------
     # Geometry (per-env handle diameter/length via pre-generated URDF variants)
     # ------------------------------------------------------------------
     randomize_geometry: bool = False
@@ -315,6 +340,21 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
 
     reset_contact_steps: int = 32
     """Physics settling steps after reset to stabilise initial contacts."""
+
+    reset_root_pose_ramp: bool = False
+    """Move the fixed hand root from its nominal pose to the sampled DR pose
+    across ``reset_contact_steps`` instead of teleporting directly.  Disabled
+    by default so existing tasks retain bit-for-bit reset semantics."""
+
+    reset_contact_guard_min_fingers: int = 0
+    """Minimum distance-contact fingertips required after reset settling.
+
+    Zero disables the guard.  Linker tasks that enable it resample only failed
+    environments and never start an episode from an invalid initial grasp.
+    """
+
+    reset_contact_guard_max_resamples: int = 0
+    """Maximum failed-environment resamples before the reset fails closed."""
 
     turn_direction: float = -1.0
     """Sign of the desired rotation: −1 = negative-z (right-hand rule: CCW
@@ -553,8 +593,45 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     # Pregrasp joint positions (hand-specific — set by subclass)
     # ------------------------------------------------------------------
     pregrasp_positions: dict[str, tuple[float, ...]] = MISSING
-    """Independent finger joint positions at episode reset, keyed by finger,
-    in the same semantic order as the hand's ``FINGER_JOINT_NAMES`` tuples."""
+    """Independent finger target/home positions at episode reset, keyed by finger,
+    in the same semantic order as the hand-specific ``FINGER_JOINT_NAMES`` tuples."""
+
+    reset_joint_positions: dict[str, tuple[float, ...]] | None = None
+    """Optional collision-safe joint state written before contact settling.
+
+    When ``None`` (the default for every existing task), the state and target are
+    both ``pregrasp_positions`` exactly as before. A task may provide a distinct
+    shallow-contact state while retaining ``pregrasp_positions`` as the compliant
+    contact target applied during ``reset_contact_steps``.
+    """
+
+    reset_target_ramp: bool = False
+    """Linearly interpolate reset-state PD targets to ``pregrasp_positions`` over
+    ``reset_contact_steps``. Default ``False`` preserves every existing task.
+    Intended only for a task whose collision-safe state and compliant target differ.
+    """
+
+    reset_pin_screwdriver_upright: bool = False
+    """Keep screwdriver joints at their reset values while fingers close.
+
+    This models a reset-only fixture: it is released before the first policy step.
+    Default ``False`` preserves all existing task dynamics.
+    """
+
+    reset_zero_tension_targets: bool = False
+    """Snap accumulated finger targets onto the settled measured joint positions
+    at the end of contact settling.
+
+    Without this, the compliant pregrasp target keeps pressing past the settled
+    contact for the whole episode.  That standing target penetration continuously
+    feeds energy into the contact solver (a documented PhysX artifact that can
+    slowly creep-rotate the mounted handle under motionless fingers) and it puts
+    the validated hold permanently beyond ``pen_deadband``, so merely keeping the
+    grasp is taxed by the squeeze-intent proxy.  With the snap, episode step 0
+    starts at zero target tension: holding is free, and any squeeze is a policy
+    decision.  Requires ``reset_contact_steps > 0``; default ``False`` preserves
+    every existing task.
+    """
 
     pregrasp_positions_buckets: list | None = None
     """Optional per-``(diameter,length)``-bucket pregrasp postures, one dict per
@@ -571,6 +648,23 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     *length* (the cap rises with a longer handle, so the hand rises with it).  Built
     by the hand cfg's ``__post_init__`` alongside ``pregrasp_positions_buckets``."""
 
+    pregrasp_root_quats_buckets: list | None = None
+    """Optional per-bucket hand-root quaternion ``(w, x, y, z)``. When present
+    under geometry DR, reset gathers the quaternion for each environment bucket.
+    This keeps palm-down orientation exact while allowing diameter-specific yaw.
+    Existing tasks leave this as ``None`` and retain their default root rotation.
+    """
+
+    reset_screwdriver_tilt_xy: tuple[float, float] = (0.0, 0.0)
+    """Screwdriver X/Y universal-joint angles written at reset. Zero preserves
+    every existing task; the top-down task may seed a validated equilibrium tilt.
+    """
+
+    reset_screwdriver_tilt_xy_buckets: list | None = None
+    """Optional per-geometry-bucket reset X/Y tilt tuples. When present under
+    geometry DR, each environment gathers the row matching its diameter bucket.
+    """
+
     # ------------------------------------------------------------------
     # Domain randomisation
     # ------------------------------------------------------------------
@@ -583,6 +677,16 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
     """Directory holding the generated variant URDFs + ``manifest.json`` (see
     ``tools/generate_screwdriver_variants.py``).  Only consulted when
     ``domain_rand.randomize_geometry`` is True."""
+
+    geometry_variant_assignment: str = "signature"
+    """How spawned geometry is mapped back to environment rows.
+
+    ``"signature"`` preserves the original random-spawn path and identifies
+    each variant from its unique default ``(mass, izz)`` values. ``"cyclic"``
+    uses Isaac Lab's deterministic ``env_id % num_variants`` assignment.  The
+    latter is intended for fixed-inertia variant banks where physical properties
+    deliberately cannot serve as an identity tag.
+    """
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -612,9 +716,19 @@ class ScrewdriverRotationEnvCfg(DirectRLEnvCfg):
             urdf.asset_path = str(sd_asset_root / v["file"])
             assets_cfg.append(urdf)
 
+        assignment = str(self.geometry_variant_assignment)
+        if assignment not in {"signature", "cyclic"}:
+            raise ValueError(
+                "geometry_variant_assignment must be 'signature' or 'cyclic', "
+                f"got {assignment!r}"
+            )
+
         self.screwdriver_cfg.spawn = sim_utils.MultiAssetSpawnerCfg(
             assets_cfg=assets_cfg,
-            random_choice=True,
+            # Isaac Lab assigns assets in list order with env_id modulo the list
+            # length when random_choice=False.  That gives a balanced, exactly
+            # recoverable geometry distribution without changing inertials.
+            random_choice=assignment == "signature",
             activate_contact_sensors=getattr(
                 base_spawn, "activate_contact_sensors", False
             ),

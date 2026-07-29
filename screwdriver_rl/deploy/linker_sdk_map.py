@@ -264,10 +264,10 @@ def active_joints() -> tuple[JointSpec, ...]:
 # differ under geometry-bucket randomization); this is the bundle-less fallback
 # used by hand_check.
 PREGRASP_16: list[float] = [
-    0.070000, 0.140535, 1.379901,    # index  (mcp_roll, mcp_pitch, pip)
-    -0.070000, 0.184823, 1.354472,   # middle
-    -0.070000, 0.449762, 1.207458,   # ring
-    0.045669, 0.654302, 1.027913,    # pinky
+    0.070000, 0.140535, 0.970000,    # index  (mcp_roll, mcp_pitch, pip)
+    -0.070000, 0.184823, 0.930000,   # middle
+    -0.070000, 0.449762, 0.930000,   # ring
+    0.045669, 0.654302, 0.930000,    # pinky
     0.673745, 1.120000, 0.100000, 0.876434,  # thumb (cmc_yaw, cmc_roll, cmc_pitch, mcp)
 ]
 

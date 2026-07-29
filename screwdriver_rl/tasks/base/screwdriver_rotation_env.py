@@ -39,8 +39,10 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
+from isaaclab.utils.math import quat_from_euler_xyz
 
 from screwdriver_rl.core import rewards
+from screwdriver_rl.deploy.codecs import ProprioCodec, mounted_linker_g20_codec_spec
 from .screwdriver_rotation_env_cfg import CurriculumPhaseCfg, ScrewdriverRotationEnvCfg
 
 
@@ -160,11 +162,22 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         # table this is ``(num_buckets, n_joints)`` and reset gathers each env's
         # row by bucket; otherwise it is the single shared ``(n_joints,)`` vector.
         self._pregrasp_pos: dict[str, torch.Tensor] = self._make_pregrasp_table()
+        # Optional collision-safe state distinct from the contact/home target.
+        # None preserves the legacy reset path exactly for every existing task.
+        self._reset_joint_pos: dict[str, torch.Tensor] | None = (
+            self._make_reset_joint_table()
+        )
 
         # Per-bucket hand-root offset (world xyz) for handle-length compensation.
         # ``(num_buckets, 3)`` under geometry DR with a cfg table, else ``None``.
         self._pregrasp_root_offset: torch.Tensor | None = (
             self._make_pregrasp_root_offset_table()
+        )
+        self._pregrasp_root_quat: torch.Tensor | None = (
+            self._make_pregrasp_root_quat_table()
+        )
+        self._reset_screwdriver_tilt_xy: torch.Tensor = (
+            self._make_reset_screwdriver_tilt_xy_table()
         )
 
         # ---- Continuous-turn tracking ----
@@ -215,12 +228,33 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             cfg.screwdriver_cfg.actuators["tilt"].damping
         )
 
+        # Per-episode, phase-scaled placement/calibration errors. These buffers
+        # are sampled once at reset and remain constant until the next reset.
+        self._env_reset_root_pos_noise = torch.zeros(
+            (self.num_envs, 3), dtype=torch.float32, device=self.device
+        )
+        self._env_reset_root_rpy_noise = torch.zeros(
+            (self.num_envs, 3), dtype=torch.float32, device=self.device
+        )
+        self._env_reset_screwdriver_tilt_noise = torch.zeros(
+            (self.num_envs, 2), dtype=torch.float32, device=self.device
+        )
+        self._env_joint_position_bias = torch.zeros(
+            (self.num_envs, self.num_finger_dofs),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
         # ---- RMA / asymmetric observations ----
         self._prop_hist_buf = torch.zeros(
             (self.num_envs, cfg.prop_hist_len, cfg.history_obs_dim),
             dtype=torch.float32,
             device=self.device,
         )
+
+        self._proprio_codec = ProprioCodec(mounted_linker_g20_codec_spec(cfg.prop_hist_len))
+        if round(self._policy_dt * 1_000_000_000) != self._proprio_codec.spec.control_period_ns:
+            raise ValueError("mounted policy rate does not match its ProprioCodec")
 
         # Stagger episode starts to avoid synchronised reset artifacts.
         self.episode_length_buf = torch.randint(
@@ -239,7 +273,11 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         self._log_stage: int = 1
         self._stage2_loss: float = float("nan")
         from screwdriver_rl.utils.logging import RotationTrainingLogger
-        self._logger = RotationTrainingLogger(log_interval_steps=2000)
+        # The logger counts aggregate environment samples. Scale by num_envs so
+        # large vectorized jobs do not print once per policy step.
+        self._logger = RotationTrainingLogger(
+            log_interval_steps=max(2000, 1200 * self.num_envs)
+        )
 
     # -----------------------------------------------------------------------
     # Scene
@@ -437,8 +475,18 @@ class ScrewdriverRotationEnv(DirectRLEnv):
     # Observations
     # -----------------------------------------------------------------------
 
+    def _observed_finger_q(
+        self, finger_q: torch.Tensor, env_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Apply the episode-constant encoder zero bias to policy proprioception."""
+        bias = getattr(self, "_env_joint_position_bias", None)
+        if bias is None:
+            return finger_q
+        return finger_q + (bias if env_ids is None else bias[env_ids])
+
     def _get_observations(self) -> dict[str, torch.Tensor]:
         finger_q = self.allegro.data.joint_pos[:, self._finger_joint_ids]
+        observed_finger_q = self._observed_finger_q(finger_q)
         dr = self.cfg.domain_rand
 
         if getattr(self.cfg, "latent_conditioned", False):
@@ -448,7 +496,7 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             # Observation noise is applied only to the proprioceptive block (the
             # real sensors); the privileged tail is fed clean so it stays the
             # exact quantity the critic sees and the Stage-2 adapter regresses.
-            proprio = torch.cat([finger_q, self._cur_targets], dim=-1)
+            proprio = self._proprio_codec.encode_frame(observed_finger_q, self._cur_targets)
             if dr.enabled and dr.obs_noise_std > 0.0:
                 proprio = proprio + torch.randn_like(proprio) * dr.obs_noise_std
             priv = self._compute_privileged_obs()
@@ -460,7 +508,7 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
         # Legacy mode: the 3-D screwdriver euler is part of the actor obs.
         euler = self.screwdriver.data.joint_pos[:, self._screwdriver_euler_ids]
-        obs = torch.cat([finger_q, self._cur_targets, euler], dim=-1)
+        obs = torch.cat([observed_finger_q, self._cur_targets, euler], dim=-1)
         if dr.enabled and dr.obs_noise_std > 0.0:
             obs = obs + torch.randn_like(obs) * dr.obs_noise_std
         result = {"policy": obs}
@@ -617,6 +665,74 @@ class ScrewdriverRotationEnv(DirectRLEnv):
     # Reset
     # -----------------------------------------------------------------------
 
+    def _sample_reset_calibration_noise(self, env_ids: torch.Tensor) -> None:
+        """Sample phase-scaled placement and encoder errors once per episode."""
+        dr = self.cfg.domain_rand
+        limits = (
+            dr.reset_root_pos_noise_m,
+            dr.reset_root_z_noise_m,
+            dr.reset_root_tilt_noise_rad,
+            dr.reset_root_yaw_noise_rad,
+            dr.reset_screwdriver_tilt_noise_rad,
+            dr.joint_zero_bias_rad,
+        )
+        if any(float(value) < 0.0 for value in limits):
+            raise ValueError("reset/calibration randomisation limits must be non-negative")
+
+        self._env_reset_root_pos_noise[env_ids] = 0.0
+        self._env_reset_root_rpy_noise[env_ids] = 0.0
+        self._env_reset_screwdriver_tilt_noise[env_ids] = 0.0
+        self._env_joint_position_bias[env_ids] = 0.0
+        if not dr.enabled:
+            return
+
+        scale = float(
+            getattr(
+                self._curriculum_phase,
+                "dynamics_randomization_scale",
+                1.0,
+            )
+        )
+        if not 0.0 <= scale <= 1.0:
+            raise ValueError("dynamics_randomization_scale must be in [0, 1]")
+        n = int(env_ids.numel())
+
+        pos_limits = scale * torch.tensor(
+            [
+                dr.reset_root_pos_noise_m,
+                dr.reset_root_pos_noise_m,
+                dr.reset_root_z_noise_m,
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        rpy_limits = scale * torch.tensor(
+            [
+                dr.reset_root_tilt_noise_rad,
+                dr.reset_root_tilt_noise_rad,
+                dr.reset_root_yaw_noise_rad,
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._env_reset_root_pos_noise[env_ids] = (
+            torch.empty((n, 3), device=self.device).uniform_(-1.0, 1.0)
+            * pos_limits
+        )
+        self._env_reset_root_rpy_noise[env_ids] = (
+            torch.empty((n, 3), device=self.device).uniform_(-1.0, 1.0)
+            * rpy_limits
+        )
+        self._env_reset_screwdriver_tilt_noise[env_ids] = (
+            torch.empty((n, 2), device=self.device).uniform_(-1.0, 1.0)
+            * (scale * float(dr.reset_screwdriver_tilt_noise_rad))
+        )
+        self._env_joint_position_bias[env_ids] = (
+            torch.empty((n, self.num_finger_dofs), device=self.device)
+            .uniform_(-1.0, 1.0)
+            * (scale * float(dr.joint_zero_bias_rad))
+        )
+
     def _reset_idx(self, env_ids: Sequence[int] | torch.Tensor | None) -> None:
         if env_ids is None:
             env_ids = self.allegro._ALL_INDICES
@@ -626,6 +742,8 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             env_ids = env_ids.to(dtype=torch.long, device=self.device)
 
         super()._reset_idx(env_ids)
+        if hasattr(self, "_env_reset_root_pos_noise"):
+            self._sample_reset_calibration_noise(env_ids)
 
         # ---- Hand ----
         root = self.allegro.data.default_root_state[env_ids].clone()
@@ -634,7 +752,25 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         # grasp tracks each env's handle length; the cap rises with a longer handle.
         if self._pregrasp_root_offset is not None:
             root[:, :3] += self._pregrasp_root_offset[self._env_bucket_idx[env_ids]]
-        self.allegro.write_root_pose_to_sim(root[:, :7], env_ids=env_ids)
+        if self._pregrasp_root_quat is not None:
+            root[:, 3:7] = self._pregrasp_root_quat[self._env_bucket_idx[env_ids]]
+        nominal_root_pose = root[:, :7].clone()
+        if hasattr(self, "_env_reset_root_pos_noise"):
+            root[:, :3] += self._env_reset_root_pos_noise[env_ids]
+            rpy = self._env_reset_root_rpy_noise[env_ids]
+            delta_quat = quat_from_euler_xyz(
+                rpy[:, 0],
+                rpy[:, 1],
+                rpy[:, 2],
+            )
+            # World-frame calibration perturbation around the resolved nominal
+            # or per-geometry root orientation.
+            root[:, 3:7] = rewards.quat_mul(delta_quat, root[:, 3:7])
+        ramp_root_pose = bool(
+            self.cfg.reset_root_pose_ramp and self.cfg.reset_contact_steps > 0
+        )
+        initial_root_pose = nominal_root_pose if ramp_root_pose else root[:, :7]
+        self.allegro.write_root_pose_to_sim(initial_root_pose, env_ids=env_ids)
         self.allegro.write_root_velocity_to_sim(root[:, 7:], env_ids=env_ids)
 
         jpos = self.allegro.data.default_joint_pos[env_ids].clone()
@@ -646,14 +782,36 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         bucket_of = (
             self._env_bucket_idx[env_ids] if self._env_bucket_idx is not None else None
         )
+        target_jpos = jpos.clone()
         for finger, jids in self._finger_joint_ids_by_name.items():
-            posture = self._pregrasp_pos[finger]
-            jpos[:, jids] = posture[bucket_of] if bucket_of is not None else posture
-        # Set mimic/coupled followers consistently with their masters.
+            target_posture = self._pregrasp_pos[finger]
+            target_jpos[:, jids] = (
+                target_posture[bucket_of] if bucket_of is not None else target_posture
+            )
+            if self._reset_joint_pos is None:
+                jpos[:, jids] = target_jpos[:, jids]
+            else:
+                reset_posture = self._reset_joint_pos[finger]
+                jpos[:, jids] = (
+                    reset_posture[bucket_of]
+                    if bucket_of is not None and reset_posture.ndim == 2
+                    else reset_posture
+                )
+        # Set mimic/coupled followers consistently in both state and target.
         if self._coupled_mult is not None:
-            masters = jpos[:, self._coupled_master_joint_ids]
-            jpos[:, self._coupled_follower_ids] = masters * self._coupled_mult + self._coupled_offset
-        self.allegro.set_joint_position_target(jpos, env_ids=env_ids)
+            target_masters = target_jpos[:, self._coupled_master_joint_ids]
+            target_jpos[:, self._coupled_follower_ids] = (
+                target_masters * self._coupled_mult + self._coupled_offset
+            )
+            reset_masters = jpos[:, self._coupled_master_joint_ids]
+            jpos[:, self._coupled_follower_ids] = (
+                reset_masters * self._coupled_mult + self._coupled_offset
+            )
+        ramp_reset_target = bool(
+            self.cfg.reset_target_ramp and self.cfg.reset_contact_steps > 0
+        )
+        initial_target_jpos = jpos if ramp_reset_target else target_jpos
+        self.allegro.set_joint_position_target(initial_target_jpos, env_ids=env_ids)
         self.allegro.write_joint_state_to_sim(jpos, jvel, env_ids=env_ids)
 
         # ---- Screwdriver ----
@@ -663,6 +821,16 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         self.screwdriver.write_root_velocity_to_sim(sd_root[:, 7:], env_ids=env_ids)
 
         sd_jpos = torch.zeros_like(self.screwdriver.data.default_joint_pos[env_ids])
+        reset_tilt_xy = self._reset_screwdriver_tilt_xy
+        sd_jpos[:, self._screwdriver_euler_ids[:2]] = (
+            reset_tilt_xy[bucket_of]
+            if bucket_of is not None and reset_tilt_xy.ndim == 2
+            else reset_tilt_xy
+        )
+        if hasattr(self, "_env_reset_screwdriver_tilt_noise"):
+            sd_jpos[:, self._screwdriver_euler_ids[:2]] += (
+                self._env_reset_screwdriver_tilt_noise[env_ids]
+            )
         if self.cfg.randomize_obj_start:
             sd_jpos[:, self._screwdriver_z_id] = (
                 2.0 * math.pi * (torch.rand(len(env_ids), device=self.device) - 0.5)
@@ -672,7 +840,8 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
         # ---- Reset tracking buffers ----
         finger_q = jpos[:, self._finger_joint_ids]
-        self._cur_targets[env_ids] = finger_q
+        finger_target_q = target_jpos[:, self._finger_joint_ids]
+        self._cur_targets[env_ids] = finger_target_q
         self._prev_actions[env_ids] = 0.0
         self._total_turn[env_ids] = 0.0
         self._net_turn[env_ids] = 0.0
@@ -690,20 +859,141 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
         # ---- RMA history ----
         if self.cfg.asymmetric_obs:
-            frame = torch.cat([finger_q, self._cur_targets[env_ids]], dim=-1)
+            observed_finger_q = self._observed_finger_q(finger_q, env_ids)
+            frame = self._proprio_codec.encode_frame(
+                observed_finger_q, self._cur_targets[env_ids]
+            )
             self._prop_hist_buf[env_ids] = frame.unsqueeze(1).expand(
                 -1, self.cfg.prop_hist_len, -1
             )
 
         # Settle physics contacts.
         if self.cfg.reset_contact_steps > 0:
+            # PhysX advances the entire scene even when only a subset is being
+            # reset.  Snapshot the complement and write it back on every hidden
+            # settle step so an asynchronous reset (or contact-guard retry)
+            # cannot advance unrelated episodes or previously accepted rows.
+            stable_mask = torch.ones(
+                self.num_envs, dtype=torch.bool, device=self.device
+            )
+            stable_mask[env_ids] = False
+            stable_ids = self.allegro._ALL_INDICES[stable_mask]
+            if stable_ids.numel() > 0:
+                stable_hand_jpos = self.allegro.data.joint_pos[stable_ids].clone()
+                stable_hand_jvel = self.allegro.data.joint_vel[stable_ids].clone()
+                stable_sd_jpos = self.screwdriver.data.joint_pos[stable_ids].clone()
+                stable_sd_jvel = self.screwdriver.data.joint_vel[stable_ids].clone()
             self.scene.write_data_to_sim()
             self.sim.forward()
             self.scene.update(dt=self.physics_dt)
-            for _ in range(self.cfg.reset_contact_steps):
+            pin_screwdriver = bool(self.cfg.reset_pin_screwdriver_upright)
+            for step in range(self.cfg.reset_contact_steps):
+                if ramp_root_pose:
+                    alpha = float(step + 1) / float(self.cfg.reset_contact_steps)
+                    ramp_root = root[:, :7].clone()
+                    ramp_root[:, :3] = torch.lerp(
+                        nominal_root_pose[:, :3], root[:, :3], alpha
+                    )
+                    q0 = nominal_root_pose[:, 3:7]
+                    q1 = root[:, 3:7]
+                    # Quaternions q and -q encode the same orientation.  Pick
+                    # the short arc, then use normalized linear interpolation;
+                    # reset perturbations are deliberately small (< 6 deg).
+                    q1 = torch.where(
+                        (torch.sum(q0 * q1, dim=-1, keepdim=True) < 0.0),
+                        -q1,
+                        q1,
+                    )
+                    q = torch.lerp(q0, q1, alpha)
+                    ramp_root[:, 3:7] = q / torch.linalg.norm(
+                        q, dim=-1, keepdim=True
+                    ).clamp_min(1.0e-8)
+                    self.allegro.write_root_pose_to_sim(
+                        ramp_root, env_ids=env_ids
+                    )
+                if ramp_reset_target:
+                    alpha = float(step + 1) / float(self.cfg.reset_contact_steps)
+                    ramp_target = torch.lerp(jpos, target_jpos, alpha)
+                    self.allegro.set_joint_position_target(ramp_target, env_ids=env_ids)
+                if pin_screwdriver:
+                    self.screwdriver.write_joint_state_to_sim(
+                        sd_jpos, sd_jvel, env_ids=env_ids
+                    )
+                if stable_ids.numel() > 0:
+                    self.allegro.write_joint_state_to_sim(
+                        stable_hand_jpos, stable_hand_jvel, env_ids=stable_ids
+                    )
+                    self.screwdriver.write_joint_state_to_sim(
+                        stable_sd_jpos, stable_sd_jvel, env_ids=stable_ids
+                    )
                 self.scene.write_data_to_sim()
                 self.sim.step(render=False)
                 self.scene.update(dt=self.physics_dt)
+            if stable_ids.numel() > 0:
+                # The last simulated step can integrate away from the written
+                # snapshot; restore it once more before exposing observations.
+                self.allegro.write_joint_state_to_sim(
+                    stable_hand_jpos, stable_hand_jvel, env_ids=stable_ids
+                )
+                self.screwdriver.write_joint_state_to_sim(
+                    stable_sd_jpos, stable_sd_jvel, env_ids=stable_ids
+                )
+            if pin_screwdriver:
+                # Release the reset fixture from a static state. The target and
+                # measured joint positions are preserved; only ramp-induced hand
+                # velocity is cleared before the first policy step.
+                hand_jpos = self.allegro.data.joint_pos[env_ids].clone()
+                hand_jvel = torch.zeros_like(
+                    self.allegro.data.default_joint_vel[env_ids]
+                )
+                self.allegro.write_joint_state_to_sim(
+                    hand_jpos, hand_jvel, env_ids=env_ids
+                )
+                self.screwdriver.write_joint_state_to_sim(
+                    sd_jpos, sd_jvel, env_ids=env_ids
+                )
+                self.scene.write_data_to_sim()
+                self.sim.forward()
+                self.scene.update(dt=self.physics_dt)
+            elif stable_ids.numel() > 0:
+                self.scene.write_data_to_sim()
+                self.sim.forward()
+                self.scene.update(dt=self.physics_dt)
+
+            if self.cfg.reset_zero_tension_targets:
+                self._snap_targets_to_settled_state(env_ids)
+
+    def _snap_targets_to_settled_state(self, env_ids: torch.Tensor) -> None:
+        """Zero-tension start: align finger targets with the settled joint state.
+
+        See ``reset_zero_tension_targets``.  Rewrites ``_cur_targets``, the sim
+        position targets (with coupled followers kept consistent), and the RMA
+        history frame so the policy's first observation matches what it can
+        actually measure: targets equal to positions, no standing penetration.
+        """
+        settled_jpos = self.allegro.data.joint_pos[env_ids]
+        settled_finger_q = settled_jpos[:, self._finger_joint_ids]
+        self._cur_targets[env_ids] = torch.clamp(
+            settled_finger_q,
+            self._finger_lower[env_ids],
+            self._finger_upper[env_ids],
+        )
+        target_full = self.allegro.data.joint_pos_target[env_ids].clone()
+        target_full[:, self._finger_joint_ids] = self._cur_targets[env_ids]
+        if self._coupled_mult is not None:
+            masters = target_full[:, self._coupled_master_joint_ids]
+            target_full[:, self._coupled_follower_ids] = (
+                masters * self._coupled_mult + self._coupled_offset
+            )
+        self.allegro.set_joint_position_target(target_full, env_ids=env_ids)
+        if self.cfg.asymmetric_obs:
+            observed_finger_q = self._observed_finger_q(settled_finger_q, env_ids)
+            frame = self._proprio_codec.encode_frame(
+                observed_finger_q, self._cur_targets[env_ids]
+            )
+            self._prop_hist_buf[env_ids] = frame.unsqueeze(1).expand(
+                -1, self.cfg.prop_hist_len, -1
+            )
 
     # -----------------------------------------------------------------------
     # Domain randomisation
@@ -724,71 +1014,116 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         """
         n = len(env_ids)
         dr = self.cfg.domain_rand
-
-        # 1. Rotation damping (written to screwdriver z-joint for this env batch)
-        rot_scale = torch.empty(n, device=self.device).uniform_(*dr.rotation_damping_range)
-        new_rot_damp = self._base_rotation_damping * rot_scale           # (n,)
-        self._env_rotation_damping[env_ids] = new_rot_damp
-        self.screwdriver.write_joint_damping_to_sim(
-            new_rot_damp.unsqueeze(-1),                                  # (n, 1)
-            joint_ids=[self._screwdriver_z_id],
-            env_ids=env_ids,
+        scale = float(
+            getattr(self._curriculum_phase, "dynamics_randomization_scale", 1.0)
         )
+        if not 0.0 <= scale <= 1.0:
+            raise ValueError("dynamics_randomization_scale must be in [0, 1]")
+
+        def scaled_range(
+            bounds: tuple[float, float], center: float = 1.0
+        ) -> tuple[float, float]:
+            return (
+                center + scale * (float(bounds[0]) - center),
+                center + scale * (float(bounds[1]) - center),
+            )
+
+        def varies(bounds: tuple[float, float], center: float = 1.0) -> bool:
+            lower, upper = scaled_range(bounds, center)
+            return (
+                abs(lower - center) > 1.0e-8
+                or abs(upper - center) > 1.0e-8
+            )
+
+        env_ids_cpu = env_ids.detach().to("cpu")
+
+        # 1. Rotation damping (written to screwdriver z-joint for this env batch).
+        # Do not rewrite nominal properties: on non-replicated multi-assets even
+        # a value-preserving PhysX setter can perturb contact solver state.
+        if varies(dr.rotation_damping_range):
+            rot_scale = torch.empty(n, device=self.device).uniform_(
+                *scaled_range(dr.rotation_damping_range)
+            )
+            new_rot_damp = self._base_rotation_damping * rot_scale
+            self._env_rotation_damping[env_ids] = new_rot_damp
+            self.screwdriver.write_joint_damping_to_sim(
+                new_rot_damp.unsqueeze(-1),
+                joint_ids=[self._screwdriver_z_id],
+                env_ids=env_ids,
+            )
+        else:
+            self._env_rotation_damping[env_ids] = self._base_rotation_damping
 
         # 2. Screwdriver body mass.  This Isaac Lab release exposes no
-        #    write_body_mass_to_sim helper, so we go through the PhysX view
-        #    directly (the same idiom isaaclab.envs.mdp.events uses).  The
-        #    masses buffer lives on CPU and the setter only touches the rows
-        #    for the supplied env indices.  We randomise on the *default* mass
-        #    so repeated resets don't compound the scaling.
-        base_body_id = self._handle_body_ids[self._handle_base_idx]
-        env_ids_cpu = env_ids.detach().to("cpu")
-        mass_scale = torch.empty(len(env_ids_cpu)).uniform_(*dr.screwdriver_mass_range)
-        masses = self.screwdriver.root_physx_view.get_masses()           # (num_envs, num_bodies) on CPU
-        default_base_mass = self.screwdriver.data.default_mass[env_ids_cpu, base_body_id].to("cpu")
-        masses[env_ids_cpu, base_body_id] = default_base_mass * mass_scale
-        self.screwdriver.root_physx_view.set_masses(masses, env_ids_cpu)
+        # write_body_mass_to_sim helper, so use the PhysX view only when the
+        # configured effective range actually varies.
+        if varies(dr.screwdriver_mass_range):
+            base_body_id = self._handle_body_ids[self._handle_base_idx]
+            mass_scale = torch.empty(len(env_ids_cpu)).uniform_(
+                *scaled_range(dr.screwdriver_mass_range)
+            )
+            masses = self.screwdriver.root_physx_view.get_masses()
+            default_base_mass = self.screwdriver.data.default_mass[
+                env_ids_cpu, base_body_id
+            ].to("cpu")
+            masses[env_ids_cpu, base_body_id] = default_base_mass * mass_scale
+            self.screwdriver.root_physx_view.set_masses(masses, env_ids_cpu)
 
-        # 3 & 4. Finger PD gains (one scale per env, broadcast across joints)
+        # 3 & 4. Finger PD gains (one scale per env, broadcast across joints).
         n_fj = len(self._finger_joint_ids)
-        stiff_scale = torch.empty(n, 1, device=self.device).uniform_(*dr.finger_stiffness_range)
-        damp_scale = torch.empty(n, 1, device=self.device).uniform_(*dr.finger_damping_range)
-        self.allegro.write_joint_stiffness_to_sim(
-            (self._base_finger_stiffness * stiff_scale).expand(-1, n_fj),
-            joint_ids=self._finger_joint_ids,
-            env_ids=env_ids,
-        )
-        self.allegro.write_joint_damping_to_sim(
-            (self._base_finger_damping * damp_scale).expand(-1, n_fj),
-            joint_ids=self._finger_joint_ids,
-            env_ids=env_ids,
-        )
+        if varies(dr.finger_stiffness_range):
+            stiff_scale = torch.empty(n, 1, device=self.device).uniform_(
+                *scaled_range(dr.finger_stiffness_range)
+            )
+            self.allegro.write_joint_stiffness_to_sim(
+                (self._base_finger_stiffness * stiff_scale).expand(-1, n_fj),
+                joint_ids=self._finger_joint_ids,
+                env_ids=env_ids,
+            )
+        if varies(dr.finger_damping_range):
+            damp_scale = torch.empty(n, 1, device=self.device).uniform_(
+                *scaled_range(dr.finger_damping_range)
+            )
+            self.allegro.write_joint_damping_to_sim(
+                (self._base_finger_damping * damp_scale).expand(-1, n_fj),
+                joint_ids=self._finger_joint_ids,
+                env_ids=env_ids,
+            )
 
-        # 5. Screwdriver rotational load (Coulomb) — the dominant friction proxy
-        #    once a load is present.  Randomised around the base value so the
-        #    adaptation network sees a range of screw resistances.
+        # 5. Screwdriver rotational load (Coulomb) is a tensor-side parameter,
+        # not a PhysX property write, so setting nominal explicitly is safe.
         if self._base_load_torque > 0.0:
-            load_scale = torch.empty(n, device=self.device).uniform_(*dr.screwdriver_load_torque_range)
-            self._env_load_torque[env_ids] = self._base_load_torque * load_scale
+            if varies(dr.screwdriver_load_torque_range):
+                load_scale = torch.empty(n, device=self.device).uniform_(
+                    *scaled_range(dr.screwdriver_load_torque_range)
+                )
+                self._env_load_torque[env_ids] = (
+                    self._base_load_torque * load_scale
+                )
+            else:
+                self._env_load_torque[env_ids] = self._base_load_torque
 
-        # 6. Contact friction (real) — absolute static==dynamic on BOTH the
-        #    screwdriver and the hand shapes (HORA sets the same friction on the
-        #    object and the hand).  Material buffers live on CPU and only the
-        #    selected env rows are touched.  Stored for the privileged obs.
+        # 6. Contact friction (real) on both object and hand materials.
         if dr.randomize_contact_friction:
-            fr = torch.empty(len(env_ids_cpu)).uniform_(*dr.contact_friction_range)  # (n,) CPU
-            self._env_friction[env_ids] = fr.to(self.device)
-            for art in (self.screwdriver, self.allegro):
-                mats = art.root_physx_view.get_material_properties()  # (num_envs, num_shapes, 3) CPU
-                mats[env_ids_cpu, :, 0] = fr[:, None]  # static friction
-                mats[env_ids_cpu, :, 1] = fr[:, None]  # dynamic friction
-                art.root_physx_view.set_material_properties(mats, env_ids_cpu)
+            if varies(dr.contact_friction_range, self._base_friction):
+                fr = torch.empty(len(env_ids_cpu)).uniform_(
+                    *scaled_range(dr.contact_friction_range, self._base_friction)
+                )
+                self._env_friction[env_ids] = fr.to(self.device)
+                for art in (self.screwdriver, self.allegro):
+                    mats = art.root_physx_view.get_material_properties()
+                    mats[env_ids_cpu, :, 0] = fr[:, None]
+                    mats[env_ids_cpu, :, 1] = fr[:, None]
+                    art.root_physx_view.set_material_properties(mats, env_ids_cpu)
+            else:
+                self._env_friction[env_ids] = self._base_friction
 
-        # 7. Tilt-joint bearing damping — scale the two universal-joint tilt
-        #    joints (the first two of the euler triple), same idiom as (1).
-        if dr.randomize_tilt_damping:
+        # 7. Tilt-joint bearing damping.
+        if dr.randomize_tilt_damping and varies(dr.tilt_damping_range):
             tilt_ids = self._screwdriver_euler_ids[:2]
-            tilt_scale = torch.empty(n, 1, device=self.device).uniform_(*dr.tilt_damping_range)
+            tilt_scale = torch.empty(n, 1, device=self.device).uniform_(
+                *scaled_range(dr.tilt_damping_range)
+            )
             self.screwdriver.write_joint_damping_to_sim(
                 (self._base_tilt_damping * tilt_scale).expand(-1, len(tilt_ids)),
                 joint_ids=tilt_ids,
@@ -908,10 +1243,14 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         axis_dist = self._compute_fingertip_axis_distances()  # (N, n_fingers)
         if axis_dist.shape[1] == 0:
             return axis_dist
+        # Keep the canonical task at BASE_RADIUS while allowing a fixed-geometry
+        # subclass to declare its own base radius. Geometry-DR scales remain
+        # relative to whichever base is active.
+        base_radius = float(getattr(self.cfg, "screwdriver_handle_radius", BASE_RADIUS))
         if self._env_geom_scale is not None:
-            radius = (self._env_geom_scale[:, 0] * BASE_RADIUS).unsqueeze(-1)  # (N, 1)
+            radius = (self._env_geom_scale[:, 0] * base_radius).unsqueeze(-1)  # (N, 1)
         else:
-            radius = BASE_RADIUS
+            radius = base_radius
         return axis_dist - radius - pad_offset
 
     def _compute_near_reward(self, tip_dist: torch.Tensor, weight: float) -> torch.Tensor:
@@ -998,7 +1337,8 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
     def _update_prop_hist(self) -> None:
         finger_q = self.allegro.data.joint_pos[:, self._finger_joint_ids]
-        frame = torch.cat([finger_q, self._cur_targets], dim=-1)
+        observed_finger_q = self._observed_finger_q(finger_q)
+        frame = self._proprio_codec.encode_frame(observed_finger_q, self._cur_targets)
         # Truncate/pad to history_obs_dim.
         dim = self.cfg.history_obs_dim
         if frame.shape[1] > dim:
@@ -1168,11 +1508,28 @@ class ScrewdriverRotationEnv(DirectRLEnv):
 
         manifest_path = Path(self.cfg.screwdriver_variants_dir) / "manifest.json"
         table = load_variant_table(manifest_path)
-        body_id = self._handle_body_ids[self._handle_base_idx]  # screwdriver_body
-        masses = self.screwdriver.data.default_mass[:, body_id].to(self.device)
-        # default_inertia rows are flattened 3x3; element 8 is izz (zz).
-        izz = self.screwdriver.data.default_inertia[:, body_id, 8].to(self.device)
-        vidx, bidx, gscale = identify_variants(masses, izz, table)
+        assignment = str(getattr(self.cfg, "geometry_variant_assignment", "signature"))
+        if assignment == "cyclic":
+            # MultiAssetSpawnerCfg(random_choice=False) uses this exact mapping;
+            # the same contract is already used by the Linker in-hand task.
+            vidx = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+            vidx = vidx % table.num_variants
+            bidx = table.bucket.to(self.device)[vidx]
+            gscale = torch.stack(
+                (
+                    table.diameter_scale.to(self.device)[vidx],
+                    table.length_scale.to(self.device)[vidx],
+                ),
+                dim=-1,
+            )
+        elif assignment == "signature":
+            body_id = self._handle_body_ids[self._handle_base_idx]  # screwdriver_body
+            masses = self.screwdriver.data.default_mass[:, body_id].to(self.device)
+            # default_inertia rows are flattened 3x3; element 8 is izz (zz).
+            izz = self.screwdriver.data.default_inertia[:, body_id, 8].to(self.device)
+            vidx, bidx, gscale = identify_variants(masses, izz, table)
+        else:
+            raise ValueError(f"unsupported geometry_variant_assignment {assignment!r}")
         self._variant_table = table
         self._env_variant_idx = vidx
         self._env_bucket_idx = bidx
@@ -1203,6 +1560,50 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             for finger in self.FINGER_JOINT_NAMES
         }
 
+    def _make_reset_joint_table(self) -> dict[str, torch.Tensor] | None:
+        """Optional reset-state posture; targets remain ``pregrasp_positions``."""
+
+        positions = getattr(self.cfg, "reset_joint_positions", None)
+        if positions is None:
+            return None
+        if self.cfg.domain_rand.randomize_geometry:
+            buckets = getattr(self.cfg, "reset_joint_positions_buckets", None)
+            if buckets is None:
+                raise ValueError(
+                    "reset_joint_positions with geometry DR requires "
+                    "reset_joint_positions_buckets"
+                )
+            if len(buckets) != self._variant_table.num_buckets:
+                raise ValueError(
+                    "reset_joint_positions_buckets length "
+                    f"{len(buckets)} != manifest num_buckets "
+                    f"{self._variant_table.num_buckets}"
+                )
+            for bucket_index, bucket in enumerate(buckets):
+                missing = set(self.FINGER_JOINT_NAMES).difference(bucket)
+                if missing:
+                    raise ValueError(
+                        "reset_joint_positions_buckets"
+                        f"[{bucket_index}] missing fingers: {sorted(missing)}"
+                    )
+            return {
+                finger: torch.tensor(
+                    [bucket[finger] for bucket in buckets],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                for finger in self.FINGER_JOINT_NAMES
+            }
+        missing = set(self.FINGER_JOINT_NAMES).difference(positions)
+        if missing:
+            raise ValueError(f"reset_joint_positions missing fingers: {sorted(missing)}")
+        return {
+            finger: torch.tensor(
+                positions[finger], dtype=torch.float32, device=self.device
+            )
+            for finger in self.FINGER_JOINT_NAMES
+        }
+
     def _make_pregrasp_root_offset_table(self) -> torch.Tensor | None:
         """Per-bucket hand-root offset (world xyz), ``(num_buckets, 3)`` or ``None``.
 
@@ -1215,3 +1616,49 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         if offsets is None or getattr(self, "_env_bucket_idx", None) is None:
             return None
         return torch.tensor(offsets, dtype=torch.float32, device=self.device)
+
+
+    def _make_reset_screwdriver_tilt_xy_table(self) -> torch.Tensor:
+        """Shared ``(2,)`` or per-bucket ``(num_buckets, 2)`` reset tilt."""
+
+        buckets = getattr(self.cfg, "reset_screwdriver_tilt_xy_buckets", None)
+        if self.cfg.domain_rand.randomize_geometry and buckets is not None:
+            if len(buckets) != self._variant_table.num_buckets:
+                raise ValueError(
+                    "reset_screwdriver_tilt_xy_buckets length "
+                    f"{len(buckets)} != manifest num_buckets "
+                    f"{self._variant_table.num_buckets}"
+                )
+            table = torch.tensor(buckets, dtype=torch.float32, device=self.device)
+            if table.shape != (self._variant_table.num_buckets, 2):
+                raise ValueError(
+                    "reset_screwdriver_tilt_xy_buckets must contain (x, y) tuples"
+                )
+            return table
+        shared = torch.tensor(
+            self.cfg.reset_screwdriver_tilt_xy,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        if shared.shape != (2,):
+            raise ValueError("reset_screwdriver_tilt_xy must be an (x, y) tuple")
+        return shared
+
+
+    def _make_pregrasp_root_quat_table(self) -> torch.Tensor | None:
+        """Per-bucket hand-root quaternion ``(w, x, y, z)`` or ``None``."""
+
+        quats = getattr(self.cfg, "pregrasp_root_quats_buckets", None)
+        if quats is None or getattr(self, "_env_bucket_idx", None) is None:
+            return None
+        if len(quats) != self._variant_table.num_buckets:
+            raise ValueError(
+                "pregrasp_root_quats_buckets length "
+                f"{len(quats)} != manifest num_buckets "
+                f"{self._variant_table.num_buckets}"
+            )
+        table = torch.tensor(quats, dtype=torch.float32, device=self.device)
+        norms = torch.linalg.vector_norm(table, dim=-1)
+        if not bool(torch.allclose(norms, torch.ones_like(norms), atol=1.0e-5, rtol=0.0)):
+            raise ValueError("pregrasp_root_quats_buckets must contain unit quaternions")
+        return table

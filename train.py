@@ -30,6 +30,7 @@ python train.py --stage 2 --headless \\
 from __future__ import annotations
 
 import argparse
+import math
 import os
 
 from isaaclab.app import AppLauncher
@@ -52,6 +53,224 @@ parser.add_argument(
     type=int,
     default=None,
     help="[Stage 1] Override rl_games max_epochs (useful for smoke tests / short runs).",
+)
+parser.add_argument(
+    "--ppo_learning_rate",
+    type=float,
+    default=None,
+    help="[Stage 1] Optional actor and central-value learning-rate override.",
+)
+parser.add_argument(
+    "--ppo_entropy_coef",
+    type=float,
+    default=None,
+    help="[Stage 1] Optional non-negative actor entropy coefficient.",
+)
+parser.add_argument(
+    "--ppo_score_to_win",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional RL-Games early-stop score override. Use a value "
+        "above the attainable episode reward for fixed-sample runs."
+    ),
+)
+parser.add_argument(
+    "--ppo_lr_schedule",
+    choices=("adaptive", "identity", "linear"),
+    default=None,
+    help="[Stage 1] Optional rl_games learning-rate schedule override.",
+)
+parser.add_argument(
+    "--ppo_mini_epochs",
+    type=int,
+    default=None,
+    help="[Stage 1] Optional actor and central-value mini-epoch override.",
+)
+parser.add_argument(
+    "--ppo_sigma_init",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional initial log-standard-deviation for the continuous "
+        "actor. Useful for contact-critical tasks where the default std=1 "
+        "destroys the reset grip before a sustained contact gate can open."
+    ),
+)
+parser.add_argument(
+    "--ppo_sigma_override",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional log-standard-deviation applied after checkpoint "
+        "restore, for explicit exploration annealing on resumed runs."
+    ),
+)
+parser.add_argument(
+    "--ppo_zero_mu_init",
+    action="store_true",
+    help=(
+        "[Stage 1] Initialize the continuous actor mean output layer to zero. "
+        "For delta-action tasks this starts from the validated zero-increment "
+        "grasp instead of PyTorch's random Linear initialization."
+    ),
+)
+parser.add_argument(
+    "--phase0_contact_authority_weight",
+    type=float,
+    default=None,
+    help="[Stage 1] Optional Phase-0 sustained contact-authority reward override.",
+)
+parser.add_argument(
+    "--phase0_load_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional Phase-0 screwdriver load-scale override. Intended "
+        "for hard-contact-gated curriculum experiments; final-phase load is "
+        "unchanged."
+    ),
+)
+parser.add_argument(
+    "--phase0_action_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional Phase-0 multiplier on accumulated delta actions. "
+        "Final-phase/deployment action scale is unchanged."
+    ),
+)
+parser.add_argument(
+    "--phase0_turn_weight",
+    type=float,
+    default=None,
+    help="[Stage 1] Optional Phase-0 forward shaft-spin reward-weight override.",
+)
+parser.add_argument(
+    "--phase_turn_weights",
+    type=float,
+    nargs=3,
+    metavar=("PHASE0", "PHASE1", "PHASE2"),
+    default=None,
+    help=(
+        "[Stage 1] Optional forward shaft-spin reward weights for all three "
+        "curriculum phases. Useful for auditable target-free progress A/B runs."
+    ),
+)
+parser.add_argument(
+    "--phase_load_scales",
+    type=float,
+    nargs=3,
+    metavar=("PHASE0", "PHASE1", "PHASE2"),
+    default=None,
+    help=(
+        "[Stage 1] Optional screwdriver-load multipliers for all three "
+        "curriculum phases. Intended for assisted gait discovery; production "
+        "continuations and final evaluation must restore Phase 2 to 1.0."
+    ),
+)
+parser.add_argument(
+    "--phase_drive_weights",
+    type=float,
+    nargs=3,
+    metavar=("PHASE0", "PHASE1", "PHASE2"),
+    default=None,
+    help=(
+        "[Stage 1] Optional per-phase fingertip tangential-motion reward "
+        "weights. This shapes cyclic contact motion without prescribing a "
+        "screwdriver speed target."
+    ),
+)
+parser.add_argument(
+    "--target_bound_weight",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional penalty on accumulated joint targets in the outer "
+        "20 percent of their action band. No screwdriver speed is prescribed."
+    ),
+)
+parser.add_argument(
+    "--reverse_to_turn_ratio",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Reverse-progress cost divided by the active linear forward "
+        "weight. Does not prescribe a target speed."
+    ),
+)
+parser.add_argument(
+    "--turn_reward_power",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Target-free power applied symmetrically to forward and "
+        "reverse angular speed; 1 is the legacy linear objective."
+    ),
+)
+parser.add_argument(
+    "--joint_motion_range",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional symmetric motion half-width around the validated "
+        "home target. URDF hardware limits remain the final clamp."
+    ),
+)
+parser.add_argument(
+    "--action_delta_scale",
+    type=float,
+    default=None,
+    help="[Stage 1] Per-step accumulated joint-target increment in radians.",
+)
+parser.add_argument(
+    "--absolute_action_targets",
+    action="store_true",
+    help=(
+        "[Stage 1] Map normalized actions directly to home-relative targets "
+        "instead of integrating delta targets."
+    ),
+)
+parser.add_argument(
+    "--topdown_posture_search",
+    type=str,
+    default=None,
+    help="[Stage 1] Audited top-down posture-search JSON for an isolated experiment.",
+)
+parser.add_argument(
+    "--topdown_posture_candidate_index",
+    type=int,
+    default=None,
+    help="[Stage 1] Candidate index selected from --topdown_posture_search.",
+)
+parser.add_argument(
+    "--fixed_geometry_diameter_mm",
+    type=int,
+    choices=(64,),
+    default=None,
+    help="[Stage 1] Pin the experimental task to the physical 64 mm asset.",
+)
+parser.add_argument(
+    "--phase_excess_weights",
+    type=float,
+    nargs=3,
+    metavar=("PHASE0", "PHASE1", "PHASE2"),
+    default=None,
+    help="[Stage 1] Optional per-phase excessive fingertip-force penalties.",
+)
+parser.add_argument(
+    "--phase_wrong_weights",
+    type=float,
+    nargs=3,
+    metavar=("PHASE0", "PHASE1", "PHASE2"),
+    default=None,
+    help="[Stage 1] Optional per-phase non-fingertip contact-force penalties.",
+)
+parser.add_argument(
+    "--phase0_fall_weight",
+    type=float,
+    default=None,
+    help="[Stage 1] Optional Phase-0 one-shot fall-penalty override.",
 )
 parser.add_argument(
     "--save_interval_steps",
@@ -97,6 +316,15 @@ parser.add_argument("--video_interval", type=int, default=2000)
 parser.add_argument("--adapt_iters", type=int, default=500, help="[Stage 2] Training iterations.")
 parser.add_argument("--adapt_rollout_steps", type=int, default=512, help="[Stage 2] Rollout steps per iter.")
 parser.add_argument(
+    "--adapt_continuous_rollouts",
+    action="store_true",
+    help=(
+        "[Stage 2] Continue the environment across rollout chunks instead of "
+        "resetting every iteration. This permits more envs and shorter chunks "
+        "at the same samples/iter without biasing data toward episode starts."
+    ),
+)
+parser.add_argument(
     "--adapt_save_interval",
     type=int,
     default=50,
@@ -109,6 +337,24 @@ parser.add_argument(
     "with the adapter's predicted latent, ramped in). OFF by default: it "
     "destabilises the upright screwdriver task (rollout collapse + rising "
     "AdaptLoss as the mix ramps up). Only enable with a gentle schedule.",
+)
+parser.add_argument(
+    "--adapt_resume_checkpoint",
+    type=str,
+    default=None,
+    help="[Stage 2] Resume adapter weights and global iteration from a periodic checkpoint.",
+)
+parser.add_argument(
+    "--adapt_onpolicy_warmup_iters",
+    type=int,
+    default=50,
+    help="[Stage 2] Global iteration through which predicted-latent mixing stays zero.",
+)
+parser.add_argument(
+    "--adapt_onpolicy_ramp_iters",
+    type=int,
+    default=100,
+    help="[Stage 2] Global iterations used to ramp predicted-latent mixing from 0 to 1.",
 )
 parser.add_argument(
     "--stage2_phase",
@@ -189,6 +435,86 @@ def _load_agent_cfg(num_envs: int, rl_device: str, seed: int, train_dir: str) ->
     cfg["params"]["config"]["train_dir"] = train_dir
     if args.max_epochs is not None:
         cfg["params"]["config"]["max_epochs"] = args.max_epochs
+    if args.ppo_score_to_win is not None:
+        if not math.isfinite(args.ppo_score_to_win) or args.ppo_score_to_win <= 0.0:
+            raise ValueError("--ppo_score_to_win must be finite and positive")
+        cfg["params"]["config"]["score_to_win"] = float(args.ppo_score_to_win)
+        print(
+            "[train] PPO early-stop override: "
+            f"score_to_win={float(args.ppo_score_to_win):.6g}",
+            flush=True,
+        )
+    if args.ppo_sigma_init is not None:
+        continuous = cfg["params"]["network"]["space"]["continuous"]
+        sigma_init = continuous.get("sigma_init")
+        if not isinstance(sigma_init, dict) or sigma_init.get("name") != "const_initializer":
+            raise ValueError(
+                "--ppo_sigma_init requires network.space.continuous.sigma_init "
+                "to be a const_initializer"
+            )
+        sigma_init["val"] = float(args.ppo_sigma_init)
+        print(
+            "[train] PPO exploration override: "
+            f"sigma_init_log_std={float(args.ppo_sigma_init):.6g} "
+            f"(std={math.exp(float(args.ppo_sigma_init)):.6g})",
+            flush=True,
+        )
+    if args.ppo_zero_mu_init:
+        continuous = cfg["params"]["network"]["space"]["continuous"]
+        continuous["mu_init"] = {"name": "const_initializer", "val": 0.0}
+        print(
+            "[train] PPO actor initialization override: mu output weights=0 "
+            "(bias remains 0)",
+            flush=True,
+        )
+    if args.ppo_entropy_coef is not None:
+        if args.ppo_entropy_coef < 0.0:
+            raise ValueError("--ppo_entropy_coef must be non-negative")
+        cfg["params"]["config"]["entropy_coef"] = float(args.ppo_entropy_coef)
+    if args.ppo_sigma_override is not None:
+        if not math.isfinite(args.ppo_sigma_override):
+            raise ValueError("--ppo_sigma_override must be finite")
+        print(
+            "[train] PPO post-restore exploration override: "
+            f"log_std={float(args.ppo_sigma_override):.6g} "
+            f"(std={math.exp(float(args.ppo_sigma_override)):.6g})",
+            flush=True,
+        )
+
+    optim_configs = (
+        cfg["params"]["config"],
+        cfg["params"].get("central_value_config"),
+    )
+    for optim_cfg in optim_configs:
+        if not optim_cfg:
+            continue
+        if args.ppo_learning_rate is not None:
+            if args.ppo_learning_rate <= 0.0:
+                raise ValueError("--ppo_learning_rate must be positive")
+            optim_cfg["learning_rate"] = float(args.ppo_learning_rate)
+        if args.ppo_lr_schedule is not None:
+            optim_cfg["lr_schedule"] = args.ppo_lr_schedule
+        if args.ppo_mini_epochs is not None:
+            if args.ppo_mini_epochs <= 0:
+                raise ValueError("--ppo_mini_epochs must be positive")
+            optim_cfg["mini_epochs"] = int(args.ppo_mini_epochs)
+    if any(
+        value is not None
+        for value in (
+            args.ppo_learning_rate,
+            args.ppo_lr_schedule,
+            args.ppo_mini_epochs,
+            args.ppo_entropy_coef,
+        )
+    ):
+        print(
+            "[train] PPO override: "
+            f"learning_rate={cfg['params']['config']['learning_rate']}, "
+            f"lr_schedule={cfg['params']['config']['lr_schedule']}, "
+            f"mini_epochs={cfg['params']['config']['mini_epochs']}, "
+            f"entropy_coef={cfg['params']['config']['entropy_coef']}",
+            flush=True,
+        )
 
     # RL-Games requires the per-epoch batch (num_actors * horizon_length) to be
     # an exact multiple of minibatch_size.  The shipped config targets the
@@ -275,7 +601,10 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
     canonicaliser so the bundle loads into the env-free deploy actor 1:1.
     """
     try:
-        from screwdriver_rl.deploy.policy import canonicalize_actor_state
+        from screwdriver_rl.deploy.policy import (
+            canonicalize_actor_state,
+            nominal_geometry_row_index,
+        )
 
         model = getattr(player, "model", None)
         if model is None:
@@ -309,13 +638,70 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
             "clip_obs": float(env_section.get("clip_observations", 5.0)),
         }
 
+        deployment_row = 0
+        deployment_bucket = 0
+        deployment_scale = [1.0, 1.0]
+        variant_table = getattr(base_env, "_variant_table", None)
+        if variant_table is not None:
+            geometry_scales = torch.stack(
+                (variant_table.diameter_scale, variant_table.length_scale), dim=-1
+            )
+            deployment_variant = nominal_geometry_row_index(
+                geometry_scales, geometry_scales.shape[0]
+            )
+            deployment_scale = (
+                geometry_scales[deployment_variant].detach().cpu().tolist()
+            )
+            deployment_bucket = int(
+                variant_table.bucket[deployment_variant].detach().cpu().item()
+            )
+            env_variant_idx = getattr(base_env, "_env_variant_idx", None)
+            if env_variant_idx is None:
+                raise ValueError(
+                    "geometry-aware task has no environment variant assignment"
+                )
+            deployment_rows = torch.nonzero(
+                env_variant_idx == deployment_variant, as_tuple=False
+            ).flatten()
+            if deployment_rows.numel() == 0:
+                raise ValueError(
+                    "nominal geometry variant is absent from the environment batch"
+                )
+            deployment_row = int(deployment_rows[0].item())
+
         def _row(attr):
             t = getattr(base_env, attr, None)
-            return None if t is None else t[0].detach().cpu().tolist()
+            return None if t is None else t[deployment_row].detach().cpu().tolist()
 
         home = _row("_home_targets")
         if home is None:
             home = _row("_default_finger_pos") or _row("_cur_targets")
+
+        # Preserve the collision-safe approach posture used by the simulator.
+        # Geometry-aware reset tables are indexed by manifest bucket, whereas
+        # home/limit tensors above are indexed by environment row.
+        reset_table = getattr(base_env, "_reset_joint_pos", None)
+        startup_reset_targets = home
+        if reset_table is not None:
+            reset_parts = []
+            for finger in base_env.fingers:
+                values = reset_table[finger]
+                if values.ndim == 2:
+                    values = values[deployment_bucket]
+                reset_parts.append(values.reshape(-1))
+            startup_reset_targets = (
+                torch.cat(reset_parts).detach().cpu().tolist()
+            )
+
+        # Serialize the exact proprioception contract used by the live task.
+        # ProprioAdaptTrainer validates this against the adaptation history and
+        # actor widths, so deriving it from dimensions here would risk producing
+        # a bundle that trains successfully but encodes real-hand observations
+        # differently from simulation.
+        proprio_codec = getattr(base_env, "_proprio_codec", None)
+        codec_spec = getattr(proprio_codec, "spec", None)
+        if codec_spec is None or not callable(getattr(codec_spec, "as_dict", None)):
+            raise ValueError("task environment does not expose an explicit ProprioCodec")
 
         config = {
             "task": args.task,
@@ -324,9 +710,17 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
             "finger_lower": _row("_finger_lower"),
             "finger_upper": _row("_finger_upper"),
             "home_targets": home,
+            "startup_reset_targets": startup_reset_targets,
             "prop_hist_len": int(env_cfg.prop_hist_len),
             "history_obs_dim": int(env_cfg.history_obs_dim),
             "privileged_obs_dim": int(env_cfg.privileged_obs_dim),
+            "observation_semantics_version": str(
+                env_cfg.observation_semantics_version
+            ),
+            "proprio_codec": codec_spec.as_dict(),
+            "deployment_env_index": deployment_row,
+            "deployment_geometry_bucket": deployment_bucket,
+            "deployment_geometry_scale": deployment_scale,
         }
         if latent_dim == 0:  # legacy euler-bridge bundle
             config["euler_dim"] = max(0, obs_dim - 2 * action_dim) or 3
@@ -398,7 +792,7 @@ def run_stage1(env_cfg, log_dir: str) -> None:
         {
             "train": True,
             "play": False,
-            "sigma": None,
+            "sigma": args.ppo_sigma_override,
             "checkpoint": args.checkpoint,
         }
     )
@@ -504,9 +898,13 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     from screwdriver_rl.algos.proprio_adapt import ProprioAdaptTrainer, AdaptTrainCfg
     adapt_cfg = AdaptTrainCfg(
         rollout_steps=args.adapt_rollout_steps,
+        continuous_rollouts=args.adapt_continuous_rollouts,
         num_iters=args.adapt_iters,
         save_interval=args.adapt_save_interval,
+        resume_checkpoint=args.adapt_resume_checkpoint,
         onpolicy_latent=args.adapt_onpolicy,
+        onpolicy_warmup_iters=args.adapt_onpolicy_warmup_iters,
+        onpolicy_ramp_iters=args.adapt_onpolicy_ramp_iters,
     )
     stage2_dir = os.path.join(log_dir, "stage2_nn")
 
@@ -576,6 +974,195 @@ def run_stage2(env_cfg, log_dir: str) -> None:
 def main() -> None:
     env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
+    if args.topdown_posture_search is not None:
+        from screwdriver_rl.utils.linker_topdown_candidate_override import (
+            apply_candidate,
+            load_candidate,
+        )
+        posture = load_candidate(
+            args.topdown_posture_search, args.topdown_posture_candidate_index
+        )
+        apply_candidate(
+            env_cfg, posture, fixed_64mm=args.fixed_geometry_diameter_mm == 64
+        )
+        print(
+            "[Stage 1] Top-down posture override: "
+            f"{args.topdown_posture_search} "
+            f"candidate={args.topdown_posture_candidate_index} "
+            f"fixed_diameter_mm={args.fixed_geometry_diameter_mm}",
+            flush=True,
+        )
+    elif args.topdown_posture_candidate_index is not None:
+        raise ValueError(
+            "--topdown_posture_candidate_index requires --topdown_posture_search"
+        )
+    elif args.fixed_geometry_diameter_mm is not None:
+        raise ValueError(
+            "--fixed_geometry_diameter_mm currently requires "
+            "--topdown_posture_search"
+        )
+    if args.stage == 1 and hasattr(env_cfg, "curriculum_phases"):
+        phase0 = env_cfg.curriculum_phases[0]
+        if args.phase0_contact_authority_weight is not None:
+            phase0.w_contact_authority = float(args.phase0_contact_authority_weight)
+            print(
+                "[Stage 1] Phase-0 contact-authority override: "
+                f"{phase0.w_contact_authority:g}",
+                flush=True,
+            )
+        if args.phase0_load_scale is not None:
+            if not 0.0 <= args.phase0_load_scale <= 1.0:
+                raise ValueError("--phase0_load_scale must be in [0, 1]")
+            phase0.screwdriver_load_scale = float(args.phase0_load_scale)
+            print(
+                "[Stage 1] Phase-0 screwdriver-load override: "
+                f"{phase0.screwdriver_load_scale:g}",
+                flush=True,
+            )
+        if args.phase0_action_scale is not None:
+            if not 0.0 < args.phase0_action_scale <= 1.0:
+                raise ValueError("--phase0_action_scale must be in (0, 1]")
+            phase0.action_scale_multiplier = float(args.phase0_action_scale)
+            print(
+                "[Stage 1] Phase-0 action-scale override: "
+                f"{phase0.action_scale_multiplier:g}",
+                flush=True,
+            )
+        if args.phase0_turn_weight is not None:
+            if args.phase0_turn_weight <= 0.0:
+                raise ValueError("--phase0_turn_weight must be positive")
+            phase0.reward_turn_weight = float(args.phase0_turn_weight)
+            print(
+                f"[Stage 1] Phase-0 turn-weight override: "
+                f"{phase0.reward_turn_weight:g}",
+                flush=True,
+            )
+        if args.phase_turn_weights is not None:
+            weights = tuple(float(value) for value in args.phase_turn_weights)
+            if len(env_cfg.curriculum_phases) != len(weights):
+                raise ValueError(
+                    "--phase_turn_weights requires exactly one value per phase"
+                )
+            if any(value <= 0.0 for value in weights):
+                raise ValueError("--phase_turn_weights values must be positive")
+            for phase, value in zip(env_cfg.curriculum_phases, weights, strict=True):
+                phase.reward_turn_weight = value
+            print(
+                "[Stage 1] Three-phase turn-weight override: "
+                + " / ".join(f"{value:g}" for value in weights),
+                flush=True,
+            )
+        if args.phase_load_scales is not None:
+            scales = tuple(float(value) for value in args.phase_load_scales)
+            if len(env_cfg.curriculum_phases) != len(scales):
+                raise ValueError(
+                    "--phase_load_scales requires exactly one value per phase"
+                )
+            if any(not 0.0 <= value <= 1.0 for value in scales):
+                raise ValueError("--phase_load_scales values must be in [0, 1]")
+            for phase, value in zip(
+                env_cfg.curriculum_phases, scales, strict=True
+            ):
+                phase.screwdriver_load_scale = value
+            print(
+                "[Stage 1] Three-phase screwdriver-load override: "
+                + " / ".join(f"{value:g}" for value in scales),
+                flush=True,
+            )
+        if args.phase_drive_weights is not None:
+            weights = tuple(float(value) for value in args.phase_drive_weights)
+            if len(env_cfg.curriculum_phases) != len(weights):
+                raise ValueError(
+                    "--phase_drive_weights requires exactly one value per phase"
+                )
+            if any(value < 0.0 for value in weights):
+                raise ValueError(
+                    "--phase_drive_weights values must be non-negative"
+                )
+            for phase, value in zip(env_cfg.curriculum_phases, weights, strict=True):
+                phase.w_drive = value
+            print(
+                "[Stage 1] Three-phase drive-weight override: "
+                + " / ".join(f"{value:g}" for value in weights),
+                flush=True,
+            )
+        if args.target_bound_weight is not None:
+            if args.target_bound_weight < 0.0:
+                raise ValueError("--target_bound_weight must be non-negative")
+            env_cfg.w_target_bound = float(args.target_bound_weight)
+            print(
+                "[Stage 1] Target-bound penalty override: "
+                f"{env_cfg.w_target_bound:g}",
+                flush=True,
+            )
+        if args.reverse_to_turn_ratio is not None:
+            if args.reverse_to_turn_ratio < 1.0:
+                raise ValueError("--reverse_to_turn_ratio must be >= 1")
+            env_cfg.reverse_to_turn_ratio = float(args.reverse_to_turn_ratio)
+            print(
+                "[Stage 1] Reverse/forward linear weight ratio: "
+                f"{env_cfg.reverse_to_turn_ratio:g}",
+                flush=True,
+            )
+        if args.turn_reward_power is not None:
+            if not 1.0 <= args.turn_reward_power <= 2.0:
+                raise ValueError("--turn_reward_power must be in [1, 2]")
+            env_cfg.turn_reward_power = float(args.turn_reward_power)
+            print(
+                "[Stage 1] Target-free turn reward power: "
+                f"{env_cfg.turn_reward_power:g}",
+                flush=True,
+            )
+        if args.joint_motion_range is not None:
+            if not 0.0 < args.joint_motion_range <= 1.0:
+                raise ValueError("--joint_motion_range must be in (0, 1]")
+            env_cfg.joint_motion_range = float(args.joint_motion_range)
+            print(
+                "[Stage 1] Joint-motion half-width override: "
+                f"{env_cfg.joint_motion_range:g} rad (URDF-clamped)",
+                flush=True,
+            )
+        if args.action_delta_scale is not None:
+            if not 0.0 < args.action_delta_scale <= 0.2:
+                raise ValueError("--action_delta_scale must be in (0, 0.2]")
+            env_cfg.action_delta_scale = float(args.action_delta_scale)
+            print(
+                "[Stage 1] Action delta scale override: "
+                f"{env_cfg.action_delta_scale:g} rad/step",
+                flush=True,
+            )
+        if args.absolute_action_targets:
+            env_cfg.absolute_action_targets = True
+            print(
+                "[Stage 1] Control mode: home-relative absolute targets",
+                flush=True,
+            )
+        for option, attr, values in (
+            ("--phase_excess_weights", "w_excess", args.phase_excess_weights),
+            ("--phase_wrong_weights", "w_wrong", args.phase_wrong_weights),
+        ):
+            if values is None:
+                continue
+            weights = tuple(float(value) for value in values)
+            if len(env_cfg.curriculum_phases) != len(weights):
+                raise ValueError(f"{option} requires exactly one value per phase")
+            if any(value < 0.0 for value in weights):
+                raise ValueError(f"{option} values must be non-negative")
+            for phase, value in zip(
+                env_cfg.curriculum_phases, weights, strict=True
+            ):
+                setattr(phase, attr, value)
+            print(
+                f"[Stage 1] {attr} override: "
+                + " / ".join(f"{value:g}" for value in weights),
+                flush=True,
+            )
+        if args.phase0_fall_weight is not None:
+            phase0.reward_fall_weight = float(args.phase0_fall_weight)
+            print(
+                f"[Stage 1] Phase-0 fall-weight override: {phase0.reward_fall_weight:g}",
+                flush=True,
+            )
     log_dir = args.output or os.path.join("runs", args.task)
     os.makedirs(log_dir, exist_ok=True)
 

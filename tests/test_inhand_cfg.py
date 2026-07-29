@@ -107,7 +107,10 @@ def test_obs_dimensions_follow_hora_contract():
 def test_asset_grid_is_scale_major(cfg_tree):
     scales = _literal(cfg_tree, "HORA_CYLINDER_SCALES")
     assert len(scales) == 9
-    assert scales == pytest.approx(tuple(0.70 + 0.02 * i for i in range(9)))
+    # 9 buckets, 0.02 apart, centred on 1.0 (the L20 is larger than the Allegro
+    # that HORA's original 0.70-0.86 range was tuned for).
+    assert scales == pytest.approx(tuple(0.92 + 0.02 * i for i in range(9)))
+    assert scales[len(scales) // 2] == pytest.approx(1.0)
 
     # Each scale spawns a fixed block of shapes; the grid is scale-major so
     # asset i -> scale block i // block_size (this is exactly how the env maps
@@ -122,18 +125,25 @@ def test_asset_grid_is_scale_major(cfg_tree):
         assert 0 <= scale_idx < len(scales)
 
 
-def test_object_mix_has_all_three_shapes_hora_proportions(cfg_tree):
-    """HORA trains on cylinders + cuboids + spheres (0.35/0.20/0.45).  The block
-    must contain all three shapes in roughly that split."""
-    n_cyl = len(_literal(cfg_tree, "MIX_CYLINDER_LENGTHS"))
-    n_cub = len(_literal(cfg_tree, "MIX_CUBOID_SIZES"))
-    n_sph = len(_literal(cfg_tree, "MIX_SPHERE_RADII"))
-    block = n_cyl + n_cub + n_sph
-    assert n_cyl >= 1 and n_cub >= 1 and n_sph >= 1, "all three shapes must be present"
-    # within +-0.12 of HORA's 0.35 / 0.20 / 0.45 type split
-    assert n_cyl / block == pytest.approx(0.35, abs=0.12)
-    assert n_cub / block == pytest.approx(0.20, abs=0.12)
-    assert n_sph / block == pytest.approx(0.45, abs=0.12)
+def test_object_mix_is_hora_block_only_with_mixed_fallback(cfg_tree):
+    """The released HORA config (AllegroHandHora.yaml: type 'block',
+    sampleProb [1.0]) trains on a single cube and generalises zero-shot; the
+    main task matches it with cuboid-only training (2026-07-16 — the 3-shape
+    mix's spheres were the dominant failure mode at every stage).  The mixed
+    grid machinery must survive as the documented fallback."""
+    cfg_source = _CFG.read_text()
+    assert 'object_kind: str = "cuboid"' in cfg_source
+
+    # Cuboid prototypes exist and are block-like (no dimension > 1.5x another).
+    cuboids = _literal(cfg_tree, "MIX_CUBOID_SIZES")
+    assert len(cuboids) >= 1
+    for size in cuboids:
+        assert max(size) / min(size) <= 1.5, f"cuboid {size} too elongated for a HORA block"
+
+    # The mixed fallback keeps all three shapes buildable.
+    assert len(_literal(cfg_tree, "MIX_CYLINDER_LENGTHS")) >= 1
+    assert len(_literal(cfg_tree, "MIX_SPHERE_RADII")) >= 1
+    assert '"mixed"' in cfg_source
 
 
 def test_cache_filename_format(cfg_tree):
@@ -187,15 +197,19 @@ def _quat_rotate(q, v):
 
 
 def test_canonical_grip_is_palm_up_fingertip_opposition(cfg_tree):
-    """The in-hand canonical pose is the HORA-style palm-up fingertip cage:
-    palm normal up (tilted INHAND_PALM_TILT_DEG about the finger axis, thumb
-    edge down), fingers along world -Y, object seeded at the fingertip-cage
-    centre in the air.  Guards against regressing to a palm-down / top grasp."""
+    """The in-hand canonical pose is a palm-up fingertip cage with the palm
+    longitudinal axis (wrist centre -> middle-finger MCP, local +Z) raised
+    INHAND_LONG_AXIS_TILT_DEG above the horizontal ground plane (fingertips
+    above the wrist), palm normal still up-facing, object seeded at the
+    fingertip-cage centre in the air.  Guards against regressing to a
+    palm-down / top grasp, and against re-reading the 45 deg spec as a
+    palm-NORMAL tilt (the old bug: fingers horizontal, thumb edge down)."""
     import math
 
     pregrasp = _literal(cfg_tree, "INHAND_PREGRASP_POSITIONS")
     obj_pos = _literal(cfg_tree, "INHAND_OBJECT_INIT_POS")
-    tilt_deg = _literal(cfg_tree, "INHAND_PALM_TILT_DEG")
+    tilt_deg = _literal(cfg_tree, "INHAND_LONG_AXIS_TILT_DEG")
+    roll_deg = _literal(cfg_tree, "INHAND_PALM_ROLL_DEG")
 
     quat_from_axis_angle = _compile_function(cfg_tree, "_quat_from_axis_angle")
     quat_mul = _compile_function(cfg_tree, "_quat_mul")
@@ -203,47 +217,66 @@ def test_canonical_grip_is_palm_up_fingertip_opposition(cfg_tree):
     quat_mul.__globals__["math"] = math
 
     # INHAND_HAND_ROT is computed at module level; recompute it here from the
-    # same helpers and the tilt constant (the HORA composition).
+    # same helpers and the tilt/roll constants (world-X pitch on top of the
+    # HORA flat palm-up composition).
     rot = quat_mul(
-        quat_from_axis_angle((0.0, 1.0, 0.0), math.radians(-90.0 + tilt_deg)),
-        quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(90.0)),
+        quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(-tilt_deg)),
+        quat_mul(
+            quat_from_axis_angle((0.0, 1.0, 0.0), math.radians(-90.0 + roll_deg)),
+            quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(90.0)),
+        ),
     )
     assert abs(sum(c * c for c in rot) - 1.0) < 1e-6  # unit quat
 
     tilt = math.radians(tilt_deg)
+    roll = math.radians(roll_deg)
     palm_normal_w = _quat_rotate(rot, (1.0, 0.0, 0.0))   # L20 palm normal = +X
-    fingers_w = _quat_rotate(rot, (0.0, 0.0, 1.0))       # fingers = +Z
+    long_axis_w = _quat_rotate(rot, (0.0, 0.0, 1.0))     # wrist -> middle MCP = +Z
     thumb_edge_w = _quat_rotate(rot, (0.0, -1.0, 0.0))   # thumb edge = -Y
 
-    assert palm_normal_w == pytest.approx((math.sin(tilt), 0.0, math.cos(tilt)), abs=1e-6)
-    assert palm_normal_w[2] > 0.5, "palm must face up"
-    assert fingers_w == pytest.approx((0.0, -1.0, 0.0), abs=1e-6)
-    assert thumb_edge_w[2] < -0.5, "thumb edge must be the lower edge (gravity loads the thumb)"
+    # The spec'd constraint: the palm longitudinal axis is inclined tilt_deg
+    # above the horizontal, fingertips HIGHER than the wrist.
+    elevation = math.degrees(math.asin(max(-1.0, min(1.0, long_axis_w[2]))))
+    assert elevation == pytest.approx(tilt_deg, abs=1e-4)
     assert 20.0 <= tilt_deg <= 60.0
+    # The palm normal must still face up so the fingertip cage carries the
+    # object against gravity — but it is NOT the axis the 45 deg applies to.
+    assert palm_normal_w[2] > 0.5, "palm must face up"
+    assert palm_normal_w == pytest.approx(
+        (math.sin(roll), math.cos(roll) * math.sin(tilt), math.cos(roll) * math.cos(tilt)),
+        abs=1e-6,
+    )
+    # Zero-roll pose: thumb edge stays horizontal (the old palm-normal-tilt
+    # bug dropped it to -45 deg).
+    assert abs(thumb_edge_w[2]) <= math.sin(roll) + 1e-6
 
-    # Opposition-grip fingerprint: the thumb is swung across the palm
-    # (cmc_yaw + cmc_roll both engaged) while the four fingers are in a
-    # moderate fingertip curl, not the fully closed screwdriver wrap.
+    # Opposition-grip fingerprint: thumb opposed via cmc_yaw with its TIP pad
+    # (cmc_roll moderate — NOT swept across the palm centre), modest distal
+    # flexion (IP mimics 1.1619 x mcp), and the four fingers in an MCP-led
+    # fingertip curl: no hook grasp (PIP-dominant), no flat fingers, no fist.
     assert pregrasp["thumb"][0] >= 0.4, "thumb cmc_yaw not opposed"
-    assert pregrasp["thumb"][1] >= 0.5, "thumb cmc_roll not opposed"
+    assert pregrasp["thumb"][1] <= 0.95, "thumb cmc_roll swept across the palm"
+    assert pregrasp["thumb"][3] <= 0.5, "thumb distal flexion excessive"
     for finger in ("index", "middle", "ring", "pinky"):
         pitch, pip = pregrasp[finger][1], pregrasp[finger][2]
-        assert 0.2 <= pitch <= 1.0, f"{finger} mcp_pitch={pitch} outside fingertip-cage band"
-        assert 0.2 <= pip <= 1.0, f"{finger} pip={pip} outside fingertip-cage band"
+        assert 0.4 <= pitch <= 1.1, f"{finger} mcp_pitch={pitch} outside fingertip-cage band"
+        assert 0.2 <= pip <= 0.9, f"{finger} pip={pip} outside fingertip-cage band"
+        assert pitch > pip, f"{finger} hook-grasp risk: PIP flexion exceeds MCP"
 
-    # Object seeded in the air at the fingertip cage (hand root is at z=0.5),
-    # never on the palm and never at the old top-grasp drop height.
-    assert 0.50 < obj_pos[2] < 0.60
+    # Object seeded in the air at the fingertip cage (hand root is at z=0.5;
+    # the raised longitudinal axis lifts the cage centre to ~0.67), never on
+    # the palm and never at the old top-grasp drop height.
+    assert 0.60 < obj_pos[2] < 0.75
 
-    # Rotation axis = -(palm normal), tilting with the palm (HORA rotates about
-    # world -z with a FLAT palm; rewarding -z with a tilted palm rolled the
-    # object downhill off the thumb).
+    # Rotation axis = world -z, gravity-aligned (exactly HORA's), deliberately
+    # DECOUPLED from the palm tilt: with the axis parallel to gravity the load
+    # direction is invariant under the rotation, so the finger gait sees a
+    # constant gravity loading (2026-07-16 decision; the earlier -(palm normal)
+    # axis forced the object to precess/tumble).
     cfg_source = _CFG.read_text()
     assert "rot_axis: tuple[float, float, float] = INHAND_ROT_AXIS" in cfg_source
-    assert "-math.sin(math.radians(INHAND_PALM_TILT_DEG))" in cfg_source
-    assert "-math.cos(math.radians(INHAND_PALM_TILT_DEG))" in cfg_source
-    axis = (-math.sin(tilt), 0.0, -math.cos(tilt))
-    assert axis == pytest.approx(tuple(-c for c in palm_normal_w), abs=1e-6)
+    axis = _literal(cfg_tree, "INHAND_ROT_AXIS")
+    assert axis == pytest.approx((0.0, 0.0, -1.0), abs=1e-9)
 
 
 def test_canonical_pose_within_urdf_limits(cfg_tree, urdf_root):
@@ -331,21 +364,28 @@ def test_train_stage2_play_eval_observation_contracts(env_tree):
     assert sum(len(v) for v in obs_dim.values()) == 16
 
 
-def test_hold_first_curriculum_is_wired():
-    """Full rotation reward from step 0 collapses into spin-and-drop
-    (HoldFrac -> 0 by ~200 epochs); the default curriculum must learn to hold
-    first and the env must actually consume reward_turn_weight."""
+def test_rotation_first_reward_is_wired():
+    """The default schedule is a SINGLE phase with full HORA rotation reward
+    from step 0 (2026-07-16): the regenerated grasp caches hold ~80% of
+    zero-action episodes to timeout, so a hold-first phase only lets the hold
+    bonus dominate what the policy learns.  The curriculum machinery (phase
+    selection + turn-weight gating) must stay wired for reintroduction, and
+    the anti-spin-and-drop guards (fall penalty, near-neutral hold bonus)
+    must stay active."""
     source = _ENV.read_text()
-    # Phase selection + rotation-reward gating.
+    # Phase selection + rotation-reward gating machinery retained.
     assert "for phase in phases:" in source
     assert "if self._global_steps >= phase.step_start:" in source
     assert "CURRICULUM TRANSITION" in source
     assert "self._curriculum_phase.reward_turn_weight" in source
 
     cfg_source = _CFG.read_text()
-    assert "InhandCurriculumPhaseCfg(step_start=0, reward_turn_weight=0.0)" in cfg_source
-    assert "reward_turn_weight=0.3" in cfg_source
-    assert "reward_turn_weight=1.0" in cfg_source
+    assert "InhandCurriculumPhaseCfg(step_start=0, reward_turn_weight=1.0)" in cfg_source
+    assert "reward_turn_weight=0.0" not in cfg_source, "hold-only phase reintroduced?"
+    # Guards: falling must stay strictly worse than living; idle holding must
+    # not be a comfortable positive-income optimum (bonus ~ penalty income).
+    assert "fall_penalty: float = -25.0" in cfg_source
+    assert "hold_bonus: float = 0.1" in cfg_source
 
 
 def test_hora_reward_terms_and_eval_extras_are_present():
