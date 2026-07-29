@@ -6,7 +6,9 @@ Registers:
   Isaac-LinkerL20-Screwdriver-Rotation-Topdown
   Isaac-LinkerL20-Screwdriver-Rotation-DR-Direct-v0
   Isaac-LinkerL20-Inhand-Rotation        (HORA free-cylinder in-hand rotation)
+  Isaac-LinkerL20-Inhand-Rotation-Topdown (top-down fingertip-only pre-grasp)
   Isaac-LinkerL20-Inhand-GraspGen        (grasp-cache collection for the above)
+  Isaac-LinkerL20-Inhand-GraspGen-Topdown (top-down grasp-cache collection)
 """
 
 import gymnasium as gym
@@ -78,6 +80,40 @@ gym.register(
         "env_cfg_entry_point": (
             "screwdriver_rl.tasks.linker_l20."
             "inhand_rotation_env_cfg:LinkerL20InhandGraspGenEnvCfg"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_inhand_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-LinkerL20-Inhand-Rotation-Topdown",
+    entry_point=(
+        "screwdriver_rl.tasks.linker_l20."
+        "inhand_rotation_env:LinkerL20InhandRotationEnv"
+    ),
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "screwdriver_rl.tasks.linker_l20."
+            "inhand_rotation_topdown_env_cfg:"
+            "LinkerL20InhandRotationTopdownEnvCfg"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_inhand_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-LinkerL20-Inhand-GraspGen-Topdown",
+    entry_point=(
+        "screwdriver_rl.tasks.linker_l20."
+        "inhand_grasp_gen_env:LinkerL20InhandGraspGenEnv"
+    ),
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "screwdriver_rl.tasks.linker_l20."
+            "inhand_rotation_topdown_env_cfg:"
+            "LinkerL20InhandRotationTopdownGraspGenEnvCfg"
         ),
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_inhand_ppo_cfg.yaml",
     },

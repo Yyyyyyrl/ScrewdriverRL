@@ -8,6 +8,16 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Generate LinkerL20 in-hand grasp cache states.")
+parser.add_argument(
+    "--task",
+    type=str,
+    default="Isaac-LinkerL20-Inhand-GraspGen",
+    choices=(
+        "Isaac-LinkerL20-Inhand-GraspGen",
+        "Isaac-LinkerL20-Inhand-GraspGen-Topdown",
+    ),
+    help="Grasp-generator task whose posture and cache namespace should be used.",
+)
 parser.add_argument("--scale", type=float, default=0.8)
 parser.add_argument(
     "--shape",
@@ -62,6 +72,9 @@ def _configure_scale(env_cfg, scale: float, shape: str) -> None:
     env_cfg.object_kind = str(shape)
     env_cfg.object_scales = (float(scale),)
     env_cfg._rebuild_object()  # rebuilds object_cfg + asset scale/shape indices
+    configure_cache_shape = getattr(env_cfg, "configure_cache_shape", None)
+    if configure_cache_shape is not None:
+        configure_cache_shape(shape)
     env_cfg.load_grasp_cache = False
     env_cfg.enable_fingertip_sensors = True
     env_cfg.episode_length_s = 2.5
@@ -103,7 +116,7 @@ def _debug_report(base_env, steps: int) -> None:
         f"\n  settled obj z median     : {median_z:.4f}"
         f"\n  suggested reset threshold: {median_z - 0.03:.4f}"
         f"\n  suggested drop height    : {median_z + 0.07:.4f}"
-        f"\n  palm-up hand quat        : {tuple(base_env.cfg.robot_cfg.init_state.rot)}"
+        f"\n  hand root quaternion     : {tuple(base_env.cfg.robot_cfg.init_state.rot)}"
         f"\n  acceptance mean          : {mean_extra('eval_grasp_acceptance'):.3f}"
         f"\n  all tips close mean      : {mean_extra('eval_tip_close'):.3f}"
         f"\n  contact fingers mean     : {mean_extra('eval_contact_fingers'):.3f}"
@@ -118,7 +131,7 @@ def _debug_report(base_env, steps: int) -> None:
 
 
 def main() -> None:
-    task = "Isaac-LinkerL20-Inhand-GraspGen"
+    task = args.task
     env_cfg = parse_env_cfg(task, device=args.device, num_envs=args.num_envs)
     _configure_scale(env_cfg, args.scale, args.shape)
     env = gym.make(task, cfg=env_cfg, render_mode="human" if args.debug else None)

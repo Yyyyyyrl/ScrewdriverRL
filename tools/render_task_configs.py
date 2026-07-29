@@ -41,6 +41,7 @@ DEFAULT_TASK_IDS: tuple[str, ...] = (
     "Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0",
     "Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0",
     "Isaac-LinkerL20-Inhand-Rotation",
+    "Isaac-LinkerL20-Inhand-Rotation-Topdown",
 )
 
 

@@ -503,6 +503,10 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     grasp_cache_dir: str = str(ASSET_ROOT / "grasp_cache")
     grasp_cache_name: str = "linker_l20"
     load_grasp_cache: bool = True
+    # Training variants that have no safe canonical fallback can make the
+    # per-(scale, shape, prototype) cache set a startup requirement.  The
+    # original task retains its historical fallback behaviour.
+    require_complete_grasp_cache: bool = False
 
     domain_rand: InhandDomainRandCfg = field(default_factory=InhandDomainRandCfg)
     # Hold-first curriculum (one epoch = 65,536 global env steps at 8192 envs
@@ -533,6 +537,12 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     # proximal/middle phalanges) used by the grasp-gen fingertip-only filter.
     enable_nontip_sensors: bool = False
     grasp_gen_obj_init_pos: tuple[float, float, float] = INHAND_OBJECT_INIT_POS
+    grasp_gen_obj_init_rot: tuple[float, float, float, float] = (
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    )
     grasp_gen_pose_noise: float = 0.25
     # Human-like opposition grip: the thumb fingertip must press the object and
     # at least this many of the other four fingertips must also be in contact.
