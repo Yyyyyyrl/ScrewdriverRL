@@ -34,3 +34,15 @@ outputs/
 .idea/
 .vscode/
 .DS_Store
+
+# Merge/patch conflict backups
+*.orig
+*.rej
+
+# Local hardware-calibration captures and debug renders (root level only;
+# curated renders under artifacts/ are tracked)
+/*.png
+/*.jpg
+/*.jpeg
+/*.mov
+/*.MOV
