@@ -16,6 +16,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, ContactSensorCfg
 
 from screwdriver_rl.core import rewards
+from screwdriver_rl.deploy.codecs import ProprioCodec, inhand_linker_g20_codec_spec
 
 from .inhand_rotation_env_cfg import (
     LinkerL20InhandRotationEnvCfg,
@@ -133,6 +134,17 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         self._init_pose_buf = self._default_finger_pos.clone()
 
         self._policy_dt = float(cfg.decimation) * float(cfg.sim.dt)
+        self._proprio_codec = ProprioCodec(
+            inhand_linker_g20_codec_spec(
+                self._finger_lower[0].detach().cpu().tolist(),
+                self._finger_upper[0].detach().cpu().tolist(),
+                cfg.prop_hist_len,
+            )
+        )
+        if cfg.num_obs_frames != self._proprio_codec.spec.actor_frame_count:
+            raise ValueError("in-hand actor frame count does not match its ProprioCodec")
+        if round(self._policy_dt * 1_000_000_000) != self._proprio_codec.spec.control_period_ns:
+            raise ValueError("in-hand policy rate does not match its ProprioCodec")
         self._rot_axis = torch.tensor(cfg.rot_axis, dtype=torch.float32, device=self.device)
         self._rot_axis = self._rot_axis / torch.linalg.norm(self._rot_axis).clamp(min=1e-6)
 
@@ -201,7 +213,10 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         self._stage2_loss: float = float("nan")
         from screwdriver_rl.utils.logging import RotationTrainingLogger
 
-        self._logger = RotationTrainingLogger(log_interval_steps=2000)
+        # Keep terminal cadence in policy steps rather than aggregate samples.
+        self._logger = RotationTrainingLogger(
+            log_interval_steps=max(2000, 1200 * self.num_envs)
+        )
 
     @property
     def _prop_hist_buf(self) -> torch.Tensor:
@@ -282,7 +297,7 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             self._hist_reset_mask[ids] = False
 
         priv = self._compute_privileged_obs()
-        proprio = self._obs_hist[:, -self.cfg.num_obs_frames :].reshape(self.num_envs, -1)
+        proprio = self._proprio_codec.assemble_actor_input(self._obs_hist)
         result = {"policy": torch.cat([proprio, priv], dim=-1)}
         if self.cfg.asymmetric_obs:
             result["critic"] = priv
@@ -469,12 +484,13 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
 
     def _make_obs_frame(self) -> torch.Tensor:
         finger_q = self.hand.data.joint_pos[:, self._finger_joint_ids]
-        denom = (self._finger_upper - self._finger_lower).clamp(min=1e-6)
-        q_scaled = 2.0 * (finger_q - self._finger_lower) / denom - 1.0
+        frame = self._proprio_codec.encode_frame(finger_q, self._cur_targets)
         noise = float(self.cfg.domain_rand.joint_noise_scale) if self.cfg.domain_rand.enabled else 0.0
         if noise > 0.0:
-            q_scaled = q_scaled + (2.0 * torch.rand_like(q_scaled) - 1.0) * noise
-        return torch.cat([q_scaled, self._cur_targets], dim=-1)
+            measured = frame[:, : self.num_finger_dofs]
+            measured = measured + (2.0 * torch.rand_like(measured) - 1.0) * noise
+            frame = torch.cat([measured, frame[:, self.num_finger_dofs :]], dim=-1)
+        return frame
 
     def _compute_privileged_obs(self) -> torch.Tensor:
         obj_pos_local = self.object.data.root_pos_w - self.scene.env_origins

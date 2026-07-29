@@ -3,6 +3,7 @@
 Registers:
   Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0
   Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0
+  Isaac-LinkerL20-Screwdriver-Rotation-Topdown
   Isaac-LinkerL20-Screwdriver-Rotation-DR-Direct-v0
   Isaac-LinkerL20-Inhand-Rotation        (HORA free-cylinder in-hand rotation)
   Isaac-LinkerL20-Inhand-GraspGen        (grasp-cache collection for the above)
@@ -11,6 +12,7 @@ Registers:
 import gymnasium as gym
 
 from . import agents
+from . import screwdriver_rotation_topdown_registration  # noqa: F401
 
 
 gym.register(

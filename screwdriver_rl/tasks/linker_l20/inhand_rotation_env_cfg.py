@@ -39,40 +39,56 @@ HORA_CYLINDER_LENGTHS: tuple[float, ...] = (
     0.092,
     0.096,
 )
+# Object scale buckets, centred on 1.0 (2026-07-27).  HORA's 0.70-0.86 range
+# was tuned to the Allegro hand; the L20 is the larger hand, so the same
+# absolute object was undersized for its fingertip cage — measured settled cage
+# diameter is 72 mm (tip origins) with the pads contacting ~20-30 mm from the
+# object centre, against a cuboid half-edge of only 22-31 mm at the old scales.
+# Same 9 buckets and same 0.02 step, shifted so 1.0 is the median.
+# NOTE: caches are keyed by scale, so changing this list orphans every
+# assets/grasp_cache/*_s*.npy and requires tools/gen_inhand_grasp_cache.py.
 HORA_CYLINDER_SCALES: tuple[float, ...] = (
-    0.70,
-    0.72,
-    0.74,
-    0.76,
-    0.78,
-    0.80,
-    0.82,
-    0.84,
-    0.86,
+    0.92,
+    0.94,
+    0.96,
+    0.98,
+    1.00,
+    1.02,
+    1.04,
+    1.06,
+    1.08,
 )
 
-# Canonical pregrasp = HORA-style palm-up fingertip cage.  The hand sits near
-# the ground with the palm facing up (tilted INHAND_PALM_TILT_DEG about the
-# finger axis so the thumb can oppose across the object like a human grip);
-# the object is held in the air by the fingertip pads ONLY — four fingers on
-# the upper (pinky-edge) side, thumb pressing from the lower (thumb-edge) side,
-# object never resting on the palm.  Joint values were fit offline (URDF FK)
-# so all five fingertip pads lie on a ~3.6 cm sphere around the cage centre
-# with the thumb diametrically opposite the four fingers, then validated by
-# physics settling in tools/render_task_configs.py renders.  The grasp-gen
-# perturbs this pose (+-0.25 rad) and filters the settled states into the cache.
+# Canonical pregrasp = palm-up fingertip cage with the palm longitudinal axis
+# raised INHAND_LONG_AXIS_TILT_DEG above the ground plane (fingertips above
+# the wrist, like a human presenting a cup on their fingertips).  The object
+# is held in the air by the fingertip PADS only — four fingers curled with the
+# flexion led by the MCP joints (no hook grasp: not MCP-extended/PIP-flexed;
+# no flat fingers; no fist), thumb opposing with its tip pad from the side
+# (not swept across the palm centre, no adduction, no excessive IP flexion) —
+# and never rests on the palm.  Validated by physics settling in
+# tools/render_task_configs.py renders.  The grasp-gen perturbs this pose
+# (+-0.25 rad) and filters the settled states into the cache.
 INHAND_PREGRASP_POSITIONS: dict[str, tuple[float, ...]] = {
-    "index": (-0.0130, 0.5500, 0.6200),
-    "middle": (-0.0132, 0.4936, 0.5830),
-    "ring": (-0.0137, 0.5504, 0.5791),
-    "pinky": (0.0249, 0.5629, 0.6056),
-    "thumb": (0.6503, 1.0393, 0.5800, 0.4500),
+    "index": (-0.0130, 0.5800, 0.5700),
+    "middle": (-0.0132, 0.5300, 0.5200),
+    "ring": (-0.0137, 0.5700, 0.5500),
+    "pinky": (0.0249, 0.5800, 0.5700),
+    "thumb": (0.7000, 0.9400, 0.5400, 0.4700),
 }
 
-# Palm tilt about the finger axis (deg).  0 would be palm flat up (HORA
-# Allegro); the L20 thumb opposes the fingers best with the thumb edge
-# dropped ~45 deg so gravity loads the thumb pad.
-INHAND_PALM_TILT_DEG: float = 45.0
+# Inclination (deg) of the palm longitudinal axis — the vector from the wrist
+# centre to the middle-finger MCP, lying within the palm surface — above the
+# horizontal ground plane.  This is the spec'd 45 deg constraint; it is NOT a
+# tilt of the palm surface normal.
+INHAND_LONG_AXIS_TILT_DEG: float = 45.0
+
+# Thumb-edge-down roll (deg) about the finger axis.  0 = palm facing straight
+# up across its width.  History: an earlier pose used 45 deg roll (with a flat
+# longitudinal axis) so gravity loaded the thumb pad against the object; that
+# misread the 45 deg spec as a palm-normal tilt.  Kept as a knob — re-add a
+# small roll here if the thumb loses the object (spin-and-drop regressions).
+INHAND_PALM_ROLL_DEG: float = 0.0
 
 
 def _quat_from_axis_angle(
@@ -97,36 +113,45 @@ def _quat_mul(
     )
 
 
-# Hand base orientation (wxyz), HORA composition ``Quat(Y, -90deg+tilt) *
-# Quat(X, +90deg)``.  In the L20 base frame the fingers extend along +Z, the
-# palm normal is +X and the thumb edge is -Y; this composition maps the palm
-# normal to world up (tilted by INHAND_PALM_TILT_DEG toward +X), the fingers
-# to world -Y, and drops the thumb edge to the lower (+X) side.
+# Hand base orientation (wxyz), composition ``Quat(X, -long_tilt) *
+# Quat(Y, -90deg+roll) * Quat(X, +90deg)``.  In the L20 base frame the fingers
+# extend along +Z, the palm normal is +X and the thumb edge is -Y.  The two
+# right factors are the HORA flat palm-up pose (palm normal up, fingers along
+# world -Y, thumb edge +X) plus the optional thumb-edge-down roll; the leading
+# world-X pitch then raises the palm longitudinal axis (wrist -> middle MCP)
+# by INHAND_LONG_AXIS_TILT_DEG above the horizontal.  At tilt=45/roll=0 the
+# longitudinal axis maps to (0, -0.707, +0.707) (fingertips above the wrist),
+# the palm normal to (0, +0.707, +0.707) (still up-facing), and the thumb
+# edge stays horizontal at +X.
 INHAND_HAND_ROT: tuple[float, float, float, float] = _quat_mul(
-    _quat_from_axis_angle((0.0, 1.0, 0.0), math.radians(-90.0 + INHAND_PALM_TILT_DEG)),
-    _quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(90.0)),
+    _quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(-INHAND_LONG_AXIS_TILT_DEG)),
+    _quat_mul(
+        _quat_from_axis_angle((0.0, 1.0, 0.0), math.radians(-90.0 + INHAND_PALM_ROLL_DEG)),
+        _quat_from_axis_angle((1.0, 0.0, 0.0), math.radians(90.0)),
+    ),
 )
 
 # Object reset position (env-local) = the pregrasp's fingertip-cage centre with
 # a small upward margin so the dropped object settles down into the fingertip
 # cage (never onto the palm).  Both the grasp-gen drop and the main-env
-# canonical fallback use this.
-INHAND_OBJECT_INIT_POS: tuple[float, float, float] = (0.040, -0.187, 0.545)
+# canonical fallback use this.  Seeded by rotating the old cage centre into
+# the new hand orientation; refined from grasp-gen settle diagnostics.
+INHAND_OBJECT_INIT_POS: tuple[float, float, float] = (-0.004, -0.090, 0.675)
 
-# Rotation axis (world frame) = NEGATIVE palm normal.  HORA rewards rotation
-# about world -z with a FLAT palm-up hand, i.e. about -(palm normal); with the
-# palm tilted by INHAND_PALM_TILT_DEG the axis must tilt with it (this reduces
-# to HORA's (0, 0, -1) at zero tilt).  Rewarding rotation about plain world -z
-# with the tilted palm made policies roll the object "downhill" toward the
-# thumb — a spin-fast-and-drop equilibrium (rotate-reward 0.35/step but 100%
-# of episodes ending in falls at ~40 steps).  If learning stalls with rotation
-# reward pinned at/below zero, flip the sign: the natural gait direction can
-# mirror on a left hand.
-INHAND_ROT_AXIS: tuple[float, float, float] = (
-    -math.sin(math.radians(INHAND_PALM_TILT_DEG)),
-    0.0,
-    -math.cos(math.radians(INHAND_PALM_TILT_DEG)),
-)
+# Rotation axis (world frame) = world -z, gravity-aligned, exactly HORA's.
+# Deliberately DECOUPLED from the palm tilt (design decision 2026-07-16): with
+# the axis parallel to gravity the load direction is invariant under the
+# rotation, so every phase of the finger gait sees the same gravity loading —
+# the object spins in place instead of tumbling.  The earlier tilted-axis
+# variant (-(palm normal), 45 deg off gravity) forced the object axis to
+# precess and cycled the load direction through every revolution.
+# History note: with the OLD roll-tilted palm, world -z produced a downhill
+# spin-and-drop exploit (rotate-reward 0.35/step, 100% falls at ~40 steps);
+# the current pitch orientation + thumb-shelf pregrasp blocks the downhill
+# path, but watch for that signature (RotateReward up, EpLen collapsing) when
+# retraining.  If learning stalls with rotation reward pinned at/below zero,
+# flip the sign: the natural gait direction can mirror on a left hand.
+INHAND_ROT_AXIS: tuple[float, float, float] = (0.0, 0.0, -1.0)
 
 INHAND_MIMIC_JOINTS: dict[str, tuple[str, float, float]] = {
     "index_dip": ("index_pip", 0.8917, 0.0),
@@ -227,12 +252,15 @@ def _make_robot_cfg() -> ArticulationCfg:
 
 
 # ---------------------------------------------------------------------------
-# Object mix.  HORA trains on cylinders + cuboids + spheres (sampleProb
-# 0.35 / 0.20 / 0.45).  Per scale we spawn a fixed 9-asset block
-# (3 cylinders + 2 cuboids + 4 spheres ~= that 0.33 / 0.22 / 0.44 split), so the
-# deterministic MultiAssetSpawner (random_choice=False) gives every env a fixed,
-# known (scale, shape).  The grasp cache is generated on CYLINDERS only and
-# reused across shapes at reset (HORA keys the cache by scale, not shape).
+# Object prototypes.  The released HORA config (AllegroHandHora.yaml) trains
+# on a SINGLE cube ("block", sampleProb [1.0]) and generalises zero-shot at
+# deployment; the cyl+cub+sph mix (sampleProb 0.35/0.20/0.45) belongs to the
+# touch-based follow-up work.  The main task now trains cuboid-only to match
+# original HORA (object_kind="cuboid", 2026-07-16 decision — the 3-shape mix's
+# spheres were the dominant failure mode at every stage).  The full shape
+# machinery is retained: switch object_kind back to "mixed" to restore the mix.
+# The deterministic MultiAssetSpawner (random_choice=False) gives every env a
+# fixed, known (scale, shape, prototype).
 MIX_CYLINDER_LENGTHS: tuple[float, ...] = (0.064, 0.080, 0.096)            # 3
 MIX_CUBOID_SIZES: tuple[tuple[float, float, float], ...] = (              # 2
     (0.064, 0.064, 0.080),
@@ -427,21 +455,31 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     # (rotate-reward ~0.37/step, 100% of episodes ending in falls at ~50
     # steps) because dropping cost nothing.  Standard IsaacGymEnvs in-hand
     # practice (AllegroHand fallPenalty).
-    fall_penalty: float = -10.0
-    # Per-step bonus while the object is held.  Without it the phase-1
-    # (rotation weight 0) reward is penalties-only, and terminating early is
-    # cheaper than living with a negative income stream — the policy learns
-    # reward suicide (HoldFrac climbs for ~50 epochs while the critic is
-    # uninformed, then collapses to 0).  Sized so holding is clearly net
-    # positive but rotation (up to +0.5/step) still dominates in phase 3.
-    hold_bonus: float = 0.2
+    # Re-sized -10 -> -25 (2026-07-16): the 1.64B-step rotation-first run
+    # converged to rotate +0.32/step with 54% falls at median ep 140 — at -10
+    # a drop cost barely 30 steps of rotation income, so spin-and-drop stayed
+    # mildly profitable.  -25 prices a fall at roughly half a typical
+    # episode's rotation income.  Total reward is NOT comparable across this
+    # change; judge runs by the probe's rotate-reward/step and fall%.
+    fall_penalty: float = -25.0
+    # Per-step bonus while the object is held.  Its original job was to keep
+    # the reward stream net-positive so the policy never learns reward suicide
+    # (terminating early beats living with penalties-only income).  Sized
+    # 2026-07-16 so idle-holding is roughly reward-NEUTRAL: measured penalty
+    # income is ~-0.12/step, so 0.1 leaves "sit still and collect" worth ~0
+    # while rotation (up to +0.5/step) is the only positive income — the old
+    # 0.2 made idle holding +0.08/step, a comfortable local optimum that
+    # competed with learning to rotate.  Falling stays strictly worse via
+    # fall_penalty.
+    hold_bonus: float = 0.1
     linvel_penalty_scale: float = -0.3
     pose_penalty_scale: float = -0.3
     torque_penalty_scale: float = -0.1
     work_penalty_scale: float = -2.0
     # Fall-termination / grasp-acceptance height: ~3 cm below the settled cage
-    # centre (grasp-gen settled median z = 0.5485 at scale 0.8).
-    reset_height_threshold: float = 0.515
+    # centre (zero-action settle at the 45 deg longitudinal-axis pose parks the
+    # object at z ~ 0.6765 across prototypes; DR-off probe 2026-07-14).
+    reset_height_threshold: float = 0.645
 
     fingers: tuple[str, ...] = ("index", "middle", "ring", "pinky", "thumb")
     pregrasp_positions: dict[str, tuple[float, ...]] = field(
@@ -454,7 +492,9 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     # "mixed" = cylinders+cuboids+spheres (main task); grasp-gen overrides to a
     # single shape.  object_cfg + object_asset_{scale,shape}_idx are (re)built
     # in __post_init__.
-    object_kind: str = "mixed"
+    # "cuboid" = HORA-faithful single-shape training (the released HORA config
+    # trains on one block).  "mixed" restores the cyl+cub+sph grid.
+    object_kind: str = "cuboid"
     object_cfg: RigidObjectCfg = None
     object_asset_scale_idx: list[int] = None
     object_asset_shape_idx: list[int] = None
@@ -471,14 +511,20 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     # gait (HoldFrac collapses to 0 by ~200 epochs); learning to HOLD under
     # the fall penalty first, then ramping the rotation weight, routes around
     # that local optimum.
+    # Single phase, full HORA rotation reward from step 0 (2026-07-16).  The
+    # hold-first curriculum predates the current grasp caches: it existed so a
+    # policy with fragile resets could learn to hold before rotation tempted it
+    # into spin-and-drop.  The regenerated caches hold ~80% of zero-action
+    # episodes to timeout under full DR, so holding now comes free from the
+    # reset state — and the old schedule spent its first 131M steps at reduced
+    # rotation weight, letting the hold bonus dominate what the policy learnt.
+    # The spin-and-drop guards stay active in all phases: fall_penalty,
+    # gamma=0.995 (agent yaml) and the (reduced) hold_bonus.  If the exploit
+    # signature reappears (RotateReward spiking while EpLen collapses in the
+    # first ~500 epochs), reintroduce a SHORT hold-first phase (~8M steps).
     curriculum_phases: list[InhandCurriculumPhaseCfg] = field(
         default_factory=lambda: [
-            # ~epoch 0-500: hold only (fall penalty + regularisers).
-            InhandCurriculumPhaseCfg(step_start=0, reward_turn_weight=0.0),
-            # ~epoch 500-2000: gentle rotation on top of the hold.
-            InhandCurriculumPhaseCfg(step_start=32_768_000, reward_turn_weight=0.3),
-            # ~epoch 2000+: full HORA rotation reward.
-            InhandCurriculumPhaseCfg(step_start=131_072_000, reward_turn_weight=1.0),
+            InhandCurriculumPhaseCfg(step_start=0, reward_turn_weight=1.0),
         ]
     )
 
