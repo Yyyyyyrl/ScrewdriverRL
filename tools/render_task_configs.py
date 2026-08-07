@@ -19,8 +19,13 @@ import json
 import math
 import re
 import traceback
+import sys
 from pathlib import Path
 from typing import Iterable
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from isaaclab.app import AppLauncher
 
@@ -40,6 +45,7 @@ DEFAULT_TASK_IDS: tuple[str, ...] = (
     "Isaac-Allegro-4F-Screwdriver-Rotation-Direct-v0",
     "Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0",
     "Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0",
+    "Isaac-LinkerL20-Screwdriver-Rotation-Topdown",
     "Isaac-LinkerL20-Inhand-Rotation",
     "Isaac-LinkerL20-Inhand-Rotation-Topdown",
 )
@@ -138,6 +144,20 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--joint_pose_file",
+    type=Path,
+    default=None,
+    help="JSON list of 16 finger-joint radians to render INSTEAD of the task's "
+    "configured startup posture. Use to visualise a pose read back from hardware.",
+)
+parser.add_argument(
+    "--hide_object",
+    action="store_true",
+    help="Teleport the screwdriver out of frame after reset so the hand settles "
+    "in FREE SPACE (fingers reach their full commanded targets, not stopped by "
+    "object contact). Use to compare against a hardware free-space ramp.",
+)
+parser.add_argument(
     "--settle_steps",
     type=int,
     default=0,
@@ -145,6 +165,11 @@ parser.add_argument(
         "Step the env this many zero-action policy steps after reset before "
         "capturing, so renders show the physically settled grasp."
     ),
+)
+parser.add_argument("--topdown_posture_search", type=str, default=None)
+parser.add_argument("--topdown_posture_candidate_index", type=int, default=None)
+parser.add_argument(
+    "--fixed_geometry_diameter_mm", type=int, choices=(64,), default=None
 )
 parser.add_argument(
     "--show_viewport",
@@ -296,9 +321,10 @@ def _camera_eye(
     return tuple(float(x) for x in eye)
 
 
-def _compute_focus(base_env, env_idx: int = 0) -> tuple[np.ndarray, float]:
+def _compute_focus(base_env, env_idx: int = 0, hand_only: bool = False) -> tuple[np.ndarray, float]:
     points = []
-    for attr_name in ("allegro", "screwdriver", "object"):
+    attrs = ("allegro",) if hand_only else ("allegro", "screwdriver", "object")
+    for attr_name in attrs:
         asset = getattr(base_env, attr_name, None)
         if asset is None:
             continue
@@ -410,11 +436,32 @@ def _capture_rgb(env, warmup_frames: int) -> np.ndarray:
 def _configure_env(task_id: str):
     env_cfg = parse_env_cfg(task_id, device=args.device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
+    if args.topdown_posture_search is not None:
+        from screwdriver_rl.utils.linker_topdown_candidate_override import (
+            apply_candidate,
+            load_candidate,
+        )
+        posture = load_candidate(
+            args.topdown_posture_search, args.topdown_posture_candidate_index
+        )
+        apply_candidate(
+            env_cfg, posture, fixed_64mm=args.fixed_geometry_diameter_mm == 64
+        )
+    elif args.topdown_posture_candidate_index is not None:
+        raise ValueError(
+            "--topdown_posture_candidate_index requires --topdown_posture_search"
+        )
     env_cfg.viewer.resolution = (args.render_width, args.render_height)
     env_cfg.viewer.cam_prim_path = "/OmniverseKit_Persp"
 
     if not args.domain_rand and hasattr(env_cfg, "domain_rand"):
         env_cfg.domain_rand.enabled = False
+        # The reset contact guard is a training-time resampler (rejects reset
+        # placements with <N fingertip contacts).  For a static single-env config
+        # render at nominal placement it can spuriously exhaust; disable it so the
+        # configured startup posture always renders.
+        if hasattr(env_cfg, "reset_contact_guard_min_fingers"):
+            env_cfg.reset_contact_guard_min_fingers = 0
     if not args.random_start and hasattr(env_cfg, "randomize_obj_start"):
         env_cfg.randomize_obj_start = False
     if args.canonical and hasattr(env_cfg, "load_grasp_cache"):
@@ -506,6 +553,36 @@ def _render_task(task_id: str, views: list[tuple[str, float, float]]) -> dict:
         base_env = env.unwrapped
         env.reset(seed=args.seed)
 
+        if args.hide_object and getattr(base_env, "screwdriver", None) is not None:
+            import torch
+
+            sd = base_env.screwdriver
+            root = sd.data.root_state_w.clone()
+            root[:, 2] += 10.0  # lift 10 m out of frame → no contact, free-space settle
+            sd.write_root_pose_to_sim(root[:, :7])
+            sd.write_root_velocity_to_sim(torch.zeros_like(root[:, 7:13]))
+            print("[render] hide_object: screwdriver teleported out of frame "
+                  "(free-space hand pose)", flush=True)
+
+        if args.joint_pose_file is not None:
+            import json as _json
+
+            import torch
+
+            q16 = _json.loads(args.joint_pose_file.read_text())
+            if not (isinstance(q16, list) and len(q16) == 16):
+                raise ValueError("--joint_pose_file must hold a JSON list of 16 radians")
+            qt = torch.tensor(
+                [q16] * base_env.num_envs, device=base_env.device, dtype=torch.float32
+            )
+            base_env.allegro.write_joint_state_to_sim(
+                qt, torch.zeros_like(qt), joint_ids=base_env._finger_joint_ids
+            )
+            base_env.scene.write_data_to_sim()
+            base_env.sim.step()
+            base_env.scene.update(base_env.sim.get_physics_dt())
+            print(f"[render] joint pose overridden from {args.joint_pose_file}", flush=True)
+
         settle_info = _settle(env, base_env, args.settle_steps)
         if settle_info is not None:
             result["settle"] = settle_info
@@ -525,7 +602,7 @@ def _render_task(task_id: str, views: list[tuple[str, float, float]]) -> dict:
             if grasp_state is not None:
                 env_result["grasp_state"] = grasp_state
 
-            target, radius = _compute_focus(base_env, env_idx=env_idx)
+            target, radius = _compute_focus(base_env, env_idx=env_idx, hand_only=args.hide_object)
             distance = args.distance
             if distance is None:
                 distance = max(args.min_distance, radius * args.radius_scale)

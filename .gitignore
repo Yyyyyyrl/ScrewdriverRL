@@ -46,3 +46,6 @@ outputs/
 /*.jpeg
 /*.mov
 /*.MOV
+
+# Release bundles: 152MB of checkpoints and tarballs, rebuilt by tools/export_policy_package.py
+deliverables/

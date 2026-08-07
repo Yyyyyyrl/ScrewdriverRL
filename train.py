@@ -331,6 +331,16 @@ parser.add_argument(
     help="[Stage 2] Write an intermediate checkpoint every N iters (0 disables).",
 )
 parser.add_argument(
+    "--adapt_action_loss_weight",
+    type=float,
+    default=0.0,
+    help="[Stage 2] Weight on an action-space loss through the frozen actor "
+    "(|actor(proprio, adapter(hist)) - actor(proprio, teacher_latent)|^2) added to "
+    "the latent MSE. Latent MSE weights all latent dims equally, but only the dims "
+    "the action is sensitive to affect deployment; this spends adapter capacity "
+    "there instead. 0 disables.",
+)
+parser.add_argument(
     "--adapt_onpolicy",
     action="store_true",
     help="[Stage 2] Enable on-policy latent refinement (drive the frozen actor "
@@ -367,7 +377,23 @@ parser.add_argument(
     "termination + episode length; per-env dynamics diversity still comes from DR.",
 )
 AppLauncher.add_app_launcher_args(parser)
-args, _ = parser.parse_known_args()
+args, _unknown = parser.parse_known_args()
+# parse_known_args() is required because Kit consumes its own argv, but it also
+# swallows typos and retired flags in total silence.  That has cost this project
+# real runs twice: a `--stage2_phase 1` that never took effect, and a
+# `--run_name` that does not exist here at all (the run directory is `--output`),
+# so an entire A/B wrote to timestamped directories nobody asked for.  A 9-hour
+# training run is too expensive to start with a flag that is quietly doing
+# nothing, so say so loudly.  This warns rather than exits: Kit's own arguments
+# legitimately land here too.
+if _unknown:
+    print(
+        "[train] WARNING: these arguments were not recognised by train.py and "
+        f"have NO effect: {' '.join(_unknown)}\n"
+        "[train]          Check for typos and retired flags before letting a "
+        "long run proceed.",
+        flush=True,
+    )
 args.enable_cameras = args.video
 args.rl_device = getattr(args, "rl_device", None) or args.device or "cuda:0"
 
@@ -760,6 +786,7 @@ def run_stage1(env_cfg, log_dir: str) -> None:
         )
 
     agent_cfg = _load_agent_cfg(env.unwrapped.num_envs, args.rl_device, args.seed, log_dir)
+    _sync_proprio_dim(agent_cfg, env_cfg)
     _register_rl_games(env, agent_cfg)
 
     if args.checkpoint:
@@ -807,6 +834,28 @@ def run_stage1(env_cfg, log_dir: str) -> None:
     env.close()
 
 
+def _sync_proprio_dim(agent_cfg, env_cfg) -> None:
+    """Derive ``network.proprio_dim`` from the task instead of the shared YAML.
+
+    The actor obs is ``[proprio(history_obs_dim * actor_frame_count), extrinsics]``.
+    ``rl_games_ppo_cfg.yaml`` is shared by every LinkerL20 task, so hard-coding a
+    frame count there would silently mis-slice any task that stacks a different
+    number of frames.  Deriving it keeps the split honest for all of them.
+    """
+    net = agent_cfg.get("params", {}).get("network", {})
+    if int(net.get("latent_dim", 0)) <= 0:
+        return  # legacy (non-latent) network: obs is not split
+    hist = int(getattr(env_cfg, "history_obs_dim", 0))
+    frames = int(getattr(env_cfg, "actor_frame_count", 1))
+    if hist <= 0:
+        return
+    want = hist * frames
+    if int(net.get("proprio_dim", want)) != want:
+        print(f"[train] proprio_dim {net.get('proprio_dim')} -> {want} "
+              f"({hist} x {frames} frames, from the task cfg)", flush=True)
+    net["proprio_dim"] = want
+
+
 def _assert_checkpoint_matches_task(ckpt_path: str, env_cfg) -> None:
     """Fail fast if the Stage-1 checkpoint's privileged width doesn't match this task.
 
@@ -823,12 +872,20 @@ def _assert_checkpoint_matches_task(ckpt_path: str, env_cfg) -> None:
     w = model.get("a2c_network.env_mlp.0.weight") if isinstance(model, dict) else None
     if w is None:
         return  # legacy (non-latent) checkpoint — nothing to compare
-    ckpt_priv, task_priv = int(w.shape[1]), int(env_cfg.privileged_obs_dim)
+    # The actor's env_mlp input is the ACTOR's extrinsics tail, which under the
+    # HORA-faithful split (slow_extrinsics_only) is actor_extrinsics_dim, not the
+    # full privileged_obs_dim (that width is the asymmetric critic's, not the
+    # actor's latent encoder's).
+    if getattr(env_cfg, "slow_extrinsics_only", False):
+        task_priv = int(env_cfg.actor_extrinsics_dim)
+    else:
+        task_priv = int(env_cfg.privileged_obs_dim)
+    ckpt_priv = int(w.shape[1])
     if ckpt_priv != task_priv:
         raise ValueError(
-            f"Stage-1 checkpoint privileged dim {ckpt_priv} != task '{args.task}' "
-            f"privileged_obs_dim {task_priv}\n  checkpoint: {ckpt_path}\n"
-            "This checkpoint was trained for a different task (DR vs non-DR). "
+            f"Stage-1 checkpoint actor-extrinsics dim {ckpt_priv} != task "
+            f"'{args.task}' expected {task_priv}\n  checkpoint: {ckpt_path}\n"
+            "This checkpoint was trained for a different task/obs split. "
             "Pass the --checkpoint that matches --task."
         )
 
@@ -873,6 +930,7 @@ def run_stage2(env_cfg, log_dir: str) -> None:
 
     # Build the frozen Stage 1 actor via RL-Games player.
     agent_cfg = _load_agent_cfg(env.unwrapped.num_envs, args.rl_device, args.seed, log_dir)
+    _sync_proprio_dim(agent_cfg, env_cfg)
     _register_rl_games(env, agent_cfg)
     agent_cfg["params"]["load_checkpoint"] = True
     agent_cfg["params"]["load_path"] = args.checkpoint
@@ -905,6 +963,7 @@ def run_stage2(env_cfg, log_dir: str) -> None:
         onpolicy_latent=args.adapt_onpolicy,
         onpolicy_warmup_iters=args.adapt_onpolicy_warmup_iters,
         onpolicy_ramp_iters=args.adapt_onpolicy_ramp_iters,
+        action_loss_weight=args.adapt_action_loss_weight,
     )
     stage2_dir = os.path.join(log_dir, "stage2_nn")
 
@@ -920,6 +979,13 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     latent_dim = int(agent_cfg["params"]["network"].get("latent_dim", 0))
     teacher_latent_fn = None
     actor_with_latent_fn = None
+    actor_mu_grad_fn = None
+    if args.adapt_action_loss_weight > 0.0:
+        # The action-space loss backprops through the actor to reach the latent.
+        # Freezing the actor's parameters keeps those grads from accumulating on
+        # weights the Stage-2 optimiser never steps.
+        for _p in player.model.parameters():
+            _p.requires_grad_(False)
     if latent_dim > 0:
         player.model.eval()
         _model = player.model
@@ -937,6 +1003,14 @@ def run_stage2(env_cfg, log_dir: str) -> None:
                 merged = torch.cat([x[:, :_p], latent], dim=-1)
                 mu = _a.mu_act(_a.mu(_a.actor_mlp(merged)))
                 return torch.clamp(mu, -1.0, 1.0)
+
+        def actor_mu_grad_fn(policy_obs, latent, _m=_model, _a=_a2c, _p=_proprio_dim):
+            """Same trunk, but differentiable wrt ``latent`` (no clamp, so the
+            gradient does not vanish on saturated actions)."""
+            with torch.no_grad():
+                x = _m.norm_obs(policy_obs)
+            merged = torch.cat([x[:, :_p], latent], dim=-1)
+            return _a.mu_act(_a.mu(_a.actor_mlp(merged)))
 
     print(
         f"\n[Stage 2] Task             : {args.task}"
@@ -963,6 +1037,7 @@ def run_stage2(env_cfg, log_dir: str) -> None:
         latent_dim=latent_dim or None,
         teacher_latent_fn=teacher_latent_fn,
         actor_with_latent_fn=actor_with_latent_fn,
+        actor_mu_grad_fn=actor_mu_grad_fn,
     )
     trainer.train()
 

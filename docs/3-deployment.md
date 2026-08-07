@@ -19,15 +19,16 @@ ScrewdriverRL now mirrors this exactly. The LinkerL20 actor consumes
 ```
 actor input = [ proprio(32) , latent(K=8) ]            # NOT the raw euler
 proprio     = [ finger_q(16) , cur_targets(16) ]       # joint encoders + self-state
-latent      = tanh(env_mlp(privileged(19)))            # learned bottleneck
-privileged  = euler(3)+angvel(3)+rel_pos(3)+quat(4)+friction(1)+contactF(5)
+latent      = tanh(env_mlp(privileged(20/22)))         # learned bottleneck
+privileged  = euler(3)+angvel(3)+rel_pos(3)+quat(4)+load(1)
+              +contact_friction(1)+distance_contact_score(5)+geometry(0/2)
 ```
 
 - **Stage 1** (rl_games PPO) trains the actor on the *true* latent
   `tanh(env_mlp(privileged))`. The encoder + concat live in a custom rl_games
   network (`screwdriver_rl/algos/latent_network.py`, the port of HORA's
   `ActorCritic._actor_critic`). The asymmetric critic (`central_value_config`)
-  still sees the full 19-D privileged state.
+  sees the full 20-D (22-D with geometry DR) force-free privileged state.
 - **Stage 2** freezes the actor and trains `ProprioAdaptNet` to reproduce the
   **teacher latent** from the `(30,32)` proprio history (MSE). On-policy
   refinement (after a warmup) drives the frozen actor with the *predicted* latent
@@ -56,7 +57,8 @@ Self-contained, HORA-parity:
 | `actor_arch` | `mlp_units`, `activation`, `proprio_dim`, `latent_dim`, `action_dim`, `normalize_input`, `clip_obs` |
 | `adapter`    | `ProprioAdaptNet` weights (history → `latent_dim`-D latent)           |
 | `net_dims`   | `frame_dim` (32), `hist_len` (30), `out_dim` (= `latent_dim`)         |
-| `config`     | `n_finger`, `action_delta_scale` (0.05), `finger_lower/upper`, `home_targets`, `prop_hist_len`, `history_obs_dim`, `privileged_obs_dim`, `task` |
+| `config`     | action/history dimensions, explicit `proprio_codec`, `observation_semantics_version`, joint bounds/home targets, privileged width, and task |
+| `adaptation_validation` | held-out latent MSE plus diagnostic raw privileged-channel errors; no diagnostic probe weights |
 
 `train.py:_build_deploy_meta` extracts the actor + normaliser from the restored
 rl_games `player.model`; `deploy/policy.py:canonicalize_actor_state(state,
@@ -71,7 +73,7 @@ is intentionally **not** in the bundle — deploy gets the latent from the adapt
 ```python
 from screwdriver_rl.deploy.policy import DeployPolicy
 pol = DeployPolicy("runs/<task>/stage2_nn/deploy.pth", device="cpu")
-pol.reset(finger_q)            # seed cur_targets=home, fill history
+pol.reset(finger_q, effective_target)  # seed from acknowledged hardware target
 targets = pol.act(finger_q)    # 16 absolute joint targets (radians)
 ```
 

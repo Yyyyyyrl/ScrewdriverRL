@@ -118,17 +118,18 @@ python eval.py --task Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0 \
 
 ```bash
 python -m screwdriver_rl.deploy.deploy_linker --checkpoint <stage2_nn/deploy.pth> \
-    --dry-run --max-ticks 50 --ramp-s 1 --record /tmp/dry.csv
+    --hand-joint L20 --calib linker_calib_deploy.json --dry-run \
+    --max-ticks 50 --ramp-s 1 --contact-ramp-s 1 --record /tmp/dry.csv
 ```
 
-Runs the full session (ramp → policy loop → shutdown) against a perfect-tracking
+Runs the full session (safe approach → contact ramp → policy loop → shutdown) against a perfect-tracking
 echo simulator and records the CSV. Commands must stay inside 0..255 with slots
 11–14 at 0.
 
 ## 4. First-power-on checklist (deploy box, strict order)
 
 Keep fingers clear of the hand whenever it is powered. Start with conservative
-`--speed 100 --torque 120` and no screwdriver mounted.
+`--speed 40 --torque 80` and no screwdriver mounted.
 
 ```bash
 alias hc='python -m screwdriver_rl.deploy.hand_check'
@@ -144,11 +145,10 @@ hc wiggle --out linker_calib.json
                               #    what this pins down.
 hc pose --calib linker_calib.json
                               # 5. hold pregrasp; visually compare against the
-                              #    sim render (render_posture.py). The fraction
-                              #    mapping distorts absolute angles when URDF and
-                              #    SDK ranges differ (pip 1.57 vs 1.08) — if the
-                              #    real grasp is visibly more open than sim,
-                              #    adjust the pose or joint ranges before going on.
+                              #    sim render (render_posture.py). Top-down
+                              #    bundles require the 1.08-rad PIP URDF/calibration
+                              #    contract. thumb_cmc_roll may still use fraction
+                              #    mapping because its SDK and URDF zeros differ.
 hc roundtrip --calib linker_calib.json
                               # 6. command↔measure per-joint error table (exit 1
                               #    over --tol 0.15 rad)
@@ -159,25 +159,31 @@ All subcommands accept `--dry-run` to rehearse without hardware.
 ## 5. Live run
 
 ```bash
-# 7. Pre-flight: policy runs on live state, nothing is sent:
+# 7. Pre-flight: policy runs on live state, nothing is sent. The history is
+# seeded from the measured, uncommanded state (never from a fictitious home ACK):
 python -m screwdriver_rl.deploy.deploy_linker --checkpoint <deploy.pth> \
-    --calib linker_calib.json --no-send --max-ticks 50
+    --hand-joint L20 --calib linker_calib_deploy.json \
+    --no-send --max-ticks 50 --record preflight.csv
 
-# 8. Live, bounded, recorded — first WITHOUT the screwdriver:
+# 8. Top-down first live run: mount the exact fixture/tool, keep it bounded,
+# use conservative drive settings and slower-than-default startup ramps:
 python -m screwdriver_rl.deploy.deploy_linker --checkpoint <deploy.pth> \
-    --calib linker_calib.json --max-ticks 100 --record run1.csv
+    --hand-joint L20 --calib linker_calib_deploy.json --speed 40 --torque 80 \
+    --ramp-s 5 --contact-ramp-s 8 --max-ticks 100 --record run1.csv
 
-# 9. Mount the screwdriver in the fixture, then unbounded:
+# 9. Only after reviewing the bounded CSV and emergency-stop rehearsal:
 python -m screwdriver_rl.deploy.deploy_linker --checkpoint <deploy.pth> \
-    --calib linker_calib.json --record run2.csv
+    --hand-joint L20 --calib linker_calib_deploy.json --record run2.csv
 ```
 
 Session behaviour:
 
-- **Startup**: reads state, smooth-ramps to the bundle's pregrasp over
-  `--ramp-s` (default 3 s), re-reads, seeds the policy history — the first
-  policy command is continuous with the ramp by construction.
-- **Loop**: 10 Hz (`--hz`, keep at the training rate). Policy targets are
+- **Startup**: reads state, ramps current→the bundle's collision-safe reset over
+  `--ramp-s`, then reset→contact home over `--contact-ramp-s` (both default 3 s),
+  re-reads, and seeds history from measured joints plus the calibration-quantized
+  acknowledged home. Legacy bundles without a separate reset keep one ramp.
+- **Loop**: uses the control rate declared by the bundle ProprioCodec (10 Hz for
+  mounted Linker policies); a conflicting `--hz` override is rejected. Targets are
   hard-clamped to the bundle's `home ± 0.35 rad` motion window, and each tick
   moves ≤ 0.05 rad per joint.
 - **Watchdog**: `--stale-limit` (default 10) consecutive invalid state reads →

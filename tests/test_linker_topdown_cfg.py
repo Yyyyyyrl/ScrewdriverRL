@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -151,6 +152,14 @@ def test_body_and_cap_visual_collision_diameter_is_64_mm():
         assert _radii(original, link_name) == pytest.approx((0.020, 0.020), abs=1.0e-12)
 
 
+def test_eval_fixed_geometry_flag_validates_already_fixed_64_mm_task():
+    source = EVAL_SCRIPT.read_text()
+    assert '"screwdriver_handle_radius"' in source
+    assert '"assets/screwdriver/screwdriver_64mm_handle.urdf"' in source
+    assert "actual_asset != expected_asset" in source
+    assert "already FIXED 64 mm" in source
+
+
 def test_original_asset_unchanged_and_all_other_xml_values_match():
     assert _sha256(ORIGINAL_ASSET) == ORIGINAL_ASSET_SHA256
     assert _normalised_screwdriver_signature(TOPDOWN_ASSET) == (
@@ -295,8 +304,30 @@ def test_topdown_uses_role_neutral_contact_without_changing_lateral_default():
     assert "index_cap_reward = torch.zeros_like(turn_reward)" in reward_source
     assert "contact_d_margin: float = 0.008" in base_cfg_source
     assert "contact_d_far_margin: float = 0.020" in base_cfg_source
-    for margin in ("0.0070", "0.0060", "0.0095", "0.0290"):
-        assert margin in topdown_source
+    # Per-finger distance-contact margins compensate fixed distal-frame/pad
+    # offsets, so they are a property of the grasp posture and must be refitted
+    # whenever it changes.  Recalibrated 2026-08-06 by
+    # tools/calibrate_linker_l20_topdown_contact_margins.py.  Pinned against the
+    # calibration record so a posture change cannot silently leave a stale table:
+    # under the superseded posture the old pinky margin sat 0.14 mm from the
+    # pinky's frame clearance, reporting contact where physics measured 0.00 N.
+    calibration = json.loads(
+        (
+            ROOT
+            / "records/topdown_posture_refit_20260806/contact_margin_calibration.json"
+        ).read_text()
+    )
+    for finger, margin in (
+        ("index", "0.0098"),
+        ("middle", "0.0108"),
+        ("ring", "0.0125"),
+        ("pinky", "0.0085"),
+        ("thumb", "0.0229"),
+    ):
+        assert f'"{finger}": {margin},' in topdown_source, finger
+        assert calibration["contact_d_margin_by_finger"][finger] == pytest.approx(
+            float(margin), abs=5.0e-5
+        ), finger
 
     # Force amplitudes are diagnostic-only: no force-window, excess-force, or
     # force variable may shape reward/progress, and privileged state is purely
@@ -309,6 +340,14 @@ def test_topdown_uses_role_neutral_contact_without_changing_lateral_default():
     for name in ("F_total", "F_body", "F_cap"):
         assert name not in reward_source
     assert "wrong_force > cfg.wrong_surface_force_threshold" in reward_source
+    # The wrong-surface term must be charged off the BINARY predicate, never off
+    # the force magnitude.  Asserting only that the predicate expression appears
+    # somewhere in the source was not enough: on 2026-08-04 a force-scaled
+    # variant was added on one branch of an `if` while the predicate stayed on
+    # the other, and this test still passed.  Pin the multiplication that is
+    # actually used, and pin the absence of any force-scaled form.
+    assert "wrong_surface_cost = phase.w_wrong * wrong_surface_present" in reward_source
+    assert "phase.w_wrong * wrong_force" not in reward_source
     assert "rewards.target_penetration(" in reward_source
     assert "torch.relu(" in reward_source
     assert "drive_count" in reward_source

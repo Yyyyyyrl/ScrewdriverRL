@@ -1,0 +1,130 @@
+{
+  "candidate_group_index": 89,
+  "candidate_index": 217,
+  "cost": 0.6924399733543396,
+  "fingertip_total_force_max_n": {
+    "index": 6.513015270233154,
+    "middle": 3.5909852981567383,
+    "pinky": 0.0,
+    "ring": 0.2835363447666168,
+    "thumb": 2.107914686203003
+  },
+  "first_done_step": -1,
+  "functional_contact_topology": {
+    "active_role_count": 3,
+    "active_roles": [
+      "index",
+      "middle",
+      "thumb"
+    ],
+    "critical_roles_pass": true,
+    "mean_role_contact_fraction": 0.6259999990463256,
+    "pass": true
+  },
+  "functional_physics_gate": true,
+  "joint_positions_independent": {
+    "index_mcp_pitch": 0.4556297564771439,
+    "index_mcp_roll": -0.054958906913219405,
+    "index_pip": 1.1529319817038308,
+    "middle_mcp_pitch": 0.6158787800367895,
+    "middle_mcp_roll": -0.018606598564048202,
+    "middle_pip": 0.6869579218831299,
+    "pinky_mcp_pitch": 0.9864907947467598,
+    "pinky_mcp_roll": 0.054493006206478393,
+    "pinky_pip": 0.5682229518287033,
+    "ring_mcp_pitch": 0.5258181494699485,
+    "ring_mcp_roll": -0.04132813475266989,
+    "ring_pip": 0.8376548328546151,
+    "thumb_cmc_pitch": 0.12702006657357046,
+    "thumb_cmc_roll": 1.0182041474037682,
+    "thumb_cmc_yaw": 0.7422960433945706,
+    "thumb_mcp": 0.4623390692048188
+  },
+  "label": "preload_0.022_0.034_0.050_0.092_0.079:group=89:replica=1",
+  "physics_contact_gate": false,
+  "proximal_force_max_n": {
+    "hand_base_link": 0.0,
+    "index_metacarpals": 0.0,
+    "index_middle": 0.0,
+    "index_proximal": 0.0,
+    "middle_metacarpals": 0.0,
+    "middle_middle": 0.0,
+    "middle_proximal": 0.0,
+    "pinky_metacarpals": 0.0,
+    "pinky_middle": 0.0,
+    "pinky_proximal": 0.0,
+    "ring_metacarpals": 0.0,
+    "ring_middle": 0.0,
+    "ring_proximal": 0.0,
+    "thumb_metacarpals": 0.0,
+    "thumb_metacarpals_base1": 0.0,
+    "thumb_metacarpals_base2": 0.0,
+    "thumb_proximal": 0.0
+  },
+  "replica_index": 1,
+  "role_contact_fraction": {
+    "index": 1.0,
+    "middle": 1.0,
+    "pinky": 0.0,
+    "ring": 0.12999999523162842,
+    "thumb": 1.0
+  },
+  "role_force_max_n": {
+    "index": 6.513015270233154,
+    "middle": 3.5909852981567383,
+    "pinky": 0.0,
+    "ring": 0.2835363447666168,
+    "thumb": 2.107914686203003
+  },
+  "role_force_mean_n": {
+    "index": 6.081451892852783,
+    "middle": 3.2007129192352295,
+    "pinky": 0.0,
+    "ring": 0.07764783501625061,
+    "thumb": 1.9515163898468018
+  },
+  "root_pos_w": [
+    -0.022042680571335915,
+    0.18713210991024862,
+    1.4668757994541426
+  ],
+  "root_quat_wxyz": [
+    0.5210710588262205,
+    0.47800099545264707,
+    0.5210710588262205,
+    -0.47800099545264707
+  ],
+  "settled_joint_positions_independent": {
+    "index_mcp_pitch": 0.4778038561344147,
+    "index_mcp_roll": -0.05307016894221306,
+    "index_pip": 1.146575689315796,
+    "middle_mcp_pitch": 0.6524247527122498,
+    "middle_mcp_roll": -0.020418547093868256,
+    "middle_pip": 0.6874638199806213,
+    "pinky_mcp_pitch": 1.0288047790527344,
+    "pinky_mcp_roll": 0.05449651926755905,
+    "pinky_pip": 0.5690782070159912,
+    "ring_mcp_pitch": 0.5936771035194397,
+    "ring_mcp_roll": -0.04131074622273445,
+    "ring_pip": 0.8429064750671387,
+    "thumb_cmc_pitch": -0.0008270388352684677,
+    "thumb_cmc_roll": 1.1387498378753662,
+    "thumb_cmc_yaw": 0.6944813132286072,
+    "thumb_mcp": 0.3621411919593811
+  },
+  "settled_screwdriver_joint_positions": {
+    "screwdriver_body_cap_joint": 0.278764933347702,
+    "table_screwdriver_joint_1": -0.054142799228429794,
+    "table_screwdriver_joint_2": -0.04353079944849014,
+    "table_screwdriver_joint_3": 0.08785346895456314
+  },
+  "settled_target_error_max_rad": 0.12784710540883892,
+  "strict_all_finger_physics_gate": false,
+  "terminated": false,
+  "terminated_or_truncated": false,
+  "tilt_max_rad": 0.06982098519802094,
+  "truncated": false,
+  "wrong_surface_force_max_n": 0.0,
+  "zero_action_qualified_shaft_drift_rad_s": 0.0,
+  "zero_action_raw_shaft_drift_rad_s": -0.000372640963178128
+}

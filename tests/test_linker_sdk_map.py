@@ -14,6 +14,7 @@ import os
 import random
 import sys
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -247,3 +248,257 @@ def test_overlay_lo_hi_validation():
         sdkmap.build_joint_table({"joints": {"index_pip": {"hi": True}}})
     with pytest.raises(ValueError, match="hi > lo"):
         sdkmap.build_joint_table({"joints": {"index_pip": {"lo": 1.0, "hi": 0.5}}})
+
+
+# --------------------------------------------------------------------------- #
+# Measured physical raw<->radian LUT support.
+# --------------------------------------------------------------------------- #
+
+def test_index_pip_candidate_lut_uses_one_table_for_command_and_readback():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "linker_calib_index_pip_lut_candidate_20260802.json"
+    )
+    sdkmap.apply_calibration(str(path))
+    specs = sdkmap.active_joints()
+    index = next(i for i, joint in enumerate(specs) if joint.name == "index_pip")
+    joint = specs[index]
+    assert joint.physical_raw_knots[0] == 20.0
+    assert joint.physical_raw_knots[-1] == 255.0
+    assert joint.physical_rad_knots[0] == pytest.approx(1.5387503110826093)
+    assert joint.physical_rad_knots[-1] == 0.0
+
+    expected_commands = {
+        0.0: 255,
+        0.3: 218,
+        0.5280907168623586: 184,
+        0.97: 117,
+        1.08: 101,
+    }
+    for target, expected_raw in expected_commands.items():
+        values = [spec.lo for spec in specs]
+        values[index] = target
+        command = sdkmap.joints16_to_sdk_range(values)
+        assert command[16] == pytest.approx(expected_raw, abs=1)
+        readback = sdkmap.sdk_range_to_joints16(command)
+        assert readback[index] == pytest.approx(target, abs=0.004)
+
+    # The policy's full 0..1.08-rad range stays far above the fault-prone raw end.
+    assert min(expected_commands.values()) >= 100
+    # Readback reports measured physical radians, including outside the policy
+    # range if an external load back-drives the joint beyond its commanded rail.
+    raw20 = [255.0] * 20
+    raw20[16] = 20.0
+    assert sdkmap.sdk_range_to_joints16(raw20)[index] == pytest.approx(
+        1.5387503110826093
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "2026-08-04: same revert as the PIP endpoint contract — the runtime URDF "
+        "carries the vendor (OG) mcp_pitch 1.4 rather than the measured 1.20-1.25, "
+        "so the candidate LUT and the runtime asset no longer agree. The measured "
+        "asset is archived at assets/linker_hand_l20_calibfit/. Note OG is the "
+        "LOOSER bound here (1.4 vs 1.25), but the +-0.35 rad home box caps the "
+        "commanded mcp_pitch at 1.094 rad, below both — so the discrepancy is not "
+        "reachable by the policy. Flip this marker off once the asset is adopted."
+    ),
+)
+def test_index_mcp_pitch_candidate_lut_and_runtime_urdf_use_measured_range():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "linker_calib_index_pip_pitch_lut_candidate_20260802.json"
+    sdkmap.apply_calibration(str(path))
+    specs = sdkmap.active_joints()
+    index = next(
+        i for i, joint in enumerate(specs)
+        if joint.name == "index_mcp_pitch"
+    )
+    joint = specs[index]
+    measured_upper = 1.2504421299201645
+    assert joint.lo == 0.0
+    assert joint.hi == pytest.approx(measured_upper)
+    assert joint.physical_raw_knots[0] == 0.0
+    assert joint.physical_raw_knots[-1] == 255.0
+    assert joint.physical_rad_knots[0] == pytest.approx(measured_upper)
+    assert joint.physical_rad_knots[-1] == 0.0
+
+    expected_commands = {
+        0.0: 255,
+        0.140535: 230,
+        0.5: 158,
+        1.0: 53,
+        1.2: 11,
+        measured_upper: 0,
+    }
+    for target, expected_raw in expected_commands.items():
+        values = [spec.lo for spec in specs]
+        values[index] = target
+        command = sdkmap.joints16_to_sdk_range(values)
+        assert command[1] == pytest.approx(expected_raw, abs=1)
+        readback = sdkmap.sdk_range_to_joints16(command)
+        assert readback[index] == pytest.approx(target, abs=0.003)
+
+    # Values from an older 1.4-rad policy clamp to the measured physical rail
+    # and read back the real angle rather than a fictitious 1.4 rad.
+    values = [spec.lo for spec in specs]
+    values[index] = 1.4
+    command = sdkmap.joints16_to_sdk_range(values)
+    assert command[1] == 0
+    assert sdkmap.sdk_range_to_joints16(command)[index] == pytest.approx(
+        measured_upper
+    )
+
+    urdf = ET.parse(
+        root / "assets/linker_hand_l20/linkerhand_l20_left.urdf"
+    )
+    limit = next(
+        joint_node.find("limit")
+        for joint_node in urdf.getroot().findall("joint")
+        if joint_node.get("name") == "index_mcp_pitch"
+    )
+    assert float(limit.get("lower")) == 0.0
+    assert float(limit.get("upper")) == pytest.approx(measured_upper)
+    default = next(
+        spec
+        for spec in sdkmap.DEFAULT_JOINTS
+        if spec.name == "index_mcp_pitch"
+    )
+    assert default.hi == pytest.approx(measured_upper)
+
+
+def test_thumb_mcp_pitch_candidate_luts_are_physical_and_candidate_only():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "linker_calib_index_thumb_mcp_pitch_lut_candidate_20260802.json"
+    sdkmap.apply_calibration(str(path))
+    specs = sdkmap.active_joints()
+    by_name = {joint.name: (index, joint) for index, joint in enumerate(specs)}
+    measured = {
+        "thumb_cmc_pitch": (0, 0.8100219654624176),
+        "thumb_mcp": (15, 1.252264477797083),
+    }
+    for name, (slot, upper) in measured.items():
+        index, joint = by_name[name]
+        assert joint.lo == 0.0
+        assert joint.hi == pytest.approx(upper)
+        assert joint.physical_raw_knots[0] == 0.0
+        assert joint.physical_raw_knots[-1] == 255.0
+        assert joint.physical_rad_knots[0] == pytest.approx(upper)
+        assert joint.physical_rad_knots[-1] == 0.0
+        for target in (0.0, 0.25 * upper, 0.5 * upper, upper):
+            values = [spec.lo for spec in specs]
+            values[index] = target
+            command = sdkmap.joints16_to_sdk_range(values)
+            readback = sdkmap.sdk_range_to_joints16(command)
+            assert readback[index] == pytest.approx(target, abs=0.004)
+            if target == 0.0:
+                assert command[slot] == 255
+            elif target == upper:
+                assert command[slot] == 0
+
+    # Production defaults are the reviewed OG-local-q range intersected with
+    # unchanged OG geometry.  Full physical LUT knots remain in the deployment
+    # overlay, while these signed rails are shared by training and commands.
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "assets/calibrations/linker_g20_left_semantic_schema_v1.json"
+        ).read_text()
+    )
+    signed = {entry["name"]: entry["position_limit"] for entry in schema["ordered_joints"]}
+    defaults = {joint.name: joint for joint in sdkmap.DEFAULT_JOINTS}
+    for name, joint in defaults.items():
+        assert joint.lo == pytest.approx(signed[name][0], abs=1.0e-12), name
+        assert joint.hi == pytest.approx(signed[name][1], abs=1.0e-12), name
+    assert defaults["thumb_cmc_pitch"].hi == pytest.approx(0.79)
+    assert defaults["thumb_mcp"].hi == pytest.approx(1.05)
+    assert defaults["thumb_cmc_roll"].lo == pytest.approx(0.42)
+
+
+@pytest.mark.parametrize(
+    "entry, message",
+    [
+        (
+            {"physical_lut": {"raw": [20, 20, 255], "rad": [1.5, 1.0, 0.0]}},
+            "raw must be strictly increasing",
+        ),
+        (
+            {"physical_lut": {"raw": [20, 100, 255], "rad": [1.5, 0.5, 0.6]}},
+            "rad must be strictly monotonic",
+        ),
+        (
+            {"physical_lut": {"raw": [20, 255], "rad": [1.0, 0.0]}},
+            "does not span semantic range",
+        ),
+        (
+            {
+                "flip": True,
+                "physical_lut": {"raw": [20, 255], "rad": [1.6, 0.0]},
+            },
+            "cannot be combined with flip",
+        ),
+    ],
+)
+def test_physical_lut_validation(entry, message):
+    with pytest.raises(ValueError, match=message):
+        sdkmap.build_joint_table({"joints": {"index_pip": entry}})
+
+
+def test_physical_lut_supports_increasing_urdf_local_q():
+    """MCP-roll-style local coordinates increase with SDK raw."""
+    overlay = {
+        "joints": {
+            "index_mcp_roll": {
+                "lo": -0.25,
+                "hi": 0.25,
+                "physical_lut": {
+                    "raw": [0, 128, 255],
+                    "rad": [-0.25, 0.0, 0.25],
+                },
+            }
+        }
+    }
+    sdkmap.apply_calibration(overlay)
+    specs = sdkmap.active_joints()
+    index = next(
+        i for i, joint in enumerate(specs) if joint.name == "index_mcp_roll"
+    )
+    for target, expected_raw in ((-0.25, 0), (0.0, 128), (0.25, 255)):
+        values = [spec.lo for spec in specs]
+        values[index] = target
+        command = sdkmap.joints16_to_sdk_range(values)
+        assert command[6] == pytest.approx(expected_raw, abs=1)
+        readback = sdkmap.sdk_range_to_joints16(command)
+        assert readback[index] == pytest.approx(target, abs=0.003)
+
+
+def test_thumb_yaw_phase_c_v2_candidate_lut_roundtrips_and_is_candidate_only():
+    root = Path(__file__).resolve().parents[1]
+    path = root / "linker_calib_phase_c_thumb_yaw_candidate_20260803_v2.json"
+    sdkmap.apply_calibration(str(path))
+    specs = sdkmap.active_joints()
+    index = next(
+        i for i, joint in enumerate(specs) if joint.name == "thumb_cmc_yaw"
+    )
+    joint = specs[index]
+    assert joint.slot == 10
+    assert joint.physical_raw_knots[0] == 17.0
+    assert joint.physical_raw_knots[-1] == 251.0
+    assert joint.physical_rad_knots[0] == pytest.approx(1.3153079831555723)
+    assert joint.physical_rad_knots[-1] == pytest.approx(0.00041670737127360094)
+
+    for target in (joint.lo, 0.0, 0.3, 0.7, 1.2, joint.hi):
+        values = [spec.lo for spec in specs]
+        values[index] = target
+        command = sdkmap.joints16_to_sdk_range(values)
+        assert 17 <= command[10] <= 251
+        readback = sdkmap.sdk_range_to_joints16(command)
+        assert readback[index] == pytest.approx(target, abs=0.004)
+
+    # Loading this candidate does not alter the production defaults.
+    default = next(
+        spec for spec in sdkmap.DEFAULT_JOINTS
+        if spec.name == "thumb_cmc_yaw"
+    )
+    assert default.physical_raw_knots is None

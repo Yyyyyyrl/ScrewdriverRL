@@ -150,8 +150,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
-      upper="1.4"
+      lower="0.0"
+      upper="1.14"
       effort="1"
       velocity="1" />
   </joint>
@@ -204,7 +204,7 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
+      lower="0.03"
       upper="1.57"
       effort="1"
       velocity="1" />
@@ -370,8 +370,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
-      upper="1.4"
+      lower="0.0"
+      upper="1.24"
       effort="1"
       velocity="1" />
   </joint>
@@ -424,7 +424,7 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
+      lower="0.02"
       upper="1.57"
       effort="1"
       velocity="1" />
@@ -590,8 +590,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
-      upper="1.4"
+      lower="0.0"
+      upper="1.24"
       effort="1"
       velocity="1" />
   </joint>
@@ -644,7 +644,7 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
+      lower="0.06"
       upper="1.57"
       effort="1"
       velocity="1" />
@@ -810,8 +810,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
-      upper="1.4"
+      lower="0.0"
+      upper="1.26"
       effort="1"
       velocity="1" />
   </joint>
@@ -864,7 +864,7 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
+      lower="0.04"
       upper="1.57"
       effort="1"
       velocity="1" />
@@ -976,8 +976,8 @@
     <axis
       xyz="-1 0 0" />
     <limit
-      lower="0"
-      upper="1.40"
+      lower="0.0"
+      upper="1.12"
       effort="1"
       velocity="1" />
   </joint>
@@ -1030,7 +1030,7 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
+      lower="0.42"
       upper="1.22"
       effort="1"
       velocity="1" />
@@ -1084,7 +1084,7 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
+      lower="0.0"
       upper="0.79"
       effort="1"
       velocity="1" />
@@ -1138,7 +1138,7 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="0"
+      lower="0.0"
       upper="1.05"
       effort="1"
       velocity="1" />
@@ -1200,5 +1200,42 @@
       joint="thumb_mcp"
       multiplier="1.1619"
       offset="0" />
+  </joint>
+
+  <!-- Fingertip reference frames.
+       Massless frames placed at each finger's apex, expressed in the parent
+       *_distal link frame. Offsets were measured as the apex of the distal
+       STL mesh along the finger (DIP/IP -> tip) axis. Use these as the
+       retargeting task links instead of *_distal (whose origin sits at the
+       DIP/IP joint, not the tip). -->
+  <link name="thumb_tip" />
+  <joint name="thumb_tip_joint" type="fixed">
+    <origin xyz="-0.0143 -0.0014 0.0304" rpy="0 0 0" />
+    <parent link="thumb_distal" />
+    <child link="thumb_tip" />
+  </joint>
+  <link name="index_tip" />
+  <joint name="index_tip_joint" type="fixed">
+    <origin xyz="-0.0165 0 0.0218" rpy="0 0 0" />
+    <parent link="index_distal" />
+    <child link="index_tip" />
+  </joint>
+  <link name="middle_tip" />
+  <joint name="middle_tip_joint" type="fixed">
+    <origin xyz="-0.0165 0 0.0218" rpy="0 0 0" />
+    <parent link="middle_distal" />
+    <child link="middle_tip" />
+  </joint>
+  <link name="ring_tip" />
+  <joint name="ring_tip_joint" type="fixed">
+    <origin xyz="-0.0165 0 0.0218" rpy="0 0 0" />
+    <parent link="ring_distal" />
+    <child link="ring_tip" />
+  </joint>
+  <link name="pinky_tip" />
+  <joint name="pinky_tip_joint" type="fixed">
+    <origin xyz="-0.0165 0 0.0218" rpy="0 0 0" />
+    <parent link="pinky_distal" />
+    <child link="pinky_tip" />
   </joint>
 </robot>

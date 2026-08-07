@@ -84,6 +84,16 @@ parser.add_argument(
     "which will NOT match the training average — training ran with DR on).",
 )
 parser.add_argument(
+    "--bench_dr",
+    action="store_true",
+    help="Bench-realistic regime: keep placement noise (the rig is hand-loaded, so "
+    "that spread is real) but narrow the dynamics ranges to what a printed handle in "
+    "a socket base actually spans. The shipped ranges (load torque up to 13.1x, "
+    "friction 0.6-2.5) were sized for a driven screw and are far wider than the rig, "
+    "so the full-DR fall rate understates what the bench will see. Combine with "
+    "--fixed_geometry_diameter_mm 64 to pin the deployed handle.",
+)
+parser.add_argument(
     "--fixed_geometry_diameter_mm",
     type=int,
     choices=(64,),
@@ -135,6 +145,15 @@ parser.add_argument(
 )
 parser.add_argument("--topdown_posture_search", type=str, default=None)
 parser.add_argument("--topdown_posture_candidate_index", type=int, default=None)
+parser.add_argument(
+    "--robot_urdf",
+    type=str,
+    default=None,
+    help=(
+        "Override the robot URDF after task-config construction. Intended for "
+        "auditable checkpoint replay against a frozen training-time asset."
+    ),
+)
 parser.add_argument(
     "--fixed_start",
     action="store_true",
@@ -217,6 +236,42 @@ parser.add_argument(
     "euler with the proprioceptive-adaptation network's PREDICTION (no privileged "
     "obs), i.e. run the exact deploy-time inference path. Compare against the "
     "oracle (true-euler) run to size the sim-to-deploy gap before hardware.",
+)
+parser.add_argument(
+    "--latent_calib_output",
+    type=str,
+    default=None,
+    help="Record the oracle latent's per-channel mean/std over the run and write "
+    "them to this JSON. The mean is the offline calibration constant for "
+    "--frozen_latent; the std says whether a constant is viable at all (small std "
+    "= the latent encodes slow dynamics params, so freezing is safe).",
+)
+parser.add_argument(
+    "--frozen_latent",
+    type=str,
+    default=None,
+    help="Drive the actor with a CONSTANT latent read from a --latent_calib_output "
+    "JSON, instead of an adapter's per-step prediction. Deployable without Stage 2: "
+    "when the bench has one known screwdriver in one known socket, the dynamics "
+    "params are fixed and known, so no online system-ID is needed. Having no "
+    "feedback loop, a constant cannot compound error into covariate-shift collapse.",
+)
+parser.add_argument(
+    "--frozen_latent_blend",
+    type=float,
+    default=0.0,
+    help="[--frozen_latent + --deploy_eval] Mix the adapter into the constant: "
+    "latent = b*adapter + (1-b)*const. 0 = pure constant (no feedback loop, stable "
+    "but cannot track), 1 = pure adapter (tracks but compounds into collapse). "
+    "Intermediate values trade tracking for loop stability.",
+)
+parser.add_argument(
+    "--latent_ema",
+    type=float,
+    default=0.0,
+    help="[latent gate] Low-pass the driving latent: l_t = e*l_{t-1} + (1-e)*l_raw. "
+    "Damps the adapter's positive feedback loop (error -> wrong action -> state "
+    "drift -> larger error) at the cost of tracking lag. 0 = off.",
 )
 parser.add_argument(
     "--deploy_openloop",
@@ -491,6 +546,12 @@ def main() -> None:
         raise ValueError(
             "--topdown_posture_candidate_index requires --topdown_posture_search"
         )
+    if args.robot_urdf is not None:
+        robot_urdf = Path(args.robot_urdf).expanduser().resolve()
+        if not robot_urdf.is_file():
+            raise FileNotFoundError(f"--robot_urdf does not exist: {robot_urdf}")
+        env_cfg.robot_cfg.spawn.asset_path = str(robot_urdf)
+        print(f"[eval] Robot URDF override: {robot_urdf}", flush=True)
     _apply_fixed_root_bias(env_cfg)
     if args.joint_motion_range is not None:
         if not 0.0 < args.joint_motion_range <= 1.0:
@@ -536,32 +597,82 @@ def main() -> None:
         )
 
     if args.fixed_geometry_diameter_mm is not None:
-        if not getattr(env_cfg.domain_rand, "randomize_geometry", False):
-            raise ValueError(
-                "--fixed_geometry_diameter_mm requires a geometry-randomised "
-                "task configuration"
-            )
         diameter_mm = int(args.fixed_geometry_diameter_mm)
         if diameter_mm != 64:
             raise ValueError(f"unsupported fixed geometry diameter: {diameter_mm}")
-        assets_cfg = list(env_cfg.screwdriver_cfg.spawn.assets_cfg)
-        if len(assets_cfg) != 3:
-            raise ValueError(
-                "fixed top-down geometry expects the 60/64/68 mm three-asset bank"
+        if getattr(env_cfg.domain_rand, "randomize_geometry", False):
+            assets_cfg = list(env_cfg.screwdriver_cfg.spawn.assets_cfg)
+            if len(assets_cfg) != 3:
+                raise ValueError(
+                    "fixed top-down geometry expects the 60/64/68 mm "
+                    "three-asset bank"
+                )
+            env_cfg.screwdriver_cfg.spawn.assets_cfg = [assets_cfg[1]]
+            env_cfg.screwdriver_variants_dir = str(
+                Path(__file__).resolve().parent
+                / "assets/screwdriver/topdown_variants_fixed64"
             )
-        env_cfg.screwdriver_cfg.spawn.assets_cfg = [assets_cfg[1]]
-        env_cfg.screwdriver_variants_dir = str(
-            Path(__file__).resolve().parent
-            / "assets/screwdriver/topdown_variants_fixed64"
-        )
-        print(
-            "[eval] Geometry asset: FIXED 64 mm; dynamics randomisation unchanged",
-            flush=True,
-        )
+            print(
+                "[eval] Geometry asset: FIXED 64 mm; "
+                "dynamics randomisation unchanged",
+                flush=True,
+            )
+        else:
+            expected_radius_m = 0.5 * diameter_mm / 1000.0
+            actual_radius_m = getattr(
+                env_cfg,
+                "screwdriver_handle_radius",
+                None,
+            )
+            expected_asset = (
+                Path(__file__).resolve().parent
+                / "assets/screwdriver/screwdriver_64mm_handle.urdf"
+            ).resolve()
+            actual_asset_value = getattr(
+                env_cfg.screwdriver_cfg.spawn,
+                "asset_path",
+                None,
+            )
+            actual_asset = (
+                None
+                if actual_asset_value is None
+                else Path(actual_asset_value).expanduser().resolve()
+            )
+            if (
+                actual_radius_m is None
+                or not math.isclose(
+                    float(actual_radius_m),
+                    expected_radius_m,
+                    rel_tol=0.0,
+                    abs_tol=1.0e-9,
+                )
+                or actual_asset != expected_asset
+            ):
+                raise ValueError(
+                    "--fixed_geometry_diameter_mm 64 was requested for a "
+                    "non-randomised task, but the task is not the validated "
+                    "fixed-64-mm configuration: "
+                    f"radius={actual_radius_m!r}, asset={actual_asset}"
+                )
+            print(
+                "[eval] Geometry asset: already FIXED 64 mm "
+                "(radius + asset path validated); dynamics randomisation "
+                "unchanged",
+                flush=True,
+            )
 
     if args.no_domain_rand and hasattr(env_cfg, "domain_rand"):
         env_cfg.domain_rand.enabled = False
         print("[eval] Domain randomisation + observation noise: DISABLED", flush=True)
+    if args.bench_dr and hasattr(env_cfg, "domain_rand"):
+        dr = env_cfg.domain_rand
+        dr.screwdriver_load_torque_range = (0.5, 4.0)
+        dr.contact_friction_range = (0.8, 1.6)
+        dr.rotation_damping_range = (0.8, 1.25)
+        dr.tilt_damping_range = (0.8, 1.25)
+        print("[eval] BENCH DR: dynamics narrowed to rig-realistic "
+              "(load 0.5-4.0x, friction 0.8-1.6, damping 0.8-1.25); "
+              "placement noise left at the trained spread", flush=True)
     if args.fixed_start and hasattr(env_cfg, "randomize_obj_start"):
         env_cfg.randomize_obj_start = False
         print("[eval] Screwdriver start angle: FIXED", flush=True)
@@ -600,6 +711,22 @@ def main() -> None:
     agent_cfg_path = os.path.join(os.path.dirname(_agent_module.__file__), _file_name)
     with open(agent_cfg_path) as f:
         agent_cfg = yaml.safe_load(f)
+
+    # The actor obs is [proprio(history_obs_dim * actor_frame_count), extrinsics].
+    # rl_games_ppo_cfg.yaml is shared by every LinkerL20 task and hard-codes a
+    # single-frame proprio_dim, so a frame-stacked task would be sliced at the
+    # wrong offset here and fail to load its own checkpoint.  Derive it from the
+    # task, exactly as train.py does.
+    _net = agent_cfg.get("params", {}).get("network", {})
+    if int(_net.get("latent_dim", 0)) > 0:
+        _hist = int(getattr(env_cfg, "history_obs_dim", 0))
+        _frames = int(getattr(env_cfg, "actor_frame_count", 1))
+        if _hist > 0:
+            _want = _hist * _frames
+            if int(_net.get("proprio_dim", _want)) != _want:
+                print(f"[eval] proprio_dim {_net.get('proprio_dim')} -> {_want} "
+                      f"({_hist} x {_frames} frames, from the task cfg)", flush=True)
+            _net["proprio_dim"] = _want
 
     env_section = agent_cfg["params"].get("env", {})
     clip_obs = float(env_section.get("clip_observations", 5.0))
@@ -656,6 +783,25 @@ def main() -> None:
     latent_mode = bool(getattr(base_env.cfg, "latent_conditioned", False))
     deploy_a2c = None
     deploy_proprio_dim = 0
+    frozen_latent_vec = None
+    # The latent trunk is also needed (without an adapter) to calibrate the
+    # constant latent and to run on it.
+    if latent_mode and (args.frozen_latent or args.latent_calib_output):
+        deploy_a2c = player.model.a2c_network
+        deploy_proprio_dim = int(getattr(deploy_a2c, "proprio_dim",
+                                         base_env.cfg.history_obs_dim))
+        if args.frozen_latent:
+            with open(args.frozen_latent, "r", encoding="utf-8") as stream:
+                _calib = json.load(stream)
+            frozen_latent_vec = torch.tensor(
+                _calib["latent_mean"], dtype=torch.float32, device=args.rl_device
+            ).unsqueeze(0)
+            print(f"[eval] FROZEN LATENT: actor driven by the constant "
+                  f"{list(frozen_latent_vec.shape)[-1]}-D latent from "
+                  f"{args.frozen_latent} (no adapter, no privileged obs)", flush=True)
+        else:
+            print(f"[eval] LATENT CALIBRATION: oracle-driven; recording latent "
+                  f"mean/std → {args.latent_calib_output}", flush=True)
     if args.deploy_eval:
         adapter_path = _resolve_adapter_path(args.checkpoint, args.adapter_checkpoint)
         if adapter_path is None:
@@ -704,6 +850,7 @@ def main() -> None:
         # force-based contact (LinkerL20)
         "eval_drive_count", "eval_in_window", "eval_contact_force",
         "eval_index_cap_force", "eval_idle_count", "eval_wrong_surface_force",
+        "eval_wrong_surface_object_force",
         "eval_max_joint_dev",
         # distance/pad-based contact (Allegro)
         "eval_motion_gate", "eval_pad_gate", "eval_pad_cos",
@@ -748,6 +895,8 @@ def main() -> None:
     term_diam: list[torch.Tensor] = []
     latent_delta_samples: list[torch.Tensor] = []
     latent_action_error_samples: list[torch.Tensor] = []
+    latent_calib_samples: list[torch.Tensor] = []
+    latent_ema_state: torch.Tensor | None = None
     action_trace: list[dict] = []
     calibration_clearance_samples: list[torch.Tensor] = []
     calibration_force_samples: list[torch.Tensor] = []
@@ -766,7 +915,7 @@ def main() -> None:
         # Deployment gate: replace the privileged signal the actor consumes with
         # the adapter's proprioceptive prediction, so the actor runs on exactly
         # the signal it would have on hardware.
-        if adapter is not None and latent_mode:
+        if latent_mode and deploy_a2c is not None:
             # Latent gate: drive the *live* actor trunk with the predicted latent
             # (the exact hardware inference path: mu(actor_mlp([norm(proprio),
             # adapter(hist)]))).  The oracle run (no --deploy_eval) instead uses
@@ -775,10 +924,27 @@ def main() -> None:
             hist = getattr(base_env, "_prop_hist_buf", None)
             with torch.no_grad():
                 xn = player.model.norm_obs(obs_t)
-                latent = adapter(hist)
                 oracle_latent = torch.tanh(
                     deploy_a2c.env_mlp(xn[:, deploy_proprio_dim:])
                 )
+                if frozen_latent_vec is not None:
+                    # Offline-calibrated constant: no per-step estimate, so no
+                    # feedback loop and no compounding error by construction.
+                    latent = frozen_latent_vec.expand_as(oracle_latent)
+                    if adapter is not None and args.frozen_latent_blend > 0.0:
+                        b = args.frozen_latent_blend
+                        latent = b * adapter(hist) + (1.0 - b) * latent
+                elif adapter is not None:
+                    latent = adapter(hist)
+                else:
+                    latent = oracle_latent  # calibration run: oracle-driven
+                if args.latent_ema > 0.0:
+                    e = args.latent_ema
+                    prev = latent_ema_state
+                    latent = latent if prev is None else e * prev + (1.0 - e) * latent
+                    latent_ema_state = latent.detach()
+                if args.latent_calib_output and step >= args.warmup_steps:
+                    latent_calib_samples.append(oracle_latent.detach().clone())
                 merged = torch.cat([xn[:, :deploy_proprio_dim], latent], dim=-1)
                 mu = deploy_a2c.mu_act(deploy_a2c.mu(deploy_a2c.actor_mlp(merged)))
                 oracle_merged = torch.cat(
@@ -899,7 +1065,7 @@ def main() -> None:
                                     int(variant[env_i]) if variant is not None else None
                                 ),
                             })
-            if adapter is not None and latent_mode:
+            if latent_mode and (adapter is not None or frozen_latent_vec is not None):
                 latent_delta_samples.append(
                     (latent - oracle_latent).detach().clone()
                 )
@@ -1037,6 +1203,11 @@ def main() -> None:
                 f"max {wrong_surface_summary['max_n']:.3f} N  |  "
                 f"{100.0 * wrong_surface_summary['fraction_above_0_05_n']:.1f}% > 0.05 N"
             )
+        # Same links, screwdriver contacts only.  The line above counts every
+        # contact source, hand self-collision included, so a large gap between
+        # the two means the spikes are the hand touching itself rather than
+        # a non-fingertip link pressing the handle.
+        print(line("  └ vs object N", "eval_wrong_surface_object_force", "{:.3f}"))
         print(line("MaxJointDev rad", "eval_max_joint_dev", "{:.3f}"))
     else:
         print(line("MotionGate", "eval_motion_gate"))
@@ -1199,6 +1370,38 @@ def main() -> None:
             f"{n_events} events  |  near-termination "
             f"{near_term}/{n_events}  |  near-reset {near_reset}/{n_events}"
         )
+    if latent_calib_samples:
+        _cal = torch.cat(latent_calib_samples, dim=0).float()
+        _mean, _std = _cal.mean(dim=0), _cal.std(dim=0)
+        # Decompose the spread: a constant latent is viable only if the variance
+        # lives BETWEEN envs (fixed per episode -> calibratable, per geometry
+        # bucket if needed), not WITHIN an episode over time.
+        _by_step = torch.stack(latent_calib_samples, dim=0).float()  # (T, N, K)
+        _temporal_std = _by_step.std(dim=0).mean(dim=0)      # per-channel, over time
+        _inter_env_std = _by_step.mean(dim=0).std(dim=0)     # per-channel, across envs
+        calib = {
+            "latent_mean": _mean.cpu().tolist(),
+            "latent_std": _std.cpu().tolist(),
+            "latent_std_mean": float(_std.mean().item()),
+            "temporal_std": _temporal_std.cpu().tolist(),
+            "temporal_std_mean": float(_temporal_std.mean().item()),
+            "inter_env_std": _inter_env_std.cpu().tolist(),
+            "inter_env_std_mean": float(_inter_env_std.mean().item()),
+            "samples": int(_cal.shape[0]),
+            "source_checkpoint": args.checkpoint,
+            "domain_rand": not args.no_domain_rand,
+        }
+        with open(args.latent_calib_output, "w", encoding="utf-8") as stream:
+            json.dump(calib, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        print(f"\n[eval] Latent calibration → {args.latent_calib_output}\n"
+              f"       per-channel std: "
+              f"{[round(v, 3) for v in calib['latent_std']]}\n"
+              f"       mean std {calib['latent_std_mean']:.3f}  "
+              f"(small ⇒ latent is slow-varying ⇒ a frozen constant is viable)",
+              flush=True)
+        report["latent_calibration"] = calib
+
     if latent_delta_samples:
         delta = torch.cat(latent_delta_samples, dim=0).float()
         action_error = torch.cat(latent_action_error_samples).float()

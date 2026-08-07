@@ -1,0 +1,746 @@
+{
+  "allow_reset_root_retarget": false,
+  "allow_reset_root_yaw_retarget": false,
+  "base_candidate": {
+    "candidate_group_index": 0,
+    "candidate_index": 0,
+    "cost": 1034.8067626953125,
+    "fingertip_total_force_max_n": {
+      "index": 3.9719436168670654,
+      "middle": 4.390655517578125,
+      "pinky": 5.298586368560791,
+      "ring": 5.276544094085693,
+      "thumb": 10.45970630645752
+    },
+    "first_done_step": 298,
+    "functional_contact_topology": {
+      "active_role_count": 5,
+      "active_roles": [
+        "index",
+        "middle",
+        "ring",
+        "pinky",
+        "thumb"
+      ],
+      "critical_roles_pass": true,
+      "mean_role_contact_fraction": 0.9689999938011169,
+      "pass": true
+    },
+    "functional_physics_gate": false,
+    "joint_positions_independent": {
+      "index_mcp_pitch": 0.5461605996458497,
+      "index_mcp_roll": 0.05414624541908073,
+      "index_pip": 0.9885106328788478,
+      "middle_mcp_pitch": 0.7656786579772658,
+      "middle_mcp_roll": 0.0006154768077150623,
+      "middle_pip": 1.372393166378685,
+      "pinky_mcp_pitch": 0.7322323193351579,
+      "pinky_mcp_roll": 0.0458935652917647,
+      "pinky_pip": 1.14897143528816,
+      "ring_mcp_pitch": 0.6507791025586955,
+      "ring_mcp_roll": -0.015733775224370507,
+      "ring_pip": 0.7018963003365457,
+      "thumb_cmc_pitch": 0.20380961699860453,
+      "thumb_cmc_roll": 1.0608869680859287,
+      "thumb_cmc_yaw": 0.89291068971524,
+      "thumb_mcp": 0.31407836112665954
+    },
+    "label": "A:group=0:replica=0",
+    "physics_contact_gate": false,
+    "proximal_force_max_n": {
+      "hand_base_link": 0.0,
+      "index_metacarpals": 0.0,
+      "index_middle": 0.0,
+      "index_proximal": 0.0,
+      "middle_metacarpals": 0.0,
+      "middle_middle": 0.0,
+      "middle_proximal": 0.0,
+      "pinky_metacarpals": 0.0,
+      "pinky_middle": 0.0,
+      "pinky_proximal": 0.0,
+      "ring_metacarpals": 0.0,
+      "ring_middle": 0.0,
+      "ring_proximal": 0.0,
+      "thumb_metacarpals": 0.0,
+      "thumb_metacarpals_base1": 0.0,
+      "thumb_metacarpals_base2": 0.0,
+      "thumb_proximal": 0.0
+    },
+    "replica_index": 0,
+    "role_contact_fraction": {
+      "index": 0.9975000023841858,
+      "middle": 0.9975000023841858,
+      "pinky": 1.0,
+      "ring": 0.8499999642372131,
+      "thumb": 1.0
+    },
+    "role_force_max_n": {
+      "index": 3.9719436168670654,
+      "middle": 4.390655517578125,
+      "pinky": 5.298586368560791,
+      "ring": 5.276544094085693,
+      "thumb": 10.45970630645752
+    },
+    "role_force_mean_n": {
+      "index": 1.6146187782287598,
+      "middle": 3.7763826847076416,
+      "pinky": 3.5359227657318115,
+      "ring": 1.3263863325119019,
+      "thumb": 3.71626615524292
+    },
+    "root_pos_w": [
+      -0.023818780134293113,
+      0.1742023017880395,
+      1.4570639296862542
+    ],
+    "root_quat_wxyz": [
+      0.520240224512027,
+      0.47890511461006113,
+      0.520240224512027,
+      -0.47890511461006113
+    ],
+    "settled_joint_positions_independent": {
+      "index_mcp_pitch": 0.5674536228179932,
+      "index_mcp_roll": 0.06724756956100464,
+      "index_pip": 0.96583092212677,
+      "middle_mcp_pitch": 0.7676748037338257,
+      "middle_mcp_roll": 0.0002648397348821163,
+      "middle_pip": 1.329223394393921,
+      "pinky_mcp_pitch": 0.7260220646858215,
+      "pinky_mcp_roll": 0.0343245305120945,
+      "pinky_pip": 1.0968936681747437,
+      "ring_mcp_pitch": 0.6965070962905884,
+      "ring_mcp_roll": -0.02156820520758629,
+      "ring_pip": 0.7042067050933838,
+      "thumb_cmc_pitch": 0.02593502774834633,
+      "thumb_cmc_roll": 1.1048424243927002,
+      "thumb_cmc_yaw": 0.7460309267044067,
+      "thumb_mcp": 0.24252909421920776
+    },
+    "settled_screwdriver_joint_positions": {
+      "screwdriver_body_cap_joint": 0.15931765735149384,
+      "table_screwdriver_joint_1": -0.040728144347667694,
+      "table_screwdriver_joint_2": 0.010731654241681099,
+      "table_screwdriver_joint_3": 0.07812047004699707
+    },
+    "settled_target_error_max_rad": 0.1778745892502582,
+    "strict_all_finger_physics_gate": false,
+    "terminated": false,
+    "terminated_or_truncated": true,
+    "tilt_max_rad": 0.05218949168920517,
+    "truncated": true,
+    "wrong_surface_force_max_n": 0.0,
+    "zero_action_qualified_shaft_drift_rad_s": 0.003962263930588961,
+    "zero_action_raw_shaft_drift_rad_s": 0.006576045416295528
+  },
+  "candidate_as_target": true,
+  "candidate_bank": "/tmp/claude-1000/-home-user-dex-forge/c28006ed-89eb-4321-8443-2f52233f4e0c/scratchpad/bank_A.json",
+  "collision_offsets": {
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions/ring_distal/node_STL_BINARY_": {
+      "applied_schemas": [
+        "PhysxCollisionAPI",
+        "PhysicsCollisionAPI",
+        "PhysicsMeshCollisionAPI"
+      ],
+      "contact_offset_m": 0.0002500000118743628,
+      "physx_collision_api_applied": true,
+      "prim_type": "Xform",
+      "rest_offset_m": 0.0
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions/ring_middle/node_STL_BINARY_": {
+      "applied_schemas": [
+        "PhysxCollisionAPI",
+        "PhysicsCollisionAPI",
+        "PhysicsMeshCollisionAPI"
+      ],
+      "contact_offset_m": 0.0002500000118743628,
+      "physx_collision_api_applied": true,
+      "prim_type": "Xform",
+      "rest_offset_m": 0.0
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_body/collisions/mesh_0/cylinder": {
+      "applied_schemas": [
+        "PhysxCollisionAPI",
+        "PhysicsCollisionAPI"
+      ],
+      "contact_offset_m": 0.0010000000474974513,
+      "physx_collision_api_applied": true,
+      "prim_type": "Cylinder",
+      "rest_offset_m": 0.0
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_cap/collisions/mesh_0/cylinder": {
+      "applied_schemas": [
+        "PhysxCollisionAPI",
+        "PhysicsCollisionAPI"
+      ],
+      "contact_offset_m": 0.0010000000474974513,
+      "physx_collision_api_applied": true,
+      "prim_type": "Cylinder",
+      "rest_offset_m": 0.0
+    }
+  },
+  "collision_prim_paths": [
+    "/World/envs/env_0/LinkerHand/hand_base_link/collisions/hand_base_link/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/index_metacarpals/collisions/index_metacarpals/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/index_proximal/collisions/index_proximal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/index_middle/collisions/index_middle/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/index_distal/collisions/index_distal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/middle_metacarpals/collisions/middle_metacarpals/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/middle_proximal/collisions/middle_proximal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/middle_middle/collisions/middle_middle/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/middle_distal/collisions/middle_distal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/pinky_metacarpals/collisions/pinky_metacarpals/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/pinky_proximal/collisions/pinky_proximal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/pinky_middle/collisions/pinky_middle/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/pinky_distal/collisions/pinky_distal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/ring_metacarpals/collisions/ring_metacarpals/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/ring_proximal/collisions/ring_proximal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions/ring_middle/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions/ring_distal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/thumb_metacarpals_base2/collisions/thumb_metacarpals_base2/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/thumb_metacarpals_base1/collisions/thumb_metacarpals_base1/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/thumb_metacarpals/collisions/thumb_metacarpals/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/thumb_proximal/collisions/thumb_proximal/node_STL_BINARY_",
+    "/World/envs/env_0/LinkerHand/thumb_distal/collisions/thumb_distal/node_STL_BINARY_",
+    "/World/envs/env_0/Screwdriver/screwdriver_stick/collisions/mesh_0/cylinder",
+    "/World/envs/env_0/Screwdriver/screwdriver_body/collisions/mesh_0/cylinder",
+    "/World/envs/env_0/Screwdriver/screwdriver_cap/collisions/mesh_0/cylinder"
+  ],
+  "device": "cuda:0",
+  "domain_randomization_enabled": true,
+  "drift_cost_weight": 20.0,
+  "env_spacing_m": 0.0,
+  "focus_finger": null,
+  "focus_root_span_scale": 0.0,
+  "force_roles": {
+    "index": "any_screwdriver_part",
+    "middle": "any_screwdriver_part",
+    "pinky": "any_screwdriver_part",
+    "ring": "any_screwdriver_part",
+    "thumb": "any_screwdriver_part"
+  },
+  "functional_contact_gate_spec": {
+    "active_role_fraction": 0.8,
+    "critical_roles": [],
+    "mean_role_fraction_is_diagnostic_only": true,
+    "minimum_active_role_count": 3,
+    "minimum_critical_role_fraction": 0.0,
+    "safety_limits_unchanged_from_strict_gate": true
+  },
+  "functional_passing_candidate_count_in_top_k": 0,
+  "geometry_variant_index": 1,
+  "initial_candidate_index": null,
+  "initial_search": "/tmp/claude-1000/-home-user-dex-forge/c28006ed-89eb-4321-8443-2f52233f4e0c/scratchpad/resetjson_A.json",
+  "joint_span_scale": 1.0,
+  "max_reset_root_retarget_m": 0.01,
+  "max_reset_root_yaw_retarget_rad": 0.02,
+  "max_zero_action_drift_rad_s": 0.005,
+  "measure_steps": 400,
+  "named_prim_audit": {
+    "/World/envs/env_0/LinkerHand/ring_distal": {
+      "applied_schemas": [
+        "PhysxRigidBodyAPI",
+        "PhysxContactReportAPI",
+        "PhysicsRigidBodyAPI",
+        "PhysicsMassAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions/ring_distal": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions/ring_distal/node_STL_BINARY_": {
+      "applied_schemas": [
+        "PhysxCollisionAPI",
+        "PhysicsCollisionAPI",
+        "PhysicsMeshCollisionAPI"
+      ],
+      "is_collision": true,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions/ring_distal/node_STL_BINARY_/Looks": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Scope"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions/ring_distal/node_STL_BINARY_/Looks/DefaultMaterial": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Material"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions/ring_distal/node_STL_BINARY_/Looks/DefaultMaterial/DefaultMaterial": {
+      "applied_schemas": [
+        "NodeDefAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Shader"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/collisions/ring_distal/node_STL_BINARY_/mesh": {
+      "applied_schemas": [
+        "MaterialBindingAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Mesh"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/visuals": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/visuals/ring_distal": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/visuals/ring_distal/node_STL_BINARY_": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/visuals/ring_distal/node_STL_BINARY_/Looks": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Scope"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/visuals/ring_distal/node_STL_BINARY_/Looks/DefaultMaterial": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Material"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/visuals/ring_distal/node_STL_BINARY_/Looks/DefaultMaterial/DefaultMaterial": {
+      "applied_schemas": [
+        "NodeDefAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Shader"
+    },
+    "/World/envs/env_0/LinkerHand/ring_distal/visuals/ring_distal/node_STL_BINARY_/mesh": {
+      "applied_schemas": [
+        "MaterialBindingAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Mesh"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle": {
+      "applied_schemas": [
+        "PhysxRigidBodyAPI",
+        "PhysxContactReportAPI",
+        "PhysicsRigidBodyAPI",
+        "PhysicsMassAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions/ring_middle": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions/ring_middle/node_STL_BINARY_": {
+      "applied_schemas": [
+        "PhysxCollisionAPI",
+        "PhysicsCollisionAPI",
+        "PhysicsMeshCollisionAPI"
+      ],
+      "is_collision": true,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions/ring_middle/node_STL_BINARY_/Looks": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Scope"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions/ring_middle/node_STL_BINARY_/Looks/DefaultMaterial": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Material"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions/ring_middle/node_STL_BINARY_/Looks/DefaultMaterial/DefaultMaterial": {
+      "applied_schemas": [
+        "NodeDefAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Shader"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/collisions/ring_middle/node_STL_BINARY_/mesh": {
+      "applied_schemas": [
+        "MaterialBindingAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Mesh"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/visuals": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/visuals/ring_middle": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/visuals/ring_middle/node_STL_BINARY_": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/visuals/ring_middle/node_STL_BINARY_/Looks": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Scope"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/visuals/ring_middle/node_STL_BINARY_/Looks/DefaultMaterial": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Material"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/visuals/ring_middle/node_STL_BINARY_/Looks/DefaultMaterial/DefaultMaterial": {
+      "applied_schemas": [
+        "NodeDefAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Shader"
+    },
+    "/World/envs/env_0/LinkerHand/ring_middle/visuals/ring_middle/node_STL_BINARY_/mesh": {
+      "applied_schemas": [
+        "MaterialBindingAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Mesh"
+    },
+    "/World/envs/env_0/Screwdriver/joints/screwdriver_body_cap_joint": {
+      "applied_schemas": [
+        "PhysxJointAPI",
+        "PhysicsDriveAPI:angular"
+      ],
+      "is_collision": false,
+      "prim_type": "PhysicsRevoluteJoint"
+    },
+    "/World/envs/env_0/Screwdriver/joints/screwdriver_body_marker_joint": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "PhysicsFixedJoint"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_body": {
+      "applied_schemas": [
+        "PhysxRigidBodyAPI",
+        "PhysxContactReportAPI",
+        "PhysicsRigidBodyAPI",
+        "PhysicsMassAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_body/collisions": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_body/collisions/mesh_0": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_body/collisions/mesh_0/cylinder": {
+      "applied_schemas": [
+        "PhysxCollisionAPI",
+        "PhysicsCollisionAPI"
+      ],
+      "is_collision": true,
+      "prim_type": "Cylinder"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_body/visuals": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_body/visuals/mesh_0": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_body/visuals/mesh_0/cylinder": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Cylinder"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_cap": {
+      "applied_schemas": [
+        "PhysxRigidBodyAPI",
+        "PhysxContactReportAPI",
+        "PhysicsRigidBodyAPI",
+        "PhysicsMassAPI"
+      ],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_cap/collisions": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_cap/collisions/mesh_0": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_cap/collisions/mesh_0/cylinder": {
+      "applied_schemas": [
+        "PhysxCollisionAPI",
+        "PhysicsCollisionAPI"
+      ],
+      "is_collision": true,
+      "prim_type": "Cylinder"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_cap/visuals": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_cap/visuals/mesh_0": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Xform"
+    },
+    "/World/envs/env_0/Screwdriver/screwdriver_cap/visuals/mesh_0/cylinder": {
+      "applied_schemas": [],
+      "is_collision": false,
+      "prim_type": "Cylinder"
+    }
+  },
+  "num_candidates": 1,
+  "num_environments": 256,
+  "passing_candidate_count_in_top_k": 0,
+  "ramp_reset_target": true,
+  "release_physics_gate_field": "functional_physics_gate",
+  "release_settle_steps": 0,
+  "repeat_initial": false,
+  "replica_layout": "contiguous",
+  "replicas_per_candidate": 256,
+  "reset_candidate_index": null,
+  "reset_physics_steps": 32,
+  "reset_root_retarget_max_m": null,
+  "reset_root_yaw_retarget_max_rad": null,
+  "reset_screwdriver_tilt_xy_rad": [
+    0.0,
+    0.0
+  ],
+  "reset_search": null,
+  "reset_target_blend": 0.0,
+  "reset_use_initial_settled": false,
+  "reset_use_settled_candidate": false,
+  "ring_middle_contact_audit_filter_count": null,
+  "ring_middle_contact_audit_max_n": null,
+  "root_span_scale": 1.0,
+  "root_yaw_offset_rad": 0.0,
+  "runtime_initial_link_poses_xyzw_or_wxyz_per_isaac_tensor": {
+    "hand_root": [
+      -0.02381877228617668,
+      0.1742023229598999,
+      1.457063913345337,
+      0.5202401876449585,
+      0.4789051115512848,
+      0.5202402472496033,
+      -0.4789051115512848
+    ],
+    "ring_middle": [
+      0.00959923304617405,
+      -0.02194831147789955,
+      1.449993371963501,
+      0.11384012550115585,
+      0.663494884967804,
+      0.7322394847869873,
+      -0.10315249115228653
+    ],
+    "screwdriver_body": [
+      -0.00899999774992466,
+      -2.2950930114839154e-17,
+      1.3050000667572021,
+      1.0,
+      5.737732363273666e-17,
+      7.574781690777854e-09,
+      -7.574781690777854e-09
+    ],
+    "screwdriver_cap": [
+      -0.00899999588727951,
+      -4.590185361223341e-17,
+      1.40500009059906,
+      0.9999999403953552,
+      1.1475463403058352e-16,
+      1.514956338155571e-08,
+      -7.574780802599435e-09
+    ]
+  },
+  "search_half_span_root_m_then_joints_rad": [
+    0.0025,
+    0.0025,
+    0.002,
+    0.02,
+    0.05,
+    0.08,
+    0.025,
+    0.08,
+    0.1,
+    0.025,
+    0.08,
+    0.1,
+    0.02,
+    0.08,
+    0.1,
+    0.06,
+    0.06,
+    0.06,
+    0.06
+  ],
+  "seed": 20260807,
+  "settle_steps": 90,
+  "task": "Isaac-LinkerL20-Screwdriver-Rotation-Topdown",
+  "top_candidates": [
+    {
+      "candidate_group_index": 0,
+      "candidate_index": 219,
+      "cost": 1000.024658203125,
+      "fingertip_total_force_max_n": {
+        "index": 4.240704536437988,
+        "middle": 4.529750823974609,
+        "pinky": 6.438050746917725,
+        "ring": 4.426119327545166,
+        "thumb": 5.188601970672607
+      },
+      "first_done_step": 298,
+      "functional_contact_topology": {
+        "active_role_count": 5,
+        "active_roles": [
+          "index",
+          "middle",
+          "ring",
+          "pinky",
+          "thumb"
+        ],
+        "critical_roles_pass": true,
+        "mean_role_contact_fraction": 0.984499990940094,
+        "pass": true
+      },
+      "functional_physics_gate": false,
+      "joint_positions_independent": {
+        "index_mcp_pitch": 0.5461605996458497,
+        "index_mcp_roll": 0.05414624541908073,
+        "index_pip": 0.9885106328788478,
+        "middle_mcp_pitch": 0.7656786579772658,
+        "middle_mcp_roll": 0.0006154768077150623,
+        "middle_pip": 1.372393166378685,
+        "pinky_mcp_pitch": 0.7322323193351579,
+        "pinky_mcp_roll": 0.0458935652917647,
+        "pinky_pip": 1.14897143528816,
+        "ring_mcp_pitch": 0.6507791025586955,
+        "ring_mcp_roll": -0.015733775224370507,
+        "ring_pip": 0.7018963003365457,
+        "thumb_cmc_pitch": 0.20380961699860453,
+        "thumb_cmc_roll": 1.0608869680859287,
+        "thumb_cmc_yaw": 0.89291068971524,
+        "thumb_mcp": 0.31407836112665954
+      },
+      "label": "A:group=0:replica=219",
+      "physics_contact_gate": false,
+      "proximal_force_max_n": {
+        "hand_base_link": 0.0,
+        "index_metacarpals": 0.0,
+        "index_middle": 0.0,
+        "index_proximal": 0.0,
+        "middle_metacarpals": 0.0,
+        "middle_middle": 0.0,
+        "middle_proximal": 0.0,
+        "pinky_metacarpals": 0.0,
+        "pinky_middle": 0.0,
+        "pinky_proximal": 0.0,
+        "ring_metacarpals": 0.0,
+        "ring_middle": 0.0,
+        "ring_proximal": 0.0,
+        "thumb_metacarpals": 0.0,
+        "thumb_metacarpals_base1": 0.0,
+        "thumb_metacarpals_base2": 0.0,
+        "thumb_proximal": 0.0
+      },
+      "replica_index": 219,
+      "role_contact_fraction": {
+        "index": 0.9824999570846558,
+        "middle": 0.9975000023841858,
+        "pinky": 1.0,
+        "ring": 0.9424999952316284,
+        "thumb": 1.0
+      },
+      "role_force_max_n": {
+        "index": 4.240704536437988,
+        "middle": 4.529750823974609,
+        "pinky": 6.438050746917725,
+        "ring": 4.426119327545166,
+        "thumb": 5.188601970672607
+      },
+      "role_force_mean_n": {
+        "index": 1.475440502166748,
+        "middle": 3.5414395332336426,
+        "pinky": 3.9897565841674805,
+        "ring": 0.9434889554977417,
+        "thumb": 3.7021872997283936
+      },
+      "root_pos_w": [
+        -0.023818780134293113,
+        0.1742023017880395,
+        1.4570639296862542
+      ],
+      "root_quat_wxyz": [
+        0.520240224512027,
+        0.47890511461006113,
+        0.520240224512027,
+        -0.47890511461006113
+      ],
+      "settled_joint_positions_independent": {
+        "index_mcp_pitch": 0.5855289697647095,
+        "index_mcp_roll": 0.05521190166473389,
+        "index_pip": 0.9715384244918823,
+        "middle_mcp_pitch": 0.7629073858261108,
+        "middle_mcp_roll": 0.00038758799200877547,
+        "middle_pip": 1.3255177736282349,
+        "pinky_mcp_pitch": 0.7292321920394897,
+        "pinky_mcp_roll": 0.03799906000494957,
+        "pinky_pip": 1.0986249446868896,
+        "ring_mcp_pitch": 0.717414140701294,
+        "ring_mcp_roll": -0.01719645969569683,
+        "ring_pip": 0.7122697830200195,
+        "thumb_cmc_pitch": 0.03941258415579796,
+        "thumb_cmc_roll": 1.0902234315872192,
+        "thumb_cmc_yaw": 0.7482737898826599,
+        "thumb_mcp": 0.24320439994335175
+      },
+      "settled_screwdriver_joint_positions": {
+        "screwdriver_body_cap_joint": 0.617357075214386,
+        "table_screwdriver_joint_1": -0.051472146064043045,
+        "table_screwdriver_joint_2": -0.003075318643823266,
+        "table_screwdriver_joint_3": -0.3499378263950348
+      },
+      "settled_target_error_max_rad": 0.16439703284280657,
+      "strict_all_finger_physics_gate": false,
+      "terminated": false,
+      "terminated_or_truncated": true,
+      "tilt_max_rad": 0.05267062410712242,
+      "truncated": true,
+      "wrong_surface_force_max_n": 0.0,
+      "zero_action_qualified_shaft_drift_rad_s": -0.002034595934674144,
+      "zero_action_raw_shaft_drift_rad_s": 5.048690582043491e-05
+    }
+  ],
+  "use_settled_candidate": false
+}

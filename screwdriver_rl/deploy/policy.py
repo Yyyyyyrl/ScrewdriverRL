@@ -11,7 +11,8 @@ A Stage-2 ``deploy.pth`` bundle is self-contained::
       "adapter":    <ProprioAdaptNet state dict (history → latent)>,
       "net_dims":   {frame_dim, hist_len, out_dim(=latent_dim)},
       "config":     {n_finger, action_delta_scale, finger_lower, finger_upper,
-                     home_targets, prop_hist_len, history_obs_dim, task},
+                     home_targets, startup_reset_targets, proprio_codec,
+                     prop_hist_len, history_obs_dim, task, deployment_geometry_*},
     }
 
 ``DeployPolicy.act(finger_q)`` consumes *only* proprioception — joint encoders
@@ -37,6 +38,7 @@ import torch
 import torch.nn as nn
 
 from screwdriver_rl.algos.proprio_adapt import ProprioAdaptNet
+from screwdriver_rl.deploy.codecs import ProprioCodec, ProprioCodecSpec
 
 _ACTIVATIONS = {
     "elu": nn.ELU,
@@ -45,6 +47,38 @@ _ACTIVATIONS = {
     "selu": nn.SELU,
     "gelu": nn.GELU,
 }
+
+
+def nominal_geometry_row_index(geometry_scales, row_count: int) -> int:
+    """Return the unique ``[1, 1, ...]`` geometry row used for deployment.
+
+    A missing geometry table denotes a single legacy posture row and therefore
+    selects row zero. Geometry-aware bundles must carry an explicit nominal row;
+    silently choosing cyclic row zero would deploy the 60 mm posture for the
+    60/64/68 mm top-down bank.
+    """
+
+    if row_count <= 0:
+        raise ValueError("row_count must be positive")
+    if geometry_scales is None:
+        return 0
+    scales = torch.as_tensor(geometry_scales, dtype=torch.float32)
+    if scales.ndim != 2 or scales.shape[0] != row_count or scales.shape[1] < 1:
+        raise ValueError(
+            "geometry_scales must have shape (row_count, geometry_dim)"
+        )
+    nominal = torch.isclose(
+        scales,
+        torch.ones_like(scales),
+        atol=1.0e-6,
+        rtol=0.0,
+    ).all(dim=-1)
+    matches = torch.nonzero(nominal, as_tuple=False).flatten()
+    if matches.numel() != 1:
+        raise RuntimeError(
+            "geometry_scales must contain exactly one nominal all-ones row"
+        )
+    return int(matches.item())
 
 
 class RunningMeanStd(nn.Module):
@@ -157,6 +191,39 @@ class DeployPolicy:
         cfg = dict(bundle.get("config", {}))
         self.cfg = cfg
 
+        task_name = str(cfg.get("task", ""))
+        if "screwdriver-rotation-topdown" in task_name.lower():
+            if cfg.get("startup_reset_targets") is None:
+                raise RuntimeError(
+                    "top-down deploy bundle is missing startup_reset_targets"
+                )
+            scale = cfg.get("deployment_geometry_scale")
+            if scale is None:
+                raise RuntimeError(
+                    "top-down deploy bundle is missing deployment_geometry_scale"
+                )
+            scale_tensor = torch.as_tensor(scale, dtype=torch.float32)
+            if scale_tensor.shape != (2,) or not bool(
+                torch.allclose(
+                    scale_tensor,
+                    torch.ones_like(scale_tensor),
+                    atol=1.0e-6,
+                    rtol=0.0,
+                )
+            ):
+                raise RuntimeError(
+                    "top-down deployment requires nominal geometry scale [1.0, 1.0]"
+                )
+
+        codec_value = cfg.get("proprio_codec")
+        if codec_value is None:
+            raise RuntimeError("deploy bundle is missing an explicit ProprioCodec spec")
+        try:
+            codec_spec = ProprioCodecSpec.from_dict(codec_value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid ProprioCodec spec: {exc}") from exc
+        self.codec = ProprioCodec(codec_spec)
+
         # Actor.
         self.actor = DeployActor(bundle["actor_arch"]).to(self.device).eval()
         missing, unexpected = self.actor.load_state_dict(bundle["actor"], strict=False)
@@ -184,6 +251,19 @@ class DeployPolicy:
         self.hist_len = int(nd["hist_len"])
         self.frame_dim = int(nd["frame_dim"])
         self.action_delta_scale = float(cfg.get("action_delta_scale", 0.05))
+        if self.codec.spec.joint_count != self.n_finger:
+            raise RuntimeError("ProprioCodec joint_count does not match n_finger")
+        if self.codec.spec.frame_dim != self.frame_dim:
+            raise RuntimeError("ProprioCodec frame_dim does not match net_dims")
+        if self.codec.spec.history_length != self.hist_len:
+            raise RuntimeError("ProprioCodec history_length does not match net_dims")
+        expected_proprio_dim = (
+            self.codec.spec.actor_frame_count * self.codec.spec.frame_dim
+        )
+        if self.actor.proprio_dim != expected_proprio_dim:
+            raise RuntimeError(
+                "actor proprio_dim does not match ProprioCodec actor input width"
+            )
 
         def _vec(key, fill):
             v = cfg.get(key)
@@ -193,6 +273,21 @@ class DeployPolicy:
         self.finger_lower = _vec("finger_lower", -3.14)
         self.finger_upper = _vec("finger_upper", 3.14)
         self.home_targets = _vec("home_targets", 0.0)
+        self.startup_reset_targets = (
+            self.home_targets.clone()
+            if cfg.get("startup_reset_targets") is None
+            else _vec("startup_reset_targets", 0.0)
+        )
+        for name, value in (
+            ("finger_lower", self.finger_lower),
+            ("finger_upper", self.finger_upper),
+            ("home_targets", self.home_targets),
+            ("startup_reset_targets", self.startup_reset_targets),
+        ):
+            if value.shape != (1, self.n_finger):
+                raise RuntimeError(
+                    f"{name} width {value.numel()} does not match n_finger {self.n_finger}"
+                )
 
         # Integration state.
         self.cur_targets = self.home_targets.clone()
@@ -207,17 +302,20 @@ class DeployPolicy:
         return t
 
     def _frame(self, finger_q: torch.Tensor) -> torch.Tensor:
-        raw = torch.cat([finger_q, self.cur_targets], dim=-1)  # (1, 2*n_finger)
-        frame = torch.zeros(1, self.frame_dim, device=self.device)
-        n = min(self.frame_dim, raw.shape[1])
-        frame[:, :n] = raw[:, :n]
-        return frame
+        return self.codec.encode_frame(finger_q, self.cur_targets)
 
     # -- public API -------------------------------------------------------- #
-    def reset(self, finger_q=None) -> None:
-        """Reset integration state.  Seeds ``cur_targets`` to home and fills the
-        whole history with the first frame (mirrors the env's reset seeding)."""
-        self.cur_targets = self.home_targets.clone()
+    def reset(self, finger_q=None, effective_target=None) -> None:
+        """Reset history from measured joints and the acknowledged target.
+
+        Hardware may clamp the requested home target. Passing its effective
+        target keeps deployment history aligned with the training observation.
+        """
+        self.cur_targets = (
+            self.home_targets.clone()
+            if effective_target is None
+            else self._to_row(effective_target)
+        )
         fq = self.home_targets.clone() if finger_q is None else self._to_row(finger_q)
         self.hist = self._frame(fq).unsqueeze(1).repeat(1, self.hist_len, 1)
 
@@ -237,13 +335,12 @@ class DeployPolicy:
         fq = self._to_row(finger_q)
 
         # Roll history and append the latest [finger_q, cur_targets] frame.
-        self.hist = torch.roll(self.hist, shifts=-1, dims=1)
-        self.hist[:, -1] = self._frame(fq)
+        self.hist = self.codec.append(self.hist, self._frame(fq))
 
         pred = self.adapter(self.hist)
         if self.latent_dim > 0:
             # HORA-faithful latent path: actor = mu(actor_mlp([norm(proprio), latent])).
-            proprio = torch.cat([fq, self.cur_targets], dim=-1)
+            proprio = self.codec.assemble_actor_input(self.hist)
             action = torch.clamp(self.actor(proprio, pred[:, : self.latent_dim]), -1.0, 1.0)
         else:
             # Legacy euler-bridge path: actor = mu(actor_mlp(norm([fq, targets, euler]))).

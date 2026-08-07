@@ -30,6 +30,7 @@ from screwdriver_rl.algos.proprio_adapt import (  # noqa: E402
     AdaptTrainCfg,
     ProprioAdaptNet,
     ProprioAdaptTrainer,
+    _held_out_split_indices,
 )
 from screwdriver_rl.deploy.policy import (  # noqa: E402
     DeployActor,
@@ -37,6 +38,7 @@ from screwdriver_rl.deploy.policy import (  # noqa: E402
     canonicalize_actor_state,
 )
 from screwdriver_rl.deploy import linker_sdk_map as sdkmap  # noqa: E402
+from screwdriver_rl.deploy.codecs import mounted_linker_g20_codec_spec  # noqa: E402
 
 DEVICE = "cpu"
 
@@ -69,6 +71,7 @@ class FakeEnv:
         self._hist_len = hist_len
         self._frame_dim = frame_dim
         self._act_dim = act_dim
+        self.reset_calls = 0
         # Fixed (unknown to the net) mapping latest-frame -> privileged obs.
         self._proj = torch.randn(frame_dim, priv_dim, device=device)
 
@@ -82,6 +85,7 @@ class FakeEnv:
         }
 
     def reset(self):
+        self.reset_calls += 1
         return self._obs(), {}
 
     def step(self, actions):
@@ -124,6 +128,43 @@ def test_net_overfits_supervised_batch():
     assert final_loss < 0.5 * init_loss, f"loss did not drop: {init_loss:.4f} -> {final_loss:.4f}"
 
 
+def test_continuous_rollouts_reset_only_once_across_chunks():
+    env = FakeEnv(num_envs=4)
+    actor = lambda obs: torch.zeros(obs.shape[0], 12, device=obs.device)  # noqa: E731
+    with tempfile.TemporaryDirectory() as tmp:
+        trainer = ProprioAdaptTrainer(
+            env=env, stage1_actor_fn=actor,
+            cfg=AdaptTrainCfg(
+                rollout_steps=2, num_iters=2, batch_size=8,
+                num_epochs_per_iter=1, continuous_rollouts=True,
+            ),
+            out_dir=tmp, device=DEVICE, priv_obs_dim=17,
+            frame_dim=24, hist_len=30,
+        )
+        first_h, _ = trainer._collect(1)
+        second_h, _ = trainer._collect(2)
+    assert env.reset_calls == 1
+    assert first_h.shape == second_h.shape == (8, 30, 24)
+
+
+def test_environment_group_held_out_split_has_no_trajectory_leakage():
+    torch.manual_seed(7)
+    group_ids = torch.arange(20).repeat(4)
+    train_idx, val_idx, diagnostics = _held_out_split_indices(
+        group_ids.numel(), DEVICE, group_ids
+    )
+
+    train_groups = set(group_ids[train_idx].tolist())
+    val_groups = set(group_ids[val_idx].tolist())
+    assert train_groups.isdisjoint(val_groups)
+    assert train_groups | val_groups == set(range(20))
+    assert diagnostics == {
+        "validation_split": "environment_group",
+        "validation_group_count": 2,
+        "train_group_count": 18,
+    }
+
+
 def test_trainer_runs_and_saves():
     """Legacy mode (no deploy_meta / no latent): adapter-only checkpoint."""
     env = FakeEnv()
@@ -144,6 +185,35 @@ def test_trainer_runs_and_saves():
         state = torch.load(ckpt, map_location=DEVICE)
         net = ProprioAdaptNet(frame_dim=24, hist_len=30, out_dim=17)
         net.load_state_dict(state["net"])
+
+
+def test_trainer_resumes_from_saved_global_iteration():
+    """A weights-only checkpoint resumes at its global iteration, not at one."""
+    env = FakeEnv(num_envs=4)
+    actor = lambda obs: torch.zeros(obs.shape[0], 12, device=obs.device)  # noqa: E731
+    with tempfile.TemporaryDirectory() as tmp:
+        first = ProprioAdaptTrainer(
+            env=env,
+            stage1_actor_fn=actor,
+            cfg=AdaptTrainCfg(
+                rollout_steps=2, num_iters=2, batch_size=8, num_epochs_per_iter=1,
+            ),
+            out_dir=tmp, device=DEVICE,
+            priv_obs_dim=17, frame_dim=24, hist_len=30,
+        ).train()
+        assert torch.load(first, map_location=DEVICE)["iter"] == 2
+
+        resumed = ProprioAdaptTrainer(
+            env=env,
+            stage1_actor_fn=actor,
+            cfg=AdaptTrainCfg(
+                rollout_steps=2, num_iters=3, batch_size=8, num_epochs_per_iter=1,
+                resume_checkpoint=first,
+            ),
+            out_dir=tmp, device=DEVICE,
+            priv_obs_dim=17, frame_dim=24, hist_len=30,
+        ).train()
+        assert torch.load(resumed, map_location=DEVICE)["iter"] == 3
 
 
 # --------------------------------------------------------------------------- #
@@ -202,7 +272,8 @@ def _make_latent_bundle(proprio_dim=32, latent_dim=8, action_dim=16, hist_len=30
         "config": {"task": "smoke", "n_finger": action_dim, "action_delta_scale": 0.05,
                    "finger_lower": [-1.0] * action_dim, "finger_upper": [1.0] * action_dim,
                    "home_targets": [0.0] * action_dim, "prop_hist_len": hist_len,
-                   "history_obs_dim": proprio_dim, "privileged_obs_dim": 19},
+                   "history_obs_dim": proprio_dim, "privileged_obs_dim": 19,
+                   "proprio_codec": mounted_linker_g20_codec_spec(hist_len).as_dict()},
     }
 
 
@@ -210,13 +281,13 @@ def test_deploy_policy_roundtrip_latent():
     bundle = _make_latent_bundle()
     pol = DeployPolicy(bundle, device=DEVICE)
     fq = torch.zeros(16)
-    pol.reset(fq)
+    pol.reset(fq, fq)
     t = pol.act(fq)
     assert t.shape == (1, 16)
     assert bool((t >= -1).all() and (t <= 1).all()), "targets out of [lo,hi]"
     # Determinism: same seed of state -> same action.
-    pol.reset(fq); a = pol.act(fq)
-    pol.reset(fq); b = pol.act(fq)
+    pol.reset(fq, fq); a = pol.act(fq)
+    pol.reset(fq, fq); b = pol.act(fq)
     assert torch.allclose(a, b)
 
 
@@ -244,10 +315,10 @@ def test_sdk_map_bounds_and_roundtrip():
 # --------------------------------------------------------------------------- #
 
 def test_trainer_latent_mode_writes_deploy():
-    # Both LinkerL20 privileged widths: non-DR (19) and geometry-DR (21).  The
+    # Historical LinkerL20 widths plus the final force-free 22-D width.  The
     # bundle must record the right width, yet the deploy actor stays a fixed 40-D
     # [proprio(32), latent(K)] regardless (env_mlp is dropped at deploy).
-    for V in (19, 21):
+    for V in (19, 21, 22):
         torch.manual_seed(0)
         P, K, A = 32, 4, 16
         env = FakeEnv(num_envs=16, policy_dim=P + V, priv_dim=V, hist_len=30,
@@ -265,7 +336,8 @@ def test_trainer_latent_mode_writes_deploy():
             "config": {"task": "smoke", "n_finger": A, "action_delta_scale": 0.05,
                        "finger_lower": [-1.0] * A, "finger_upper": [1.0] * A,
                        "home_targets": [0.0] * A, "prop_hist_len": 30,
-                       "history_obs_dim": P, "privileged_obs_dim": V},
+                       "history_obs_dim": P, "privileged_obs_dim": V,
+                       "proprio_codec": mounted_linker_g20_codec_spec(30).as_dict()},
         }
         cfg = AdaptTrainCfg(rollout_steps=4, num_iters=3, batch_size=32, num_epochs_per_iter=2)
         with tempfile.TemporaryDirectory() as tmp:
@@ -279,13 +351,29 @@ def test_trainer_latent_mode_writes_deploy():
             assert deploy_path.exists(), "Stage-2 latent mode did not write deploy.pth"
             bundle = torch.load(deploy_path, map_location=DEVICE)
             assert bundle["net_dims"]["out_dim"] == K, "adapter should regress the K-D latent"
+            assert (Path(tmp) / "adaptation_validation.json").exists()
+            validation = bundle["adaptation_validation"]
+            assert validation["sample_count"] > 0
+            assert validation["adapter_latent_mse"] >= 0.0
+            assert validation["raw_privileged_mse"] >= 0.0
+            assert len(validation["raw_privileged_mse_by_channel"]) == V
+            # Only the final force-free layout may carry semantic channel names.
+            if V == 22:
+                assert validation["screw_relative_position_mse"] >= 0.0
+                assert validation["distance_contact_score_mse"] >= 0.0
+                assert validation["raw_privileged_channel_layout"][
+                    "distance_contact_scores"
+                ] == [15, 20]
+            else:
+                assert "distance_contact_score_mse" not in validation
+            assert "priv_probe" not in bundle, "diagnostic probe leaked into deploy bundle"
             # The bundle records the task's privileged width...
             assert bundle["config"]["privileged_obs_dim"] == V
             assert bundle["actor_arch"]["obs_dim"] == P + V
             # ...but the deployable actor is the same 40-D input for both widths.
             pol = DeployPolicy(bundle, device=DEVICE)
             assert pol.actor.proprio_dim + pol.actor.latent_dim == P + K
-            pol.reset(torch.zeros(A))
+            pol.reset(torch.zeros(A), torch.zeros(A))
             out = pol.act(torch.zeros(A))
             assert out.shape == (1, A)
 

@@ -310,6 +310,21 @@ class RotationTrainingLogger:
             f"  {_W}Contact quality{_N}",
         ]
 
+        # Episode-level outcomes.  FwdTurns/NetTurns above are instantaneous
+        # per-env accumulators mid-episode; these two are averages over completed
+        # episodes and are the quantities eval reports.  Selecting checkpoints on
+        # the mid-episode numbers alone has already gone wrong once.
+        if "eval_ep_outcome_n" in extras and m("eval_ep_outcome_n") > 0:
+            fall_rate = m("eval_ep_fall_rate")
+            lines[1:1] = [
+                (
+                    f"    EpFallRate {_colour(fall_rate, 0.30, 0.05, invert=True):>13}  "
+                    f"EpNetTurns {_colour(m('eval_ep_net_turns'), 0.0, 1.5):>13}  "
+                    f"n={int(m('eval_ep_outcome_n')):>4d}"
+                    f"{' ⚠ FALLING' if fall_rate > 0.25 else ''}"
+                ),
+            ]
+
         # Force-based (LinkerL20) vs distance/pad-based (legacy) contact layout.
         if "eval_in_window" in extras:
             in_win    = m("eval_in_window")
@@ -341,8 +356,13 @@ class RotationTrainingLogger:
                 ),
                 f"  {_W}Reward breakdown{_N}",
                 (
-                    f"    TurnRew {turn_rew:>9.3f}  IdxCap {m('eval_index_cap_reward'):>8.3f}  "
-                    f"Drive {m('eval_drive_reward'):>8.3f}  Grip {m('eval_grip_reward'):>8.3f}"
+                    f"    TurnRew {turn_rew:>9.3f}  Authority "
+                    f"{m('eval_contact_authority_reward'):>8.3f}  "
+                    f"IdxCap {m('eval_index_cap_reward'):>8.3f}"
+                ),
+                (
+                    f"    Drive {m('eval_drive_reward'):>8.3f}  "
+                    f"Grip {m('eval_grip_reward'):>8.3f}"
                 ),
                 (
                     f"    RevCost {rev_cost:>9.3f}  Excess {m('eval_excess_cost'):>8.3f}  "
@@ -351,6 +371,16 @@ class RotationTrainingLogger:
                 (
                     f"    UprightCost {up_cost:>8.3f}  IdleCost {m('eval_idle_cost'):>8.3f}  "
                     f"ActionCost {act_cost:>7.3f}"
+                ),
+                # FallCost and TiltVel were the only reward terms with no log
+                # readout, which made the one term big enough to dominate the
+                # objective (a one-shot 30,000 at the terminating step) invisible
+                # from the training log alone.  Both are now printed so the active
+                # fall-penalty contract can be verified from the log rather than
+                # inferred, per the "read the contract back" rule.
+                (
+                    f"    FallCost {m('eval_fall_cost'):>8.3f}  "
+                    f"TiltVel {m('eval_tilt_vel_cost'):>8.3f}"
                 ),
             ]
         else:

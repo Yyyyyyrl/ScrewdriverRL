@@ -252,6 +252,7 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     wrong_surface_force_threshold: float = 1.0e-3
     """Diagnostic force floor (N) used only as a binary wrong-surface predicate."""
 
+
     # Legacy force-window values remain available to calibration/audit tooling.
     # They are not read by the reward or privileged-observation paths.
     contact_f_min: float = 0.1
@@ -403,6 +404,29 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     on (+2 channels: handle diameter scale + length scale)."""
     history_obs_dim: int = 32
     """[finger_q(16), cur_targets(16)] per frame."""
+    actor_frame_count: int = 1
+    """Proprio frames the ACTOR sees, newest last (HORA stacks 3).  A single
+    frame carries no velocity or phase information; once the object state is
+    removed from the latent (``slow_extrinsics_only``) that leaves the policy
+    with no temporal signal at all.  The stack is assembled from the same
+    history buffer and codec the deployed ``DeployPolicy`` uses, so sim and
+    hardware build the actor input identically.  Changing this changes the obs
+    contract: retrain Stage 1 + Stage 2."""
+
+    # ---- HORA-faithful extrinsics split (validation) ----
+    slow_extrinsics_only: bool = False
+    """When True the ACTOR's latent encoder sees only slow, per-episode-constant
+    extrinsics (load proxy, contact friction, [geometry]) instead of the full
+    privileged vector.  This mirrors HORA, whose ``priv_info`` is mass/friction/
+    scale/COM — not object state.  Routing fast object state (euler/angvel/quat/
+    rel-pos/contact) through the latent turns it into a state observer the Stage-2
+    adapter must reconstruct online, which compounds into covariate-shift collapse
+    at deployment.  The asymmetric CRITIC keeps the full ``privileged_obs_dim``
+    state (it is never deployed), so value learning is unaffected."""
+    actor_extrinsics_dim: int = 0
+    """Width of the actor's slow-extrinsics tail; derived in ``__post_init__``
+    when ``slow_extrinsics_only`` is set.  0 means the actor uses the full
+    privileged vector (legacy behaviour)."""
 
     # ---- Fingertip pad axis (kept for base __init__; unused by the reward) ----
     fingertip_pad_axis_local: tuple[float, float, float] = (0.0, 0.0, 1.0)
@@ -594,7 +618,17 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
         # history_obs_dim = 2 * n_finger_dofs = 32; privileged_obs_dim is 20
         # (or 22 under geometry DR, bumped just above).
         if self.latent_conditioned:
-            obs_dim = self.history_obs_dim + self.privileged_obs_dim
+            if self.slow_extrinsics_only:
+                # Actor sees only the slow extrinsics tail: load proxy + contact
+                # friction (+2 geometry when geometry DR is on).  The critic
+                # still receives the full privileged_obs_dim via state_space.
+                self.actor_extrinsics_dim = 2 + (
+                    2 if self.domain_rand.randomize_geometry else 0
+                )
+                actor_priv = self.actor_extrinsics_dim
+            else:
+                actor_priv = self.privileged_obs_dim
+            obs_dim = self.history_obs_dim * self.actor_frame_count + actor_priv
             self.observation_space = gym.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
             )

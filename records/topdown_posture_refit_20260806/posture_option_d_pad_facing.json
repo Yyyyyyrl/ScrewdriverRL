@@ -1,0 +1,33 @@
+{
+  "description": "2026-08-06 option D: final user-directed pad-facing middle-finger correction applied to the candidate-624 reset posture",
+  "source_posture": "records/topdown_posture_refit_20260806/posture_fit.json",
+  "root_pos_w": [
+    -0.023818780134293113,
+    0.1742023017880395,
+    1.4570639296862542
+  ],
+  "root_quat_wxyz": [
+    0.520240224512027,
+    0.47890511461006113,
+    0.520240224512027,
+    -0.47890511461006113
+  ],
+  "joint_positions_independent": {
+    "index_mcp_roll": 0.05414624541908073,
+    "index_mcp_pitch": 0.5084262399237393,
+    "index_pip": 0.9184325362520711,
+    "middle_mcp_roll": 0.0006154768077150623,
+    "middle_mcp_pitch": 0.425,
+    "middle_pip": 0.945,
+    "ring_mcp_roll": -0.015733775224370507,
+    "ring_mcp_pitch": 0.6191580734478584,
+    "ring_pip": 0.6431715319878482,
+    "pinky_mcp_roll": 0.0458935652917647,
+    "pinky_mcp_pitch": 0.5746047799136738,
+    "pinky_pip": 0.8562345763625466,
+    "thumb_cmc_yaw": 0.89291068971524,
+    "thumb_cmc_roll": 0.886153707318344,
+    "thumb_cmc_pitch": 0.14556519674274296,
+    "thumb_mcp": 0.15875990711102864
+  }
+}

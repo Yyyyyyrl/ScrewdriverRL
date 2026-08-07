@@ -79,16 +79,35 @@ class LinkerL20ScrewdriverRotationTopdownEnvCfg(LinkerL20ScrewdriverRotationEnvC
             self.curriculum_phases, TOPDOWN_WRONG_SURFACE_WEIGHTS, strict=True
         ):
             phase.w_wrong = weight
-        # M1 calibration against the archived force-gated teacher (256 envs,
-        # 1,200 steps) reached 90.16% three-finger-gate agreement. These values
-        # are fixed distal-body-frame/pad offsets, not force targets; the shared
+        # Fixed distal-body-frame/pad offsets, not force targets; the shared
         # 12 mm distance-score ramp is preserved around each calibrated edge.
+        #
+        # Recalibrated 2026-08-06 for the refit posture by
+        # ``tools/calibrate_linker_l20_topdown_contact_margins.py`` (128 envs,
+        # 400 steps, DR on, 51,200 samples), choosing per finger the margin that
+        # maximises agreement between the distance predicate and a >0.10 N
+        # fingertip-force predicate.  Mean agreement 0.845.
+        #
+        # This is not housekeeping.  The superseded table was fitted to the old
+        # fingertip positions, and against the new controller target the pinky's
+        # frame clearance is 0.00936 m versus its old 0.0095 margin -- 0.14 mm of
+        # slack -- so the distance model would have called the pinky "in contact"
+        # while physics measured 0.00 N on it, inflating drive_count and
+        # contact_gate and paying turn reward for contact that does not exist.
+        # The recalibrated pinky and thumb edges both move *tighter*
+        # (0.0095->0.0085, 0.0290->0.0229), which is the direction that removes
+        # false positives.
+        #
+        # Caveat: the sample comes from uniform random actions at 0.35 scale, a
+        # broader distribution than the force-gated teacher rollout behind the
+        # superseded 90.16% figure, so the two agreement numbers are not directly
+        # comparable.
         self.contact_d_margin_by_finger = {
-            "index": 0.0070,
-            "middle": 0.0060,
-            "ring": 0.0070,
-            "pinky": 0.0095,
-            "thumb": 0.0290,
+            "index": 0.0098,
+            "middle": 0.0108,
+            "ring": 0.0125,
+            "pinky": 0.0085,
+            "thumb": 0.0229,
         }
         # M3 deployability DR: absolute contact friction and the universal-joint
         # tilt damping vary independently. Reset placement and encoder-bias

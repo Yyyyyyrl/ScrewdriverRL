@@ -35,6 +35,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from screwdriver_rl.core import rewards
+from screwdriver_rl.utils.linker_topdown_grasp_wrench import PAD_AXIS_LOCAL
 from screwdriver_rl.tasks.base.screwdriver_rotation_env import ScrewdriverRotationEnv
 
 from .screwdriver_rotation_env_cfg import LinkerL20ScrewdriverRotationEnvCfg
@@ -543,7 +544,16 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
         # attribute is set; we use our own per-finger sensors instead.
         self._fingertip_contact_sensor = None
 
-        # --- Wrong-surface sensor (one unfiltered sensor over all non-tip links) ---
+        # --- Wrong-surface sensor (all non-tip links) ---
+        # Filters are attached so the same sensor yields two different readings:
+        # net_forces_w over ALL contact sources, and force_matrix_w restricted to
+        # the screwdriver.  They are not the same quantity and the difference is
+        # not small.  Self-collision is enabled between the palm and each
+        # proximal phalanx (see SELF_COLLISION_PAIRS above), so a finger folding
+        # against the palm registers on net_forces_w exactly like a proximal link
+        # pressing the handle would.  The reward reads the unfiltered one for
+        # continuity with every run to date; eval reports both, and the gap
+        # between them is the self-contact the name never meant to cover.
         prox_regex = "(" + "|".join(p.strip("^$") for p in self.PROXIMAL_BODY_PATTERNS) + ")"
         self._proximal_sensor = ContactSensor(
             ContactSensorCfg(
@@ -551,6 +561,7 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
                 history_length=0,
                 update_period=0.0,
                 track_air_time=False,
+                filter_prim_paths_expr=list(filters),
             )
         )
         self.scene.sensors["contact_proximal"] = self._proximal_sensor
@@ -599,11 +610,97 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             F_cap[:, i] = mag[:, _SD_CAP]
 
         wrong = torch.zeros(n, device=self.device)
+        wrong_obj = torch.zeros(n, device=self.device)
         if self._proximal_sensor is not None:
             net = self._proximal_sensor.data.net_forces_w  # (N, n_prox, 3) or None
             if net is not None:
                 wrong = torch.linalg.norm(net, dim=-1).sum(dim=-1)
+            # Same links, screwdriver contacts only.  This is what the metric's
+            # name claims to measure; `wrong` above also counts hand self-contact.
+            fmat = self._proximal_sensor.data.force_matrix_w  # (N, n_prox, 3, 3)
+            if fmat is not None:
+                wrong_obj = torch.linalg.norm(fmat, dim=-1).sum(dim=(-1, -2))
+        self._wrong_surface_object_force = wrong_obj
         return F_total, F_body, F_cap, wrong
+
+    def _compute_pad_orientation(self) -> torch.Tensor:
+        """Per-finger cosine between the pad direction and the handle axis.
+
+        The force-based ``_compute_pad_facing`` is undefined when a fingertip
+        rests on the handle without pressing it, which is the normal situation
+        under ``reset_zero_tension_targets``: the snap sets targets equal to
+        measured positions, so contacts persist geometrically while their forces
+        relax to nearly nothing.  Judging "pad or back" by force alone therefore
+        reports a light but perfectly good pad contact as no contact at all.
+
+        This measures orientation instead: +1 means the pad points squarely at
+        the handle axis, -1 means the back of the finger does.  Body poses come
+        from the simulator, so nothing here reconstructs the wrist placement or
+        the object's settled tilt.
+        """
+        n, nf = self.num_envs, len(self.fingers)
+        out = torch.zeros(n, nf, device=self.device)
+        if not self._fingertip_body_ids or not self._handle_body_ids:
+            return out
+        state = self.allegro.data.body_state_w[:, self._fingertip_body_ids, :]
+        tip_pos, tip_quat = state[..., :3], state[..., 3:7]
+        base = self.screwdriver.data.body_state_w[
+            :, self._handle_body_ids[self._handle_base_idx], :3
+        ]
+        top = self.screwdriver.data.body_state_w[
+            :, self._handle_body_ids[self._handle_cap_idx], :3
+        ]
+        axis = top - base
+        axis = axis / axis.norm(dim=-1, keepdim=True).clamp(min=1.0e-9)
+        for i, finger in enumerate(self.fingers):
+            rel = tip_pos[:, i, :] - base
+            along = (rel * axis).sum(dim=-1, keepdim=True)
+            radial = rel - along * axis                     # tip -> axis, in-plane
+            inward = -radial / radial.norm(dim=-1, keepdim=True).clamp(min=1.0e-9)
+            axis_local = torch.tensor(
+                PAD_AXIS_LOCAL[finger], device=self.device, dtype=tip_pos.dtype
+            ).expand(n, 3)
+            pad_w = rewards.quat_apply(tip_quat[:, i, :], axis_local)
+            out[:, i] = (pad_w * inward).sum(dim=-1)
+        return out
+
+    def _compute_pad_facing(self) -> torch.Tensor:
+        """Per-finger cosine of the contact force against the inward pad normal.
+
+        ``+1`` means the handle bears squarely on the fingertip pad, ``-1`` on the
+        back of the finger, ``0`` on the side or when there is no load.
+
+        Measured entirely from simulator state -- the contact force vector from
+        each fingertip's filtered sensor, and the pad direction as a per-link
+        constant rotated by that body's own orientation.  Nothing here
+        reconstructs contact points, object pose or wrist placement, which is
+        deliberate: four separate offline reconstructions of this same quantity
+        each disagreed with the simulator in a different way, and the last one
+        still attributed 37.6 N to a fingertip it placed 7.4 mm clear of the
+        object.
+        """
+        n, nf = self.num_envs, len(self.fingers)
+        out = torch.zeros(n, nf, device=self.device)
+        if not self._fingertip_body_ids:
+            return out
+        quats = self.allegro.data.body_state_w[:, self._fingertip_body_ids, 3:7]
+        for i, (finger, sensor) in enumerate(zip(self.fingers, self._finger_sensors)):
+            fmat = sensor.data.force_matrix_w  # (N, 1, 3, 3) or None
+            if fmat is None:
+                continue
+            # Sum the handle columns; the stick is not part of the grasp.
+            force = fmat[:, 0, _SD_BODY, :] + fmat[:, 0, _SD_CAP, :]
+            axis_local = torch.tensor(
+                PAD_AXIS_LOCAL[finger], device=self.device, dtype=force.dtype
+            ).expand(n, 3)
+            axis_w = rewards.quat_apply(quats[:, i, :], axis_local)
+            magnitude = torch.linalg.norm(force, dim=-1)
+            safe = magnitude.clamp(min=1.0e-6)
+            cosine = (force * -axis_w).sum(dim=-1) / safe
+            out[:, i] = torch.where(
+                magnitude > 1.0e-6, cosine, torch.zeros_like(cosine)
+            )
+        return out
 
     def _compute_distance_contact(
         self,
@@ -927,6 +1024,8 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
                 else torch.ones_like(motion_auth)
             ),
             "eval_contact_streak":   self._drive_contact_streak.detach(),
+            "eval_pad_facing":       self._compute_pad_facing().detach(),
+            "eval_pad_orientation":  self._compute_pad_orientation().detach(),
             "eval_index_cap_binary": index_contact_binary.float().detach(),
             "eval_drive_count":      drive_count.detach(),
             "eval_contact_count":    distance_present.float().sum(dim=-1).detach(),
@@ -940,6 +1039,9 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             ].detach(),
             "eval_idle_count":       idle_count.detach(),
             "eval_wrong_surface_force": wrong_force.detach(),
+            "eval_wrong_surface_object_force": getattr(
+                self, "_wrong_surface_object_force", torch.zeros_like(wrong_force)
+            ).detach(),
             "eval_wrong_surface_present": wrong_surface_present.detach(),
             "eval_max_joint_dev":    max_joint_dev.detach(),
             # Reward breakdown
@@ -1006,6 +1108,27 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
         ]
         # +2 geometry channels (diameter, length scale) when geometry DR is on;
         # privileged_obs_dim is bumped 20→22 to match (see cfg __post_init__).
+        if self._env_geom_scale is not None:
+            parts.append(self._env_geom_scale)  # (N, 2)
+        return torch.cat(parts, dim=-1)
+
+    def _compute_actor_extrinsics(self) -> torch.Tensor:
+        """HORA-faithful slow extrinsics for the actor's latent encoder.
+
+        Only per-episode-constant dynamics params — load resistance, contact
+        friction, and (under geometry DR) handle geometry.  Excludes all fast
+        object state (euler/angvel/quat/rel-pos/contact) so the latent the
+        Stage-2 adapter must reconstruct online is a slow, well-posed target
+        rather than a state observer.  The critic still sees the full state.
+        """
+        if self._base_load_torque > 0.0:
+            load_proxy = (self._env_load_torque / self._base_load_torque).unsqueeze(-1)
+        else:
+            load_proxy = (
+                self._env_rotation_damping / self._base_rotation_damping
+            ).unsqueeze(-1)
+        contact_friction = (self._env_friction / self._base_friction).unsqueeze(-1)
+        parts = [load_proxy, contact_friction]
         if self._env_geom_scale is not None:
             parts.append(self._env_geom_scale)  # (N, 2)
         return torch.cat(parts, dim=-1)

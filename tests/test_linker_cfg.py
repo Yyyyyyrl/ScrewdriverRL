@@ -39,7 +39,15 @@ EXPECTED_MIMIC = {
 }
 
 EXPECTED_FINGERTIPS = {
-    "index_distal", "middle_distal", "ring_distal", "pinky_distal", "thumb_distal",
+    "index_tip", "middle_tip", "ring_tip", "pinky_tip", "thumb_tip",
+}
+
+EXPECTED_FIXED_TIP_JOINTS = {
+    "index_tip_joint": ("index_distal", "index_tip"),
+    "middle_tip_joint": ("middle_distal", "middle_tip"),
+    "ring_tip_joint": ("ring_distal", "ring_tip"),
+    "pinky_tip_joint": ("pinky_distal", "pinky_tip"),
+    "thumb_tip_joint": ("thumb_distal", "thumb_tip"),
 }
 
 
@@ -53,14 +61,21 @@ def _joints(root):
     return {j.get("name"): j for j in root.findall("joint")}
 
 
-def test_all_joints_revolute(urdf_root):
+def test_actuation_and_fixed_fingertip_joint_inventory(urdf_root):
     joints = _joints(urdf_root)
-    assert len(joints) == 21, f"expected 21 joints, found {len(joints)}"
-    assert all(j.get("type") == "revolute" for j in joints.values())
+    revolute = {name: joint for name, joint in joints.items() if joint.get("type") == "revolute"}
+    fixed = {name: joint for name, joint in joints.items() if joint.get("type") == "fixed"}
+    assert len(revolute) == 21
+    assert set(fixed) == set(EXPECTED_FIXED_TIP_JOINTS)
+    assert len(joints) == len(revolute) + len(fixed)
 
 
 def test_independent_and_mimic_partition(urdf_root):
-    joints = _joints(urdf_root)
+    joints = {
+        name: joint
+        for name, joint in _joints(urdf_root).items()
+        if joint.get("type") == "revolute"
+    }
     mimic_names = {name for name, j in joints.items() if j.find("mimic") is not None}
     independent = set(joints) - mimic_names
 
@@ -82,6 +97,10 @@ def test_mimic_masters_and_multipliers(urdf_root):
 def test_fingertip_links_exist(urdf_root):
     links = {ln.get("name") for ln in urdf_root.findall("link")}
     assert EXPECTED_FINGERTIPS <= links
+    joints = _joints(urdf_root)
+    for name, (parent, child) in EXPECTED_FIXED_TIP_JOINTS.items():
+        assert joints[name].find("parent").get("link") == parent
+        assert joints[name].find("child").get("link") == child
 
 
 def test_dims_are_self_consistent():
@@ -119,4 +138,10 @@ def test_curriculum_never_free_spins():
             f"phase @{ph.step_start} has load scale {ph.screwdriver_load_scale} != 1.0 "
             "— the handle could free-spin in this phase"
         )
+        assert ph.action_scale_multiplier == 1.0, (
+            f"phase @{ph.step_start} changes the deployment action scale by default"
+        )
+    dr_scales = [ph.dynamics_randomization_scale for ph in cfg.curriculum_phases]
+    assert dr_scales == pytest.approx([0.25, 0.60, 1.0])
+    assert dr_scales == sorted(dr_scales)
     assert set(cfg.fingers) == {"index", "middle", "ring", "pinky", "thumb"}

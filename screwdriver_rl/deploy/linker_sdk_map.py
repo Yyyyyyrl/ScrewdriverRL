@@ -60,11 +60,28 @@ physical angle then matches the policy's angle instead of its range fraction.
 Measured on hardware 2026-07-06, the default fraction map leaves the four
 fingertips 0.20–0.36 rad straighter than sim at the pregrasp (URDF pip range
 0..1.57 vs SDK tip arc 0..1.08) — see ``linker_calib_absolute.json``.
+
+For joints whose physical angle is not affine in SDK range, an overlay may
+instead provide a monotonic measured lookup table::
+
+    {"physical_lut": {
+        "raw": [20, 32, ..., 255],
+        "rad": [1.539, 1.484, ..., 0.0]
+    }}
+
+``raw`` must be strictly increasing and ``rad`` must be strictly monotonic
+(increasing or decreasing).  The direction is part of the measured table; this
+is required for joints such as MCP roll whose URDF-local coordinate increases
+with SDK raw.  The forward path inverts this same table (semantic radian target
+-> SDK raw), while the readback path evaluates it directly (SDK raw -> measured
+physical radian).  This is deliberately one source of truth for command and
+observation.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from typing import Mapping, NamedTuple, Sequence
 
 # --------------------------------------------------------------------------- #
@@ -140,30 +157,35 @@ class JointSpec(NamedTuple):
     lo: float
     hi: float
     flip: bool
+    physical_raw_knots: tuple[float, ...] | None = None
+    physical_rad_knots: tuple[float, ...] | None = None
 
 
 DEFAULT_JOINTS: tuple[JointSpec, ...] = (
-    JointSpec("index_mcp_roll", 6, -0.17, 0.17, False),   # abduction
-    JointSpec("index_mcp_pitch", 1, 0.00, 1.40, False),   # root-flex
-    JointSpec("index_pip", 16, 0.00, 1.57, False),        # bend (dip mimics)
+    # 2026-08-05 production contract: reviewed OG-local-q range intersected
+    # with the unchanged OG geometric limits.  The deployment overlay carries
+    # the complete physical LUT; these bounds are the command/training rails.
+    JointSpec("index_mcp_roll", 6, -0.17, 0.17, False),
+    JointSpec("index_mcp_pitch", 1, 0.0, 1.26, False),
+    JointSpec("index_pip", 16, 0.04, 1.57, False),
     JointSpec("middle_mcp_roll", 7, -0.17, 0.17, False),
-    JointSpec("middle_mcp_pitch", 2, 0.00, 1.40, False),
-    JointSpec("middle_pip", 17, 0.00, 1.57, False),
+    JointSpec("middle_mcp_pitch", 2, 0.0, 1.24, False),
+    JointSpec("middle_pip", 17, 0.06, 1.57, False),
     JointSpec("ring_mcp_roll", 8, -0.17, 0.17, False),
-    JointSpec("ring_mcp_pitch", 3, 0.00, 1.40, False),
-    JointSpec("ring_pip", 18, 0.00, 1.57, False),
+    JointSpec("ring_mcp_pitch", 3, 0.0, 1.24, False),
+    JointSpec("ring_pip", 18, 0.02, 1.57, False),
     JointSpec("pinky_mcp_roll", 9, -0.17, 0.17, False),
-    JointSpec("pinky_mcp_pitch", 4, 0.00, 1.40, False),
-    JointSpec("pinky_pip", 19, 0.00, 1.57, False),
-    JointSpec("thumb_cmc_yaw", 10, 0.00, 1.40, False),    # → thumb rotation
-    JointSpec("thumb_cmc_roll", 5, 0.00, 1.22, False),    # → thumb side-bend
-    JointSpec("thumb_cmc_pitch", 0, 0.00, 0.79, False),   # → thumb root-flex
-    JointSpec("thumb_mcp", 15, 0.00, 1.05, False),        # → thumb bend (ip mimics)
+    JointSpec("pinky_mcp_pitch", 4, 0.0, 1.14, False),
+    JointSpec("pinky_pip", 19, 0.03, 1.57, False),
+    JointSpec("thumb_cmc_yaw", 10, 0.0, 1.12, False),
+    JointSpec("thumb_cmc_roll", 5, 0.42, 1.22, False),
+    JointSpec("thumb_cmc_pitch", 0, 0.0, 0.79, False),
+    JointSpec("thumb_mcp", 15, 0.0, 1.05, False),
 )
 
 N_FINGER_JOINTS = len(DEFAULT_JOINTS)  # 16
 
-_JOINT_KEYS = frozenset({"flip", "slot", "lo", "hi"})
+_JOINT_KEYS = frozenset({"flip", "slot", "lo", "hi", "physical_lut"})
 _TOP_KEYS = frozenset({"version", "note", "joints"})
 
 _active_joints: tuple[JointSpec, ...] = DEFAULT_JOINTS
@@ -222,6 +244,73 @@ def build_joint_table(overlay: Mapping | None = None) -> list[JointSpec]:
             if js.hi <= js.lo:
                 raise ValueError(
                     f"calibration overlay: joint {name!r} needs hi > lo, got [{js.lo}, {js.hi}]")
+            if "physical_lut" in spec:
+                lut = spec["physical_lut"]
+                if not isinstance(lut, Mapping) or set(lut) != {"raw", "rad"}:
+                    raise ValueError(
+                        f"calibration overlay: joint {name!r} physical_lut "
+                        "must contain exactly raw and rad"
+                    )
+                raw, rad = lut["raw"], lut["rad"]
+                if (
+                    not isinstance(raw, (list, tuple))
+                    or not isinstance(rad, (list, tuple))
+                    or len(raw) != len(rad)
+                    or len(raw) < 2
+                ):
+                    raise ValueError(
+                        f"calibration overlay: joint {name!r} physical_lut "
+                        "needs equal raw/rad vectors with at least two knots"
+                    )
+                if any(
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    for value in (*raw, *rad)
+                ):
+                    raise ValueError(
+                        f"calibration overlay: joint {name!r} physical_lut "
+                        "knots must be numeric"
+                    )
+                raw_knots = tuple(float(value) for value in raw)
+                rad_knots = tuple(float(value) for value in rad)
+                if any(not math.isfinite(value) for value in (*raw_knots, *rad_knots)):
+                    raise ValueError(
+                        f"calibration overlay: joint {name!r} physical_lut "
+                        "knots must be finite"
+                    )
+                if (
+                    raw_knots[0] < 0.0
+                    or raw_knots[-1] > 255.0
+                    or any(left >= right for left, right in zip(raw_knots, raw_knots[1:]))
+                ):
+                    raise ValueError(
+                        f"calibration overlay: joint {name!r} physical_lut raw "
+                        "must be strictly increasing inside 0..255"
+                    )
+                rad_increasing = all(
+                    left < right for left, right in zip(rad_knots, rad_knots[1:])
+                )
+                rad_decreasing = all(
+                    left > right for left, right in zip(rad_knots, rad_knots[1:])
+                )
+                if not (rad_increasing or rad_decreasing):
+                    raise ValueError(
+                        f"calibration overlay: joint {name!r} physical_lut rad "
+                        "must be strictly monotonic"
+                    )
+                if min(rad_knots) > js.lo or max(rad_knots) < js.hi:
+                    raise ValueError(
+                        f"calibration overlay: joint {name!r} physical_lut "
+                        f"does not span semantic range [{js.lo}, {js.hi}]"
+                    )
+                if js.flip:
+                    raise ValueError(
+                        f"calibration overlay: joint {name!r} physical_lut "
+                        "already encodes direction and cannot be combined with flip"
+                    )
+                js = js._replace(
+                    physical_raw_knots=raw_knots,
+                    physical_rad_knots=rad_knots,
+                )
             table[name] = js
     result = [table[js.name] for js in DEFAULT_JOINTS]  # preserve semantic order
     slots = [js.slot for js in result]
@@ -281,6 +370,39 @@ def open_pose_16() -> list[float]:
 # Conversions.
 # --------------------------------------------------------------------------- #
 
+def _interp_monotonic(x: float, xs: Sequence[float], ys: Sequence[float]) -> float:
+    """Clamped piecewise-linear interpolation over strictly increasing ``xs``."""
+
+    if x <= xs[0]:
+        return float(ys[0])
+    if x >= xs[-1]:
+        return float(ys[-1])
+    for left in range(len(xs) - 1):
+        if xs[left] <= x <= xs[left + 1]:
+            fraction = (x - xs[left]) / (xs[left + 1] - xs[left])
+            return float(ys[left] + fraction * (ys[left + 1] - ys[left]))
+    raise AssertionError("unreachable monotonic interpolation interval")
+
+
+def _physical_rad_to_raw(value: float, js: JointSpec) -> float:
+    raw = js.physical_raw_knots
+    rad = js.physical_rad_knots
+    if raw is None or rad is None:
+        raise ValueError(f"{js.name}: no physical LUT")
+    if rad[0] < rad[-1]:
+        return _interp_monotonic(value, rad, raw)
+    # Reverse both vectors so radians are strictly increasing for interpolation.
+    return _interp_monotonic(value, tuple(reversed(rad)), tuple(reversed(raw)))
+
+
+def _physical_raw_to_rad(value: float, js: JointSpec) -> float:
+    raw = js.physical_raw_knots
+    rad = js.physical_rad_knots
+    if raw is None or rad is None:
+        raise ValueError(f"{js.name}: no physical LUT")
+    return _interp_monotonic(value, raw, rad)
+
+
 def joints16_to_sdk_arc(t16: Sequence[float]) -> list[float]:
     """Place our 16 policy targets (radians) into the SDK's 20-slot radian vector.
 
@@ -291,6 +413,18 @@ def joints16_to_sdk_arc(t16: Sequence[float]) -> list[float]:
         raise ValueError(f"expected {N_FINGER_JOINTS} joint targets, got {len(t16)}")
     arc = [0.0] * 20
     for val, js in zip(t16, _active_joints):
+        if js.physical_raw_knots is not None:
+            target = _clamp(float(val), js.lo, js.hi)
+            raw = _physical_rad_to_raw(target, js)
+            if L20_L_DIRECT[js.slot] == -1:
+                arc[js.slot] = _scale(
+                    raw, 0.0, 255.0, L20_L_MAX[js.slot], L20_L_MIN[js.slot]
+                )
+            else:
+                arc[js.slot] = _scale(
+                    raw, 0.0, 255.0, L20_L_MIN[js.slot], L20_L_MAX[js.slot]
+                )
+            continue
         frac = _clamp((float(val) - js.lo) / (js.hi - js.lo), 0.0, 1.0) if js.hi > js.lo else 0.0
         if js.flip:
             frac = 1.0 - frac
@@ -316,6 +450,9 @@ def sdk_range_to_joints16(range20: Sequence[float]) -> list[float]:
     arc = range_to_arc_left(range20)
     out: list[float] = []
     for js in _active_joints:
+        if js.physical_raw_knots is not None:
+            out.append(_physical_raw_to_rad(float(range20[js.slot]), js))
+            continue
         span = L20_L_MAX[js.slot] - L20_L_MIN[js.slot]
         frac = (arc[js.slot] - L20_L_MIN[js.slot]) / span if span != 0 else 0.0
         if js.flip:

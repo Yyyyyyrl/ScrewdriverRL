@@ -1,0 +1,410 @@
+{
+  "base_values": {
+    "contact_friction": 1.5,
+    "finger_damping": 1.0,
+    "finger_stiffness": 6.0,
+    "handle_radius_m": 0.032,
+    "rotation_damping": 0.5,
+    "screwdriver_body_inertia_row_major": [
+      0.0002800000074785203,
+      0.0,
+      0.0,
+      0.0,
+      0.0002800000074785203,
+      0.0,
+      0.0,
+      0.0,
+      5.99999948462937e-05
+    ],
+    "screwdriver_body_mass": 0.30000001192092896,
+    "screwdriver_load_torque": 0.045,
+    "tilt_damping": 0.05
+  },
+  "checks": {
+    "all_enabled_dynamics_distributions_have_variance": true,
+    "all_resets_meet_contact_guard": true,
+    "body_inertia_fixed_as_current_implementation": true,
+    "body_mass_in_range": true,
+    "contact_friction_in_range": true,
+    "contact_friction_materials_match_sample": true,
+    "contact_friction_randomisation_enabled": true,
+    "critic_geometry_observation_matches_if_enabled": true,
+    "finger_damping_in_range": true,
+    "finger_gains_broadcast_per_env": true,
+    "finger_stiffness_in_range": true,
+    "geometry_assignment_is_cyclic": true,
+    "geometry_diameter_has_variance": true,
+    "geometry_histogram_balanced": true,
+    "geometry_length_fixed": true,
+    "geometry_randomisation_enabled": true,
+    "geometry_scales_match_manifest": true,
+    "geometry_variant_indices_are_cyclic": true,
+    "joint_zero_bias_in_range": true,
+    "joint_zero_bias_is_episode_constant": true,
+    "load_torque_in_range": true,
+    "object_start_post_settle_within_pi_plus_0p25": true,
+    "object_start_spans_both_signs": true,
+    "policy_geometry_observation_matches": true,
+    "policy_observation_width_matches": true,
+    "privileged_contact_friction_matches": true,
+    "privileged_distance_scores_bounded": true,
+    "privileged_geometry_observation_matches": true,
+    "privileged_load_proxy_matches": true,
+    "privileged_observation_width_matches": true,
+    "reset_and_bias_distributions_have_variance": true,
+    "reset_contact_guard_enabled": true,
+    "reset_root_tilt_in_range": true,
+    "reset_root_xy_in_range": true,
+    "reset_root_yaw_in_range": true,
+    "reset_root_z_in_range": true,
+    "reset_screwdriver_tilt_in_range": true,
+    "rotation_damping_in_range": true,
+    "tilt_damping_broadcast_across_xy": true,
+    "tilt_damping_in_range": true,
+    "tilt_damping_randomisation_enabled": true
+  },
+  "config": {
+    "active_curriculum_dynamics_randomization_scale": 1.0,
+    "asymmetric_obs": false,
+    "contact_friction_range": [
+      0.6,
+      2.5
+    ],
+    "effective_contact_friction_range": [
+      0.6,
+      2.5
+    ],
+    "effective_finger_damping_scale_range": [
+      0.8,
+      1.2
+    ],
+    "effective_finger_stiffness_scale_range": [
+      0.8,
+      1.2
+    ],
+    "effective_rotation_damping_scale_range": [
+      0.5,
+      3.0
+    ],
+    "effective_screwdriver_load_torque_scale_range": [
+      0.5,
+      13.1
+    ],
+    "effective_screwdriver_mass_scale_range": [
+      0.5,
+      2.0
+    ],
+    "effective_tilt_damping_scale_range": [
+      0.5,
+      2.0
+    ],
+    "enabled": true,
+    "finger_damping_scale_range": [
+      0.8,
+      1.2
+    ],
+    "finger_stiffness_scale_range": [
+      0.8,
+      1.2
+    ],
+    "geometry_diameter_scales": [
+      0.9375,
+      1.0,
+      1.0625
+    ],
+    "geometry_length_scales": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "geometry_variant_assignment": "cyclic",
+    "geometry_variant_files": [
+      "topdown_variants/screwdriver_topdown_d060.urdf",
+      "topdown_variants/screwdriver_topdown_d064.urdf",
+      "topdown_variants/screwdriver_topdown_d068.urdf"
+    ],
+    "joint_zero_bias_rad": 0.015,
+    "latent_conditioned": true,
+    "obs_noise_std": 0.01,
+    "randomize_contact_friction": true,
+    "randomize_geometry": true,
+    "randomize_obj_start": true,
+    "randomize_tilt_damping": true,
+    "requested_audit_dynamics_randomization_scale": 1.0,
+    "reset_contact_guard_max_resamples": 64,
+    "reset_contact_guard_min_fingers": 3,
+    "reset_root_pos_noise_m": 0.008,
+    "reset_root_pose_ramp": true,
+    "reset_root_tilt_noise_rad": 0.025,
+    "reset_root_yaw_noise_rad": 0.09,
+    "reset_root_z_noise_m": 0.002,
+    "reset_screwdriver_tilt_noise_rad": 0.03,
+    "rotation_damping_scale_range": [
+      0.5,
+      3.0
+    ],
+    "screwdriver_load_torque_scale_range": [
+      0.5,
+      13.1
+    ],
+    "screwdriver_mass_scale_range": [
+      0.5,
+      2.0
+    ],
+    "tilt_damping_scale_range": [
+      0.5,
+      2.0
+    ]
+  },
+  "expected_effective_ranges": {
+    "body_mass": [
+      0.15000000596046448,
+      0.6000000238418579
+    ],
+    "contact_friction": [
+      0.6,
+      2.5
+    ],
+    "finger_damping": [
+      0.8,
+      1.2
+    ],
+    "finger_stiffness": [
+      4.800000000000001,
+      7.199999999999999
+    ],
+    "joint_zero_bias_rad": [
+      -0.015,
+      0.015
+    ],
+    "load_torque": [
+      0.0225,
+      0.5894999999999999
+    ],
+    "reset_root_tilt_rad": [
+      -0.025,
+      0.025
+    ],
+    "reset_root_xy_m": [
+      -0.008,
+      0.008
+    ],
+    "reset_root_yaw_rad": [
+      -0.09,
+      0.09
+    ],
+    "reset_root_z_m": [
+      -0.002,
+      0.002
+    ],
+    "reset_screwdriver_tilt_rad": [
+      -0.03,
+      0.03
+    ],
+    "rotation_damping": [
+      0.25,
+      1.5
+    ],
+    "tilt_damping": [
+      0.025,
+      0.1
+    ]
+  },
+  "num_envs": 128,
+  "reset_batches": 1,
+  "reset_samples": 8,
+  "runtime_audit_pass": true,
+  "sampled": {
+    "contact_friction": {
+      "max": 2.498016834259033,
+      "mean": 1.5727683305740356,
+      "min": 0.6006942391395569,
+      "p05": 0.704239010810852,
+      "p95": 2.375379800796509,
+      "std": 0.5389173626899719
+    },
+    "effective_handle_radius_m": {
+      "max": 0.03400000184774399,
+      "mean": 0.031984373927116394,
+      "min": 0.030000001192092896,
+      "p05": 0.030000001192092896,
+      "p95": 0.03400000184774399,
+      "std": 0.001629725913517177
+    },
+    "finger_damping": {
+      "max": 1.1976491212844849,
+      "mean": 0.9953688979148865,
+      "min": 0.8026459813117981,
+      "p05": 0.8123061060905457,
+      "p95": 1.1808562278747559,
+      "std": 0.12019333988428116
+    },
+    "finger_stiffness": {
+      "max": 7.194594383239746,
+      "mean": 5.964080333709717,
+      "min": 4.810489654541016,
+      "p05": 4.936405658721924,
+      "p95": 7.07313346862793,
+      "std": 0.6986761093139648
+    },
+    "geometry_diameter_scale": {
+      "max": 1.0625,
+      "mean": 0.99951171875,
+      "min": 0.9375,
+      "p05": 0.9375,
+      "p95": 1.0625,
+      "std": 0.05092892795801163
+    },
+    "geometry_length_scale": {
+      "max": 1.0,
+      "mean": 1.0,
+      "min": 1.0,
+      "p05": 1.0,
+      "p95": 1.0,
+      "std": 0.0
+    },
+    "geometry_variant_histogram": {
+      "topdown_variants/screwdriver_topdown_d060.urdf": 43,
+      "topdown_variants/screwdriver_topdown_d064.urdf": 43,
+      "topdown_variants/screwdriver_topdown_d068.urdf": 42
+    },
+    "joint_zero_bias_rad": {
+      "max": 0.014894009567797184,
+      "mean": -0.000927154382225126,
+      "min": -0.014371929690241814,
+      "p05": -0.012377982959151268,
+      "p95": 0.013428893871605396,
+      "std": 0.008372955955564976
+    },
+    "object_start_z_angle_post_settle_rad": {
+      "max": 3.094360589981079,
+      "mean": -0.0981329083442688,
+      "min": -2.964285373687744,
+      "p05": -2.746093273162842,
+      "p95": 2.590017557144165,
+      "std": 1.7824186086654663
+    },
+    "reset_contact_count": {
+      "max": 5.0,
+      "mean": 3.625,
+      "min": 3.0,
+      "p05": 3.0,
+      "p95": 4.650000095367432,
+      "std": 0.6959705352783203
+    },
+    "reset_contact_guard_donor_repaired": {
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "p05": 0.0,
+      "p95": 0.0,
+      "std": 0.0
+    },
+    "reset_contact_guard_retries": {
+      "max": 0.0,
+      "mean": 0.0,
+      "min": 0.0,
+      "p05": 0.0,
+      "p95": 0.0,
+      "std": 0.0
+    },
+    "reset_root_tilt_rad": {
+      "max": 0.022466439753770828,
+      "mean": 0.002891216427087784,
+      "min": -0.021565256640315056,
+      "p05": -0.019643431529402733,
+      "p95": 0.02205759286880493,
+      "std": 0.01586420089006424
+    },
+    "reset_root_xy_m": {
+      "max": 0.004618027713149786,
+      "mean": -0.001772213727235794,
+      "min": -0.006442148704081774,
+      "p05": -0.005979180335998535,
+      "p95": 0.0044608889147639275,
+      "std": 0.0035863383673131466
+    },
+    "reset_root_yaw_rad": {
+      "max": 0.06271117925643921,
+      "mean": 0.015570822171866894,
+      "min": -0.01945735700428486,
+      "p05": -0.01899302378296852,
+      "p95": 0.056564394384622574,
+      "std": 0.028627123683691025
+    },
+    "reset_root_z_m": {
+      "max": 0.0018254171591252089,
+      "mean": -0.00046826692414470017,
+      "min": -0.001628367928788066,
+      "p05": -0.0015492058591917157,
+      "p95": 0.0011629186337813735,
+      "std": 0.0010394915007054806
+    },
+    "reset_screwdriver_tilt_rad": {
+      "max": 0.0283541027456522,
+      "mean": 0.0009155743755400181,
+      "min": -0.02946499176323414,
+      "p05": -0.024559667333960533,
+      "p95": 0.02815716154873371,
+      "std": 0.01850738748908043
+    },
+    "rotation_damping": {
+      "max": 1.4851641654968262,
+      "mean": 0.8659454584121704,
+      "min": 0.25123244524002075,
+      "p05": 0.3059086799621582,
+      "p95": 1.4299862384796143,
+      "std": 0.36182793974876404
+    },
+    "screwdriver_body_inertia_xx": {
+      "max": 0.0002800000074785203,
+      "mean": 0.0002799999783746898,
+      "min": 0.0002800000074785203,
+      "p05": 0.0002800000074785203,
+      "p95": 0.0002800000074785203,
+      "std": 2.9103830456733704e-11
+    },
+    "screwdriver_body_inertia_yy": {
+      "max": 0.0002800000074785203,
+      "mean": 0.0002799999783746898,
+      "min": 0.0002800000074785203,
+      "p05": 0.0002800000074785203,
+      "p95": 0.0002800000074785203,
+      "std": 2.9103830456733704e-11
+    },
+    "screwdriver_body_inertia_zz": {
+      "max": 5.99999948462937e-05,
+      "mean": 5.99999948462937e-05,
+      "min": 5.99999948462937e-05,
+      "p05": 5.99999948462937e-05,
+      "p95": 5.99999948462937e-05,
+      "std": 0.0
+    },
+    "screwdriver_body_mass": {
+      "max": 0.5986313223838806,
+      "mean": 0.39376991987228394,
+      "min": 0.1541241705417633,
+      "p05": 0.17759215831756592,
+      "p95": 0.5778847932815552,
+      "std": 0.1315387636423111
+    },
+    "screwdriver_load_torque": {
+      "max": 0.5838299989700317,
+      "mean": 0.317791223526001,
+      "min": 0.03294391185045242,
+      "p05": 0.05530228465795517,
+      "p95": 0.5589922070503235,
+      "std": 0.16552112996578217
+    },
+    "tilt_damping": {
+      "max": 0.09997086226940155,
+      "mean": 0.06253281980752945,
+      "min": 0.025904685258865356,
+      "p05": 0.028565816581249237,
+      "p95": 0.0957818403840065,
+      "std": 0.020976925268769264
+    }
+  },
+  "seed": 20260806,
+  "task": "Isaac-LinkerL20-Screwdriver-Rotation-Topdown"
+}

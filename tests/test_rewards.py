@@ -136,6 +136,43 @@ def test_force_window_trapezoid():
     assert w[8].item() == 0.0            # above f_max
 
 
+def test_distance_window_endpoints_and_ramp():
+    distance = torch.tensor([0.025, 0.030, 0.035, 0.040, 0.045])
+    score = R.distance_window(distance, d_contact=0.030, d_far=0.040)
+    assert torch.allclose(
+        score, torch.tensor([1.0, 1.0, 0.5, 0.0, 0.0]), atol=1.0e-6
+    )
+    present = R.contact_present_dist(distance, d_contact=0.030)
+    assert present.tolist() == [True, True, False, False, False]
+
+
+def test_distance_window_broadcasts_per_environment_thresholds():
+    distance = torch.tensor(
+        [
+            [0.030, 0.035, 0.040],
+            [0.034, 0.040, 0.046],
+        ]
+    )
+    d_contact = torch.tensor([[0.030], [0.034]])
+    d_far = torch.tensor([[0.040], [0.046]])
+    score = R.distance_window(distance, d_contact=d_contact, d_far=d_far)
+    assert torch.allclose(
+        score,
+        torch.tensor([[1.0, 0.5, 0.0], [1.0, 0.5, 0.0]]),
+        atol=1.0e-6,
+    )
+    assert R.contact_present_dist(distance, d_contact).tolist() == [
+        [True, False, False],
+        [True, False, False],
+    ]
+
+
+def test_contact_present_uses_configured_physical_contact_floor():
+    force = torch.tensor([0.0, 0.099, 0.1, 0.2, 8.0])
+    present = R.contact_present(force, min_force=0.1)
+    assert present.tolist() == [False, False, True, True, True]
+
+
 def test_excess_force():
     f = torch.tensor([0.0, 4.0, 8.0, 10.0])
     e = R.excess_force(f, f_max=8.0)
@@ -152,6 +189,42 @@ def test_soft_count_gate():
     assert g2[0].item() == 1.0
 
 
+def test_sustained_binary_gate_requires_consecutive_steps():
+    streak = torch.zeros(3)
+
+    gate, streak = R.sustained_binary_gate(
+        torch.tensor([True, True, False]), streak, hold_steps=3
+    )
+    assert gate.tolist() == [0.0, 0.0, 0.0]
+    assert streak.tolist() == [1.0, 1.0, 0.0]
+
+    gate, streak = R.sustained_binary_gate(
+        torch.tensor([True, False, True]), streak, hold_steps=3
+    )
+    assert gate.tolist() == [0.0, 0.0, 0.0]
+    assert streak.tolist() == [2.0, 0.0, 1.0]
+
+    gate, streak = R.sustained_binary_gate(
+        torch.tensor([True, True, True]), streak, hold_steps=3
+    )
+    assert gate.tolist() == [1.0, 0.0, 0.0]
+    assert streak.tolist() == [3.0, 1.0, 2.0]
+
+    gate, streak = R.sustained_binary_gate(
+        torch.tensor([False, True, True]), streak, hold_steps=3
+    )
+    assert gate.tolist() == [0.0, 0.0, 1.0]
+    assert streak.tolist() == [0.0, 2.0, 3.0]
+
+
+def test_sustained_binary_gate_hold_one_opens_immediately():
+    gate, streak = R.sustained_binary_gate(
+        torch.tensor([False, True]), torch.zeros(2), hold_steps=1
+    )
+    assert gate.tolist() == [0.0, 1.0]
+    assert streak.tolist() == [0.0, 1.0]
+
+
 def test_home_deviation_deadband():
     q = torch.tensor([[0.0, 0.5, -0.5]])
     home = torch.zeros(1, 3)
@@ -163,6 +236,21 @@ def test_home_deviation_deadband():
     assert c0.item() == 0.0
 
 
+def test_target_penetration_deadband_and_row_reduction():
+    targets = torch.tensor([[0.05, -0.10, 0.20], [0.0, 0.0, 0.0]])
+    q = torch.zeros_like(targets)
+    cost = R.target_penetration(targets, q, deadband=0.10)
+    assert torch.allclose(cost, torch.tensor([0.01, 0.0]), atol=1.0e-7)
+
+
+def test_target_penetration_supports_per_joint_deadband():
+    targets = torch.tensor([[0.10, 0.20]])
+    q = torch.zeros_like(targets)
+    deadband = torch.tensor([[0.05, 0.20]])
+    cost = R.target_penetration(targets, q, deadband)
+    assert torch.allclose(cost, torch.tensor([0.0025]), atol=1.0e-7)
+
+
 def test_near_contact_score_thumb_weighting():
     near = torch.tensor([[1.0, 0.0, 0.5]])  # index, middle, thumb
     score = R.near_contact_score(near, thumb_index=2, non_thumb_indices=[0, 1], top_k=1)
@@ -170,6 +258,90 @@ def test_near_contact_score_thumb_weighting():
     assert abs(score.item() - 0.75) < 1e-6
     score_k2 = R.near_contact_score(near, thumb_index=2, non_thumb_indices=[0, 1], top_k=2)
     assert abs(score_k2.item() - (0.5 * 0.5 + 0.5 * 0.5)) < 1e-6
+
+
+def _spinning_handle(omega_z: float):
+    """A handle at the origin spinning about +z, with two tips on the surface.
+
+    Tips sit at (+r, 0, 0) and (-r, 0, 0); the surface velocity there is
+    (0, +omega*r, 0) and (0, -omega*r, 0) respectively.
+    """
+    r = 0.032
+    tip_pos = torch.tensor([[[r, 0.0, 0.0], [-r, 0.0, 0.0]]])
+    body_pos = torch.zeros(1, 3)
+    body_lin = torch.zeros(1, 3)
+    body_ang = torch.tensor([[0.0, 0.0, omega_z]])
+    v_surf = torch.tensor(
+        [[[0.0, omega_z * r, 0.0], [0.0, -omega_z * r, 0.0]]]
+    )
+    return tip_pos, body_pos, body_lin, body_ang, v_surf
+
+
+def test_surface_co_motion_static_fingers_score_zero():
+    # The 20260728 creep exploit: handle spins, fingertips motionless -> no
+    # co-motion credit for either tip.
+    tip_pos, body_pos, body_lin, body_ang, _ = _spinning_handle(0.3)
+    tip_vel = torch.zeros_like(tip_pos)
+    score = R.surface_co_motion(tip_pos, tip_vel, body_pos, body_lin, body_ang, 0.002)
+    assert torch.allclose(score, torch.zeros(1, 2), atol=1e-6)
+
+
+def test_surface_co_motion_driving_and_partial_and_opposing():
+    tip_pos, body_pos, body_lin, body_ang, v_surf = _spinning_handle(0.3)
+    # Moving exactly with the surface -> 1; half speed -> 0.5; opposing -> 0.
+    full = R.surface_co_motion(tip_pos, v_surf, body_pos, body_lin, body_ang, 0.002)
+    assert torch.allclose(full, torch.ones(1, 2), atol=1e-5)
+    half = R.surface_co_motion(tip_pos, 0.5 * v_surf, body_pos, body_lin, body_ang, 0.002)
+    assert torch.allclose(half, torch.full((1, 2), 0.5), atol=1e-5)
+    opposing = R.surface_co_motion(tip_pos, -v_surf, body_pos, body_lin, body_ang, 0.002)
+    assert torch.allclose(opposing, torch.zeros(1, 2), atol=1e-6)
+    # Faster than the surface (over-rolling) is clamped, not over-credited.
+    over = R.surface_co_motion(tip_pos, 2.0 * v_surf, body_pos, body_lin, body_ang, 0.002)
+    assert torch.allclose(over, torch.ones(1, 2), atol=1e-5)
+
+
+def test_surface_co_motion_static_handle_never_vetoes():
+    # Below the surface-speed floor the gate must stay open so the policy can
+    # start a stationary handle.
+    tip_pos, body_pos, body_lin, _, _ = _spinning_handle(0.0)
+    body_ang = torch.zeros(1, 3)
+    tip_vel = torch.zeros_like(tip_pos)
+    score = R.surface_co_motion(tip_pos, tip_vel, body_pos, body_lin, body_ang, 0.002)
+    assert torch.allclose(score, torch.ones(1, 2), atol=1e-6)
+
+
+def test_surface_co_motion_exact_under_tilt_precession():
+    # A tilted, translating handle: surface velocity includes the linear term,
+    # and a tip riding the full rigid velocity still scores 1.
+    tip_pos = torch.tensor([[[0.03, 0.01, 0.02]]])
+    body_pos = torch.tensor([[0.005, -0.002, 0.01]])
+    body_lin = torch.tensor([[0.003, -0.001, 0.002]])
+    body_ang = torch.tensor([[0.05, -0.02, 0.4]])
+    rel = tip_pos - body_pos.unsqueeze(1)
+    v_surf = body_lin.unsqueeze(1) + torch.linalg.cross(
+        body_ang.unsqueeze(1).expand_as(rel), rel, dim=-1
+    )
+    score = R.surface_co_motion(tip_pos, v_surf, body_pos, body_lin, body_ang, 0.002)
+    assert torch.allclose(score, torch.ones(1, 1), atol=1e-5)
+
+
+def test_creep_exploit_regression_motion_auth_gate_closes():
+    # End-to-end gate composition for the frozen-finger creep run: four tips in
+    # distance contact but motionless while the handle spins -> the soft-count
+    # motion authorization is zero, so turn reward and qualified progress pay 0.
+    tip_pos, body_pos, body_lin, body_ang, _ = _spinning_handle(0.28)
+    tips4 = torch.cat([tip_pos, tip_pos], dim=1)  # (1, 4, 3)
+    tip_vel = torch.zeros_like(tips4)
+    co = R.surface_co_motion(tips4, tip_vel, body_pos, body_lin, body_ang, 0.002)
+    present = torch.ones(1, 4)
+    motion_auth = R.soft_count_gate(co * present, 2.0)
+    assert motion_auth.item() == 0.0
+    # And with two of four tips genuinely driving, authorization is full.
+    _, _, _, _, v_surf = _spinning_handle(0.28)
+    tip_vel[:, :2] = v_surf
+    co = R.surface_co_motion(tips4, tip_vel, body_pos, body_lin, body_ang, 0.002)
+    motion_auth = R.soft_count_gate(co * present, 2.0)
+    assert abs(motion_auth.item() - 1.0) < 1e-5
 
 
 def test_quat_roundtrip_axis_angle():

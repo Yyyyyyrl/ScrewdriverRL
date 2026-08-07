@@ -240,12 +240,14 @@ Isaac/ROS needed on the deploy box. Full runbook: **`docs/DEPLOY.md`**
 ```bash
 # Offline dry-run (echo simulator, any machine):
 python -m screwdriver_rl.deploy.deploy_linker --checkpoint <stage2_nn/deploy.pth> \
-    --dry-run --max-ticks 50 --record /tmp/dry.csv
+    --hand-joint L20 --calib linker_calib_deploy.json --dry-run \
+    --max-ticks 50 --record /tmp/dry.csv
 # One-time hardware calibration (per-joint direction test → overlay JSON):
 python -m screwdriver_rl.deploy.hand_check wiggle --out linker_calib.json
 # Live (direct CAN, 10 Hz, bounded + recorded):
 python -m screwdriver_rl.deploy.deploy_linker --checkpoint <stage2_nn/deploy.pth> \
-    --calib linker_calib.json --max-ticks 100 --record run1.csv
+    --hand-joint L20 --calib linker_calib_deploy.json --ramp-s 5 \
+    --contact-ramp-s 8 --max-ticks 100 --record run1.csv
 ```
 
 ---

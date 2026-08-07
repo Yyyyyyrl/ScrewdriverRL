@@ -84,6 +84,14 @@ def _configure_scale(env_cfg, scale: float, shape: str) -> None:
     env_cfg.domain_rand.random_force_prob = 0.0
     env_cfg.domain_rand.force_scale = 0.0
     env_cfg.domain_rand.pd_gain_range = (1.0, 1.0)
+    if shape == "sphere":
+        # Spheres are point-contact grasps with no edge/face to key against, so
+        # a cached state that barely met the 2-contact criterion often fails to
+        # re-form its contacts when teleported back at reset (zero-action
+        # doomed% ~3x the other shapes).  Only harvest sphere states with full
+        # 4-finger redundancy and extra height clearance.
+        env_cfg.min_other_finger_contacts = 3
+        env_cfg.grasp_gen_accept_z_margin = 0.03
 
 
 def _debug_report(base_env, steps: int) -> None:

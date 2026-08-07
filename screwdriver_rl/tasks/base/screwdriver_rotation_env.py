@@ -196,6 +196,22 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         self._prev_milestone_count = torch.zeros(self.num_envs, device=self.device)
         self._prev_shaft_quat: torch.Tensor | None = None
 
+        # ---- Episode-outcome history ----
+        # fall_rate and per-episode authorized net turns are the metrics that
+        # decide deployment, and they are episode-level: neither can be read off
+        # a per-step mean.  Without them in the training log, checkpoint choice
+        # falls back to FwdVel, which has already once selected a checkpoint
+        # that was 5x worse on fall rate.  Sampled at reset, kept in a ring
+        # buffer, published as scalars.
+        self._ep_outcome_capacity = 1024
+        self._ep_fall_hist = torch.zeros(self._ep_outcome_capacity, device=self.device)
+        self._ep_turn_hist = torch.zeros(self._ep_outcome_capacity, device=self.device)
+        self._ep_outcome_cursor = 0
+        self._ep_outcome_filled = 0
+        self._last_terminated = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+
         # ---- Per-env domain randomisation state ----
         # Tracks each env's current rotation damping so _compute_privileged_obs
         # can expose the actual value rather than a fixed constant.
@@ -252,7 +268,11 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             device=self.device,
         )
 
-        self._proprio_codec = ProprioCodec(mounted_linker_g20_codec_spec(cfg.prop_hist_len))
+        self._proprio_codec = ProprioCodec(
+            mounted_linker_g20_codec_spec(
+                cfg.prop_hist_len, int(getattr(cfg, "actor_frame_count", 1))
+            )
+        )
         if round(self._policy_dt * 1_000_000_000) != self._proprio_codec.spec.control_period_ns:
             raise ValueError("mounted policy rate does not match its ProprioCodec")
 
@@ -421,9 +441,11 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         target = torch.clamp(target, self._finger_lower, self._finger_upper)
         self._cur_targets = target
 
-        # Update RMA proprioceptive history buffer.
-        if self.cfg.asymmetric_obs:
-            self._update_prop_hist()
+        # NOTE: the RMA history buffer is appended in _get_observations(), not
+        # here.  Appending pre-physics would store the joint positions from
+        # *before* this target was applied, while ``DeployPolicy.act`` appends
+        # the freshly measured joints — a ~0.03 rad sim/deploy skew in every
+        # history frame the adapter (and, with frame stacking, the actor) reads.
 
     def _apply_action(self) -> None:
         self.allegro.set_joint_position_target(
@@ -489,6 +511,18 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         observed_finger_q = self._observed_finger_q(finger_q)
         dr = self.cfg.domain_rand
 
+        # Append the history frame here (post-physics), so the newest frame pairs
+        # the joints just measured with the target that produced them — exactly
+        # what ``DeployPolicy.act`` appends on hardware.
+        #
+        # The buffer feeds the Stage-2 adapter (asymmetric_obs) AND, once frames
+        # are stacked, the actor itself.  Gating it on asymmetric_obs alone would
+        # hand a frame-stacked actor three copies of a frozen reset frame in any
+        # run that leaves asymmetric_obs off (e.g. plain oracle eval), which looks
+        # like a catastrophically bad policy rather than a missing update.
+        if self.cfg.asymmetric_obs or int(getattr(self.cfg, "actor_frame_count", 1)) > 1:
+            self._update_prop_hist()
+
         if getattr(self.cfg, "latent_conditioned", False):
             # HORA-faithful deployable mode: actor obs = [proprio, privileged].
             # The raw euler is dropped from the actor obs; it lives inside the
@@ -496,11 +530,31 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             # Observation noise is applied only to the proprioceptive block (the
             # real sensors); the privileged tail is fed clean so it stays the
             # exact quantity the critic sees and the Stage-2 adapter regresses.
-            proprio = self._proprio_codec.encode_frame(observed_finger_q, self._cur_targets)
+            # Frame stacking: the actor sees the last ``actor_frame_count``
+            # proprio frames (HORA stacks 3).  A single frame carries no velocity
+            # or phase information, so with the object state removed from the
+            # latent the policy had no temporal signal at all.  Assembled from
+            # the same history buffer ``DeployPolicy`` uses, via the same codec,
+            # so sim and hardware build this vector identically.
+            k = int(getattr(self.cfg, "actor_frame_count", 1))
+            if k > 1:
+                proprio = self._proprio_codec.assemble_actor_input(self._prop_hist_buf)
+            else:
+                proprio = self._proprio_codec.encode_frame(
+                    observed_finger_q, self._cur_targets
+                )
             if dr.enabled and dr.obs_noise_std > 0.0:
                 proprio = proprio + torch.randn_like(proprio) * dr.obs_noise_std
             priv = self._compute_privileged_obs()
-            result: dict[str, torch.Tensor] = {"policy": torch.cat([proprio, priv], dim=-1)}
+            # HORA-faithful split: the actor's latent encoder sees only slow
+            # extrinsics; the asymmetric critic still gets the full state.
+            if getattr(self.cfg, "slow_extrinsics_only", False):
+                actor_priv = self._compute_actor_extrinsics()
+            else:
+                actor_priv = priv
+            result: dict[str, torch.Tensor] = {
+                "policy": torch.cat([proprio, actor_priv], dim=-1)
+            }
             if self.cfg.asymmetric_obs:
                 result["critic"] = priv
                 result["proprio_hist"] = self._prop_hist_buf.clone()
@@ -659,7 +713,56 @@ class ScrewdriverRotationEnv(DirectRLEnv):
         terminated = tilt_norm > threshold
         timed_out = self.episode_length_buf >= self.max_episode_length - 1
         self.extras["eval_tilt_terminated"] = terminated.detach()
+        self._last_terminated = terminated.detach()
+
+        # Episode-level outcomes are published HERE, not from _get_rewards.
+        # LinkerL20 overrides _get_rewards wholesale without calling super(), so
+        # anything written to extras there never reaches that task's logger --
+        # which is exactly what happened: the block printed on schedule with the
+        # EpFallRate line silently absent.  _get_dones is base-only, runs every
+        # step for every task, and already owns _last_terminated.
+        if self._ep_outcome_filled > 0:
+            window = slice(0, self._ep_outcome_filled)
+            ep_fall_rate = self._ep_fall_hist[window].mean()
+            ep_net_turns = self._ep_turn_hist[window].mean()
+        else:
+            ep_fall_rate = torch.zeros((), device=self.device)
+            ep_net_turns = torch.zeros((), device=self.device)
+        self.extras.update({
+            "eval_ep_fall_rate": ep_fall_rate.detach(),
+            "eval_ep_net_turns": ep_net_turns.detach(),
+            "eval_ep_outcome_n": torch.tensor(
+                float(self._ep_outcome_filled), device=self.device
+            ),
+        })
         return terminated, timed_out
+
+    def _record_episode_outcomes(self, env_ids: torch.Tensor) -> None:
+        """Push finished episodes' fall flag and authorized net turns into the ring.
+
+        Called from ``_reset_idx`` before the per-env accumulators are cleared.
+        Envs with ``episode_length_buf == 0`` are startup resets, not finished
+        episodes, and are skipped.
+        """
+        if env_ids.numel() == 0:
+            return
+        real = env_ids[self.episode_length_buf[env_ids] > 0]
+        if real.numel() == 0:
+            return
+        fell = self._last_terminated[real].to(dtype=torch.float32)
+        turns = (self._net_turn[real] / (2.0 * math.pi)).to(dtype=torch.float32)
+        count = int(real.numel())
+        capacity = self._ep_outcome_capacity
+        # Only the most recent `capacity` entries can survive; drop any excess
+        # so the wrap-around index arithmetic stays a single contiguous slice.
+        if count > capacity:
+            fell, turns, count = fell[-capacity:], turns[-capacity:], capacity
+        start = self._ep_outcome_cursor
+        index = (torch.arange(count, device=self.device) + start) % capacity
+        self._ep_fall_hist[index] = fell
+        self._ep_turn_hist[index] = turns
+        self._ep_outcome_cursor = (start + count) % capacity
+        self._ep_outcome_filled = min(self._ep_outcome_filled + count, capacity)
 
     # -----------------------------------------------------------------------
     # Reset
@@ -740,6 +843,10 @@ class ScrewdriverRotationEnv(DirectRLEnv):
             env_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
         else:
             env_ids = env_ids.to(dtype=torch.long, device=self.device)
+
+        # Before super() clears episode_length_buf and the accumulators below.
+        if hasattr(self, "_ep_fall_hist"):
+            self._record_episode_outcomes(env_ids)
 
         super()._reset_idx(env_ids)
         if hasattr(self, "_env_reset_root_pos_noise"):

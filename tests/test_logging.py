@@ -51,8 +51,10 @@ _LINKER = {
     "eval_in_window": 0.6, "eval_drive_count": 2.0, "eval_idle_count": 0.0,
     "eval_index_cap_force": 1.5, "eval_wrong_surface_force": 0.0,
     "eval_max_joint_dev": 0.1, "eval_index_cap_reward": 0.3,
+    "eval_contact_authority_reward": 1.1,
     "eval_drive_reward": 0.4, "eval_grip_reward": 0.2, "eval_excess_cost": 0.0,
     "eval_wrong_surface_cost": 0.0, "eval_home_dev_cost": 0.1, "eval_idle_cost": 0.0,
+    "eval_fall_cost": 0.0, "eval_tilt_vel_cost": 0.3,
 }
 
 
@@ -82,11 +84,31 @@ def test_linker_layout_unchanged() -> None:
     assert "nan" not in out, out
     # force-layout signature rows still render
     for label in ("Contact quality", "InWindow", "DriveCnt", "IndexCapF",
-                  "Grip", "WrongSurf"):
+                  "Authority", "Grip", "WrongSurf"):
         assert label in out, (label, out)
     # Allegro-only / HORA terms must NOT leak into the Linker layout
     for absent in ("RotateRew", "WorkCost", "NearRew", "MinTipDist"):
         assert absent not in out, (absent, out)
+
+
+def test_episode_outcomes_render_only_once_populated() -> None:
+    # fall_rate / authorized net turns are the metrics eval decides on; they must
+    # be visible in the training log so checkpoint choice is not driven by the
+    # mid-episode FwdVel/NetTurns readouts alone.
+    warm_up = {**_LINKER, "eval_ep_outcome_n": 0.0,
+               "eval_ep_fall_rate": 0.0, "eval_ep_net_turns": 0.0}
+    assert "EpFallRate" not in _capture(warm_up)
+
+    populated = {**_LINKER, "eval_ep_outcome_n": 512.0,
+                 "eval_ep_fall_rate": 0.08, "eval_ep_net_turns": 1.2}
+    out = _capture(populated)
+    assert "nan" not in out, out
+    for label in ("EpFallRate", "EpNetTurns", "n= 512"):
+        assert label in out, (label, out)
+    assert "⚠ FALLING" not in out
+
+    falling = {**populated, "eval_ep_fall_rate": 0.42}
+    assert "⚠ FALLING" in _capture(falling)
 
 
 def test_dispatch_is_by_in_window_key() -> None:
