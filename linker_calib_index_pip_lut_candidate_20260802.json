@@ -1,0 +1,82 @@
+{
+  "version": 2,
+  "note": "CANDIDATE ONLY: serial LHT20-010-415-L-B-1-D. Index PIP physical midpoint LUT from the 2026-08-02 bidirectional D435 sweep, independently validated by the fixed-exposure thin-tape sweep. The LUT is used identically for command inversion and SDK readback. Other fingers remain uncalibrated and this file is not sufficient for live full-hand top-down policy deployment.",
+  "joints": {
+    "index_mcp_roll": {
+      "flip": false,
+      "lo": -0.26,
+      "hi": 0.26
+    },
+    "index_mcp_pitch": {
+      "flip": false
+    },
+    "index_pip": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.08,
+      "physical_lut": {
+        "raw": [20, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 255],
+        "rad": [1.5387503110826093, 1.4838869826982368, 1.379839817110369, 1.2947129001014201, 1.205494611331098, 1.1122882278137558, 1.0048607982731304, 0.8993352358677208, 0.8152146073423825, 0.6933184055182453, 0.5763652049050956, 0.4754936854539644, 0.3789753605538848, 0.25221620071474393, 0.11516627233892755, 0.0]
+      }
+    },
+    "middle_mcp_roll": {
+      "flip": false,
+      "lo": -0.26,
+      "hi": 0.26
+    },
+    "middle_mcp_pitch": {
+      "flip": false
+    },
+    "middle_pip": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.08
+    },
+    "ring_mcp_roll": {
+      "flip": false,
+      "lo": -0.26,
+      "hi": 0.26
+    },
+    "ring_mcp_pitch": {
+      "flip": false
+    },
+    "ring_pip": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.08
+    },
+    "pinky_mcp_roll": {
+      "flip": false,
+      "lo": -0.26,
+      "hi": 0.26
+    },
+    "pinky_mcp_pitch": {
+      "flip": false
+    },
+    "pinky_pip": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.08
+    },
+    "thumb_cmc_yaw": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.6673
+    },
+    "thumb_cmc_roll": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.4788
+    },
+    "thumb_cmc_pitch": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 0.87
+    },
+    "thumb_mcp": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.29
+    }
+  }
+}

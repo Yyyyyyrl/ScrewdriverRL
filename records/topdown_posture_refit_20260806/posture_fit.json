@@ -1,0 +1,225 @@
+{
+  "all_candidate_scores": [
+    60.85879724390076
+  ],
+  "best_nfev": -1,
+  "best_status": -1,
+  "contact_report": {
+    "_closure": 0.18476702493248545,
+    "index": {
+      "gap": 1.2036740946186342e-06,
+      "pen": 0.0001012003358749694,
+      "wall_hf": 0.9751941245847364,
+      "wall_min_mm": 0.0022277698126932366,
+      "wall_verts": 119
+    },
+    "middle": {
+      "gap": 8.358878296199634e-07,
+      "pen": 0.0001052599469266724,
+      "wall_hf": 1.01501769367237,
+      "wall_min_mm": 14.964272771823907,
+      "wall_verts": 0
+    },
+    "pinky": {
+      "gap": 3.324503566048964e-07,
+      "pen": 0.00010129039110711585,
+      "wall_hf": 0.9614800239915002,
+      "wall_min_mm": 0.0003324503566048964,
+      "wall_verts": 254
+    },
+    "ring": {
+      "gap": 1.4247833804784116e-06,
+      "pen": 0.00020063352997149592,
+      "wall_hf": 0.9885041344656234,
+      "wall_min_mm": 0.0014247833804784116,
+      "wall_verts": 91
+    },
+    "thumb": {
+      "gap": 1.1451837905393503e-06,
+      "pen": 0.00011371782997449814,
+      "wall_hf": 0.44479321627313123,
+      "wall_min_mm": 0.0011451837905393503,
+      "wall_verts": 245
+    }
+  },
+  "fingertip_mesh_surface_clearance_m": {
+    "index": -1.2036740946186342e-06,
+    "middle": 8.358878296199634e-07,
+    "pinky": -3.324503566048964e-07,
+    "ring": -1.4247833804784116e-06,
+    "thumb": 1.1451837905393503e-06
+  },
+  "fit_rank": 0,
+  "fit_score": 60.85879724390076,
+  "fit_seed": 20260810,
+  "fit_starts": 160,
+  "joint_limit_margins_rad": {
+    "index_dip": 0.581033707424028,
+    "index_mcp_pitch": 0.5084262399237393,
+    "index_mcp_roll": 0.11585375458091929,
+    "index_pip": 0.651567463747929,
+    "middle_dip": 0.21951502471402073,
+    "middle_mcp_pitch": 0.5004551812940707,
+    "middle_mcp_roll": 0.16938452319228495,
+    "middle_pip": 0.24614110655379728,
+    "pinky_dip": 0.636495628257517,
+    "pinky_mcp_pitch": 0.5653952200863261,
+    "pinky_mcp_roll": 0.12410643470823532,
+    "pinky_pip": 0.7137654236374534,
+    "ring_dip": 0.5735160550735642,
+    "ring_mcp_pitch": 0.6191580734478584,
+    "ring_mcp_roll": 0.1542662247756295,
+    "ring_pip": 0.6231715319878481,
+    "thumb_cmc_pitch": 0.14556519674274296,
+    "thumb_cmc_roll": 0.333846292681656,
+    "thumb_cmc_yaw": 0.2270893102847601,
+    "thumb_ip": 0.18446313607230416,
+    "thumb_mcp": 0.15875990711102864
+  },
+  "joint_positions_expanded": {
+    "index_dip": 0.8189662925759719,
+    "index_mcp_pitch": 0.5084262399237393,
+    "index_mcp_roll": 0.05414624541908073,
+    "index_pip": 0.9184325362520711,
+    "middle_dip": 1.2696549752859791,
+    "middle_mcp_pitch": 0.7395448187059293,
+    "middle_mcp_roll": 0.0006154768077150623,
+    "middle_pip": 1.4238588934462029,
+    "pinky_dip": 0.7635043717424829,
+    "pinky_mcp_pitch": 0.5746047799136738,
+    "pinky_mcp_roll": 0.0458935652917647,
+    "pinky_pip": 0.8562345763625466,
+    "ring_dip": 0.5735160550735642,
+    "ring_mcp_pitch": 0.6191580734478584,
+    "ring_mcp_roll": -0.015733775224370507,
+    "ring_pip": 0.6431715319878482,
+    "thumb_cmc_pitch": 0.14556519674274296,
+    "thumb_cmc_roll": 0.886153707318344,
+    "thumb_cmc_yaw": 0.89291068971524,
+    "thumb_ip": 0.18446313607230416,
+    "thumb_mcp": 0.15875990711102864
+  },
+  "joint_positions_independent": {
+    "index_mcp_pitch": 0.5084262399237393,
+    "index_mcp_roll": 0.05414624541908073,
+    "index_pip": 0.9184325362520711,
+    "middle_mcp_pitch": 0.7395448187059293,
+    "middle_mcp_roll": 0.0006154768077150623,
+    "middle_pip": 1.4238588934462029,
+    "pinky_mcp_pitch": 0.5746047799136738,
+    "pinky_mcp_roll": 0.0458935652917647,
+    "pinky_pip": 0.8562345763625466,
+    "ring_mcp_pitch": 0.6191580734478584,
+    "ring_mcp_roll": -0.015733775224370507,
+    "ring_pip": 0.6431715319878482,
+    "thumb_cmc_pitch": 0.14556519674274296,
+    "thumb_cmc_roll": 0.886153707318344,
+    "thumb_cmc_yaw": 0.89291068971524,
+    "thumb_mcp": 0.15875990711102864
+  },
+  "long_axis_w": [
+    0.08259956480129699,
+    -0.996582817378785,
+    -2.220446049250313e-16
+  ],
+  "middle_finger_decision": {
+    "middle_pip": 1.4238588934462029,
+    "reason": "The middle finger is retracted clear of the handle rather than placed on it, because at this wrist every placement that loads it is unacceptable.  Left as fitted it bears on the cap TOP FACE with the back of the distal link (pad facing -0.898 from the contact force vector, 3.72 N).  Moved so its pad reaches the lateral wall -- which is reachable, at middle_mcp_pitch 0.425 / middle_pip 0.945, pad facing +0.712 -- it becomes kinematically stiff along the direction of the +/-8 mm reset placement randomisation and absorbs that offset as force: 26.1 N peak on the middle and 9.7 N on the pinky over 256 replicas, against an 8 N ceiling.  The same mechanism appeared in three earlier variants (15-33 N as a near-straight strut, 30 N at zero reset interference, and higher force when its own preload was capped).\n\nRetracted, the grasp drives on index/ring/pinky/thumb, all four pad-borne, peak 6.03 N under the same randomisation, and holds the screwdriver upright for a full episode at 0.031 rad of tilt.",
+    "shifted_from": 1.3238588934462028
+  },
+  "minimum_joint_limit_margin_rad": 0.11585375458091929,
+  "minimum_non_distal_mesh_clearance_m": 0.008142845699402719,
+  "minimum_required_joint_margin_rad": 0.115,
+  "minimum_required_non_distal_clearance_m": 0.003,
+  "non_distal_mesh_clearance_m": {
+    "hand_base_link": 0.04251336027116159,
+    "index_metacarpals": 0.06115935041168652,
+    "index_middle": 0.012418776151666573,
+    "index_proximal": 0.04143989879997023,
+    "middle_metacarpals": 0.06589318645778142,
+    "middle_middle": 0.011578701731207452,
+    "middle_proximal": 0.0395058316917154,
+    "pinky_metacarpals": 0.060025422057523675,
+    "pinky_middle": 0.008142845699402719,
+    "pinky_proximal": 0.038647715037193775,
+    "ring_metacarpals": 0.06358835825055364,
+    "ring_middle": 0.0107086774134999,
+    "ring_proximal": 0.04125102928553437,
+    "thumb_metacarpals": 0.02769794709924707,
+    "thumb_metacarpals_base1": 0.06906800709414586,
+    "thumb_metacarpals_base2": 0.06559134594423406,
+    "thumb_proximal": 0.011830480085687115
+  },
+  "objective_cost": 117.62669159548895,
+  "palm_normal_w": [
+    -2.220446049250313e-16,
+    0.0,
+    -1.0000000000000002
+  ],
+  "root_pos_w": [
+    -0.023818780134293113,
+    0.1742023017880395,
+    1.4570639296862542
+  ],
+  "root_quat_wxyz": [
+    0.520240224512027,
+    0.47890511461006113,
+    0.520240224512027,
+    -0.47890511461006113
+  ],
+  "tip_marker_positions_w": {
+    "index": [
+      -0.036072621218417804,
+      -0.029023772937725605,
+      1.3929051070789054
+    ],
+    "middle": [
+      -0.01577975529342614,
+      0.015372656059006982,
+      1.4069684765260577
+    ],
+    "pinky": [
+      0.02811095492460433,
+      -0.014682224449718066,
+      1.3890170801013646
+    ],
+    "ring": [
+      0.011290666533458303,
+      -0.03907736234337367,
+      1.3935896809002324
+    ],
+    "thumb": [
+      -0.05164748598128314,
+      0.002521720777859185,
+      1.3401514483547243
+    ]
+  },
+  "tip_marker_targets_w": {
+    "index": [
+      -0.026999999999999996,
+      0.002,
+      1.4060000000000001
+    ],
+    "middle": [
+      -0.03,
+      0.024,
+      1.3850000000000002
+    ],
+    "pinky": [
+      0.012000000000000002,
+      0.024,
+      1.3450000000000002
+    ],
+    "ring": [
+      -0.009,
+      0.032,
+      1.3650000000000002
+    ],
+    "thumb": [
+      -0.013,
+      -0.032,
+      1.36
+    ]
+  },
+  "yaw_rad": 0.0826937795259024
+}

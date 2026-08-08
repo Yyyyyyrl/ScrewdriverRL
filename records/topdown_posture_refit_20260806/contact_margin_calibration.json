@@ -1,0 +1,78 @@
+{
+  "action_scale": 0.35,
+  "contact_d_margin_by_finger": {
+    "index": 0.0097554875767529,
+    "middle": 0.010780453484840693,
+    "pinky": 0.008512976278968156,
+    "ring": 0.012537879430532457,
+    "thumb": 0.022905486993968487
+  },
+  "fingers": {
+    "index": {
+      "best_agreement": 0.7668359375,
+      "best_margin_m": 0.0097554875767529,
+      "clamped_agreement": 0.7668359375,
+      "clamped_margin_m": 0.0097554875767529,
+      "clearance_median_m": 0.004843320697546005,
+      "clearance_p05_m": -0.003731468413025141,
+      "clearance_p95_m": 0.025230176560580724,
+      "contact_rate_by_force": 0.65025390625,
+      "force_mean_n": 9.253806114196777,
+      "force_p95_n": 31.597433567047087
+    },
+    "middle": {
+      "best_agreement": 0.80552734375,
+      "best_margin_m": 0.010780453484840693,
+      "clamped_agreement": 0.80552734375,
+      "clamped_margin_m": 0.010780453484840693,
+      "clearance_median_m": 0.008180579170584679,
+      "clearance_p05_m": -0.0015706538222730157,
+      "clearance_p95_m": 0.033662171661853764,
+      "contact_rate_by_force": 0.575859375,
+      "force_mean_n": 4.023282051086426,
+      "force_p95_n": 16.219031810760484
+    },
+    "pinky": {
+      "best_agreement": 0.95310546875,
+      "best_margin_m": 0.008512976278968156,
+      "clamped_agreement": 0.95310546875,
+      "clamped_margin_m": 0.008512976278968156,
+      "clearance_median_m": 0.020481714978814125,
+      "clearance_p05_m": 0.008800999633967877,
+      "clearance_p95_m": 0.05739619806408877,
+      "contact_rate_by_force": 0.06794921875,
+      "force_mean_n": 0.09575280547142029,
+      "force_p95_n": 0.5370846360921839
+    },
+    "ring": {
+      "best_agreement": 0.884921875,
+      "best_margin_m": 0.012537879430532457,
+      "clamped_agreement": 0.884921875,
+      "clamped_margin_m": 0.012537879430532457,
+      "clearance_median_m": 0.016191678121685982,
+      "clearance_p05_m": 0.003552502952516079,
+      "clearance_p95_m": 0.045424757897853836,
+      "contact_rate_by_force": 0.2889453125,
+      "force_mean_n": 1.9242956638336182,
+      "force_p95_n": 12.242590284347534
+    },
+    "thumb": {
+      "best_agreement": 0.812890625,
+      "best_margin_m": 0.022905486993968487,
+      "clamped_agreement": 0.812890625,
+      "clamped_margin_m": 0.022905486993968487,
+      "clearance_median_m": 0.027073975652456284,
+      "clearance_p05_m": 0.014073347672820091,
+      "clearance_p95_m": 0.05458686016499996,
+      "contact_rate_by_force": 0.31990234375,
+      "force_mean_n": 0.7049315571784973,
+      "force_p95_n": 3.974044752120971
+    }
+  },
+  "force_threshold_n": 0.1,
+  "mean_agreement": 0.8446562499999999,
+  "num_envs": 128,
+  "samples": 51200,
+  "seed": 20260806,
+  "task": "Isaac-LinkerL20-Screwdriver-Rotation-Topdown-Hora"
+}

@@ -1,0 +1,47 @@
+[
+  {
+    "retain": 0.4,
+    "tilt": 0.03649672493338585,
+    "drift": 0.08455812931060791,
+    "n_touch": 3,
+    "n_pad": 3,
+    "n_back": 0,
+    "detail": {
+      "index": {
+        "clearance_mm": 11.18,
+        "margin_mm": 9.8,
+        "touching": false,
+        "pad": 0.763,
+        "force_n": 0.37
+      },
+      "middle": {
+        "clearance_mm": -11.51,
+        "margin_mm": 10.8,
+        "touching": true,
+        "pad": 0.421,
+        "force_n": 6.71
+      },
+      "ring": {
+        "clearance_mm": 6.93,
+        "margin_mm": 12.5,
+        "touching": true,
+        "pad": 0.866,
+        "force_n": 1.71
+      },
+      "pinky": {
+        "clearance_mm": 8.95,
+        "margin_mm": 8.5,
+        "touching": false,
+        "pad": 0.221,
+        "force_n": 0.85
+      },
+      "thumb": {
+        "clearance_mm": 15.52,
+        "margin_mm": 22.9,
+        "touching": true,
+        "pad": 0.915,
+        "force_n": 1.27
+      }
+    }
+  }
+]

@@ -48,7 +48,17 @@ parser.add_argument(
     "--checkpoint",
     type=str,
     required=True,
-    help="Path to the .pth checkpoint to evaluate.",
+    help="Path to the Stage-1 rl_games .pth checkpoint (the actor) to visualise.",
+)
+parser.add_argument(
+    "--adapter_checkpoint",
+    type=str,
+    default=None,
+    help="[deploy view] Path to a Stage-2 deploy.pth / proprio_adapt.pth. When "
+    "given, render the DEPLOYED policy: the actor is driven by the adapter's "
+    "proprioceptively-predicted latent (no privileged obs) instead of the true "
+    "env_mlp latent — the HORA vis_s2 analogue. Use the Stage-1 --checkpoint the "
+    "adapter was trained against.",
 )
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--num_episodes", type=int, default=5, help="Episodes to run per env before exiting.")
@@ -84,6 +94,16 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--action_delta_scale",
+    type=float,
+    default=None,
+    help=(
+        "Override the environment's per-step joint-position delta scale (rad). "
+        "Use the value stored with the checkpoint/deploy bundle when replaying "
+        "a policy trained with a non-default scale."
+    ),
+)
+parser.add_argument(
     "--output",
     type=str,
     default=None,
@@ -95,6 +115,32 @@ parser.add_argument(
     type=int,
     default=200,
     help="Number of policy steps to record.",
+)
+parser.add_argument(
+    "--camera_env_index",
+    type=int,
+    default=0,
+    help=(
+        "Environment index to focus when recording. The camera pose is then "
+        "interpreted in that environment's frame; for cyclic geometry banks, "
+        "indices 0/1/2 select the first/second/third variant."
+    ),
+)
+parser.add_argument(
+    "--camera_eye",
+    type=float,
+    nargs=3,
+    metavar=("X", "Y", "Z"),
+    default=None,
+    help="Optional camera eye position in the selected environment frame (m).",
+)
+parser.add_argument(
+    "--camera_lookat",
+    type=float,
+    nargs=3,
+    metavar=("X", "Y", "Z"),
+    default=None,
+    help="Optional camera target in the selected environment frame (m).",
 )
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
@@ -135,6 +181,31 @@ except ImportError:  # very old Isaac Lab
 
 from rl_games.common import env_configurations, vecenv
 from rl_games.torch_runner import Runner
+
+from screwdriver_rl.algos.latent_network import LATENT_NETWORK_NAME, register_latent_network
+
+
+def _obs_tensor(obses):
+    """Extract the actor obs tensor from the rl_games wrapper output (dict or tensor)."""
+    if isinstance(obses, dict):
+        return obses.get("obs", obses.get("policy"))
+    return obses
+
+
+def _load_adapter(path: str, device: str):
+    """Load a ProprioAdaptNet from a deploy.pth (``adapter`` key) or proprio_adapt.pth
+    (``net`` key).  Returns ``(net.eval(), euler_dim)``."""
+    from screwdriver_rl.algos.proprio_adapt import ProprioAdaptNet
+
+    state = torch.load(path, map_location=device, weights_only=False)
+    nd = state["net_dims"]
+    sd = state.get("adapter", state.get("net"))
+    net = ProprioAdaptNet(
+        frame_dim=int(nd["frame_dim"]), hist_len=int(nd["hist_len"]), out_dim=int(nd["out_dim"])
+    ).to(device).eval()
+    net.load_state_dict(sd)
+    euler_dim = int(state.get("config", {}).get("euler_dim", 3))
+    return net, euler_dim
 
 
 def _apply_eval_phase(env, phase_spec: str) -> None:
@@ -186,12 +257,50 @@ def main() -> None:
     env_cfg.seed = args.seed
 
     # ---- Evaluation-time config overrides (see CLI flags) ----
+    if args.action_delta_scale is not None:
+        if not 0.0 < args.action_delta_scale <= 0.2:
+            raise ValueError(
+                "--action_delta_scale must be in (0, 0.2] rad; "
+                f"got {args.action_delta_scale}"
+            )
+        env_cfg.action_delta_scale = float(args.action_delta_scale)
+        print(
+            f"[play] Action delta scale: {env_cfg.action_delta_scale:.6f} rad",
+            flush=True,
+        )
     if args.no_domain_rand and hasattr(env_cfg, "domain_rand"):
         env_cfg.domain_rand.enabled = False
         print("[play] Domain randomisation + observation noise: DISABLED", flush=True)
     if args.fixed_start and hasattr(env_cfg, "randomize_obj_start"):
         env_cfg.randomize_obj_start = False
         print("[play] Screwdriver start angle: FIXED (no randomisation)", flush=True)
+
+    if args.video:
+        if not 0 <= args.camera_env_index < args.num_envs:
+            raise ValueError(
+                f"--camera_env_index {args.camera_env_index} is outside "
+                f"[0, {args.num_envs - 1}]"
+            )
+        # ViewerCfg's default pose is in the world frame, which frames an entire
+        # multi-env grid and makes the hand only a few pixels wide. An env-relative
+        # frame keeps the requested bucket centred without changing simulation.
+        env_cfg.viewer.origin_type = "env"
+        env_cfg.viewer.env_index = args.camera_env_index
+        if args.camera_eye is not None:
+            env_cfg.viewer.eye = tuple(args.camera_eye)
+        if args.camera_lookat is not None:
+            env_cfg.viewer.lookat = tuple(args.camera_lookat)
+        print(
+            f"[play] Camera      : env {args.camera_env_index}, "
+            f"eye={env_cfg.viewer.eye}, lookat={env_cfg.viewer.lookat}",
+            flush=True,
+        )
+
+    if args.adapter_checkpoint:
+        # Deploy view needs the proprio-history buffer the adapter reads (only
+        # populated when asymmetric_obs is on).  The actor obs is unchanged.
+        env_cfg.asymmetric_obs = True
+        env_cfg.state_space = env_cfg.privileged_obs_dim
 
     log_dir = args.output or os.path.join("runs", args.task)
 
@@ -218,6 +327,24 @@ def main() -> None:
     agent_cfg_path = os.path.join(os.path.dirname(_agent_module.__file__), _file_name)
     with open(agent_cfg_path) as f:
         agent_cfg = yaml.safe_load(f)
+
+    # Keep the latent actor's proprio slice in sync with frame-stacked tasks.
+    # The shared YAML describes the single-frame default, while HORA uses three
+    # proprio frames (96-D).  Training and eval.py derive this value from the
+    # task config; playback must do the same or it builds a 40-D actor and
+    # cannot load a checkpoint whose actor input is 104-D.
+    network_cfg = agent_cfg.get("params", {}).get("network", {})
+    if int(network_cfg.get("latent_dim", 0)) > 0:
+        history_dim = int(getattr(env_cfg, "history_obs_dim", 0))
+        frame_count = int(getattr(env_cfg, "actor_frame_count", 1))
+        if history_dim > 0:
+            network_cfg["proprio_dim"] = history_dim * frame_count
+
+    # Register the HORA-faithful latent-conditioned network if the config selects
+    # it (no-op for legacy ``actor_critic`` configs). Must run before
+    # ``Runner.load`` builds the model/player.
+    if agent_cfg["params"].get("network", {}).get("name") == LATENT_NETWORK_NAME:
+        register_latent_network()
 
     # Current RlGamesVecEnvWrapper signature:
     #   (env, rl_device, clip_obs, clip_actions, obs_groups=None, concate_obs_group=True)
@@ -262,11 +389,73 @@ def main() -> None:
     runner = Runner(RlGamesAlgoObserver())
     runner.load(agent_cfg)
     runner.reset()
-    runner.run({"train": False, "play": True, "sigma": None, "checkpoint": args.checkpoint})
+
+    if args.adapter_checkpoint:
+        _play_deploy(runner, env, agent_cfg)
+    else:
+        runner.run({"train": False, "play": True, "sigma": None, "checkpoint": args.checkpoint})
 
     # Close the env before the app shuts down to avoid a render deadlock during
     # simulation_app.close() (Isaac Sim renders a frame in its stop handler).
     env.close()
+
+
+def _play_deploy(runner, env, agent_cfg) -> None:
+    """Render the DEPLOYED policy: drive the actor with the adapter's predicted
+    latent (no privileged obs) — the HORA ``vis_s2`` analogue.  Mirrors
+    ``eval.py --deploy_eval`` but in the play/render loop.
+    """
+    from screwdriver_rl.deploy.policy import DeployPolicy
+
+    base_env = env.unwrapped
+    player = runner.create_player()
+    controller = DeployPolicy(args.adapter_checkpoint, device=args.rl_device)
+    bundle_task = str(controller.cfg.get("task", ""))
+    if bundle_task != args.task:
+        raise RuntimeError(
+            f"deploy bundle task {bundle_task!r} does not match --task {args.task!r}"
+        )
+    env_scale = float(base_env.cfg.action_delta_scale)
+    if abs(controller.action_delta_scale - env_scale) > 1.0e-9:
+        raise RuntimeError(
+            "deploy bundle/environment action_delta_scale mismatch: "
+            f"{controller.action_delta_scale} vs {env_scale}"
+        )
+    if controller.latent_dim <= 0:
+        raise RuntimeError("deploy rendering currently requires a latent-conditioned bundle")
+    print(
+        f"[play] DEPLOY VIEW: self-contained bundle actor + adapter-predicted "
+        f"latent (dim {controller.latent_dim})"
+        f"  |  bundle: {args.adapter_checkpoint}",
+        flush=True,
+    )
+
+    obses = player.env_reset(player.env)
+    player.get_batch_size(obses, 1)
+    max_ep = int(base_env.max_episode_length)
+    for _ in range(args.num_episodes * max_ep):
+        obs_t = _obs_tensor(obses)
+        hist = getattr(base_env, "_prop_hist_buf", None)
+        if obs_t is None or obs_t.shape[-1] < controller.actor.proprio_dim:
+            raise RuntimeError("environment observation is missing the deploy proprio block")
+        if hist is None or tuple(hist.shape[1:]) != (
+            controller.hist_len,
+            controller.frame_dim,
+        ):
+            raise RuntimeError(
+                "environment proprio history does not match deploy bundle: "
+                f"got {None if hist is None else tuple(hist.shape)}, expected "
+                f"(*, {controller.hist_len}, {controller.frame_dim})"
+            )
+        with torch.no_grad():
+            latent = controller.adapter(hist)
+            proprio = obs_t[:, : controller.actor.proprio_dim]
+            actions = torch.clamp(
+                controller.actor(proprio, latent[:, : controller.latent_dim]),
+                -1.0,
+                1.0,
+            )
+        obses, _, _, _ = player.env_step(player.env, actions)
 
 
 if __name__ == "__main__":

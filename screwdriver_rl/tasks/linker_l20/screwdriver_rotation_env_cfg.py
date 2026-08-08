@@ -29,7 +29,9 @@ five-contact grasp (``tools/render_linker_posture.py`` and the post_render grid)
 
 from __future__ import annotations
 
+import json
 from dataclasses import field
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
@@ -43,6 +45,25 @@ from screwdriver_rl.tasks.base.screwdriver_rotation_env_cfg import (
     ASSET_ROOT,
     ScrewdriverRotationEnvCfg,
 )
+from screwdriver_rl.utils.variants import seed_pregrasp_buckets
+
+
+# Fraction of the radial flexion delta applied to each joint of a finger's
+# pregrasp tuple.  Used by ``utils.variants.seed_pregrasp_buckets`` (see plan
+# §3d).  The index finger stabilises the cap top, so it should NOT follow handle
+# diameter; handle length is handled by a per-bucket fixed-base root z-offset in
+# ``__post_init__`` below.
+_FLEX_WEIGHTS = {
+    "index":  (0.0, 0.0, 0.0),
+    "middle": (0.0, 0.5, 0.5),
+    "ring":   (0.0, 0.5, 0.5),
+    "pinky":  (0.0, 0.5, 0.5),
+    # The refined palm-closer posture already puts thumb_cmc_roll near its upper
+    # guard margin and thumb_cmc_pitch near its lower guard margin.  Do not use
+    # those two joints for diameter bucket compensation; put the small reach bias
+    # into yaw + MCP where the URDF limits still have useful authority.
+    "thumb":  (0.2, 0.0, 0.0, 0.8),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -72,28 +93,64 @@ class LinkerCurriculumPhaseCfg:
     in EVERY phase — the handle never free-spins, not even in Phase 0.  This is the
     core of the redesign and the invariant ``tests/test_linker_cfg.py`` guards."""
 
+    action_scale_multiplier: float = 1.0
+    """Multiplier on the normal accumulated-delta action during this phase.
+
+    A value below one is an early curriculum aid for remapping an existing gait
+    to a changed grasp without immediately saturating the target integrator.
+    Production phases remain at 1.0, preserving the deployment control contract.
+    """
+
+    dynamics_randomization_scale: float = 1.0
+    """Interpolation from nominal dynamics (0) to the configured DR ranges (1).
+
+    Geometry remains fully randomized throughout.  Only reset-time dynamics
+    ranges widen with the curriculum so the teacher first learns contact control
+    before being exposed to the full deployment robustness distribution.
+    """
+
     min_drive_fingers: float = 2.0
-    """Soft target for how many non-index ("drive") fingers must be in the force
-    window for the turn gate to fully open (see ``rewards.soft_count_gate``)."""
+    """Minimum non-index ("drive") fingers required by the distance gate.
+
+    This is a hard authorization threshold for turn reward/progress. A smooth
+    distance-contact score still scales reward after the threshold is satisfied.
+    """
 
     # ---- Per-phase reward weights ----
     w_grip: float = 1.5
-    """Dense "establish good all-finger contact" weight.  High early (the main
-    positive signal before the handle turns), tapers in later phases."""
+    """Dense all-finger distance-contact weight. High early (the main positive
+    signal before the handle turns), then tapered in later phases."""
 
     w_index_cap: float = 0.5
-    """Reward weight for the index holding the cap pressed (axial stabilise)."""
+    """Reward weight for geometric index contact (axial stabilisation role)."""
 
     w_drive: float = 0.5
-    """Reward weight for each drive finger pressing AND moving tangentially
-    (genuine turning work)."""
+    """Reward weight for each drive finger in distance contact and moving
+    tangentially (genuine turning work)."""
+
+    w_contact_authority: float = 8.0
+    """Reward for maintaining the active task's sustained contact contract.
+
+    This is a shaping term only: shaft progress and turn reward remain guarded by
+    the hard sustained gate. It makes the validated contact grasp preferable to
+    the otherwise attractive upright-but-no-contact local optimum.
+    """
+
+    reward_fall_weight: float = 5_000.0
+    """One-shot fall penalty for this curriculum phase.
+
+    Early training must be allowed to explore contact transitions; the final
+    phase still uses the full deployment-grade penalty.
+    """
 
     w_excess: float = 0.5
-    """Penalty weight on contact force above the safe ceiling (crush -> free-spin /
-    flickering fingers)."""
+    """Penalty weight on commanded-target penetration beyond measured motion.
+
+    This force-free squeeze-intent proxy replaces the former force ceiling.
+    """
 
     w_wrong: float = 1.0
-    """Penalty weight on contact force on NON-fingertip links (palm/knuckle/back)."""
+    """Penalty weight on the binary non-fingertip contact safety predicate."""
 
     w_idle: float = 0.3
     """Penalty weight per finger not touching the screwdriver (anti-hang)."""
@@ -112,47 +169,134 @@ class LinkerCurriculumPhaseCfg:
 class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     """Linker Hand L20 (left) continuous screwdriver rotation task.
 
-    Observation space (35-D): [finger_q(16), cur_targets(16), euler(3)]
+    Observation space (52-D, latent-conditioned/deployable):
+      [finger_q(16), cur_targets(16), privileged(20)].  A custom rl_games network
+      encodes the privileged tail into a low-D latent; the raw euler is no longer
+      a standalone actor input (it lives at privileged[0:3]).
     Action space (16-D): HORA-style delta targets for the 16 independent finger
       DOFs (index/middle/ring/pinky x 3 + thumb x 4); 5 mimic distal joints follow
       via COUPLED_JOINTS.
-    Privileged obs (19-D): euler(3)+angvel(3)+rel_pos(3)+quat(4)+friction(1)+
-      per_finger_contact_force(5).
+    Privileged obs (20-D): euler(3)+angvel(3)+rel_pos(3)+quat(4)+load_proxy(1)+
+      contact_friction(1)+per_finger_distance_contact_score(5). Geometry DR
+      appends diameter/length scales for the final 22-D top-down contract.
     """
 
+    observation_semantics_version: str = "linker-l20-force-free-reset-dr-v1"
+
     # ---- Gym spaces ----
-    observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(35,), dtype=np.float32)
+    # HORA-faithful deployable mode: the actor obs is [finger_q(16),
+    # cur_targets(16), privileged(20)] = 52-D (the raw euler is no longer a
+    # standalone obs; it lives inside the privileged tail the network encodes).
+    # The shape is finalised in __post_init__ once privileged_obs_dim is known
+    # (it bumps +2 under geometry DR).  Box(52) is the default (no geometry DR).
+    observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(52,), dtype=np.float32)
     action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(16,), dtype=np.float32)
     state_space = 0
 
-    # ---- Active fingers (full five-finger grasp) ----
+    # HORA-faithful latent-conditioned actor (deployable). See base cfg.
+    latent_conditioned: bool = True
+
+    # ---- Active fingers ----
     fingers: tuple[str, ...] = ("index", "middle", "ring", "pinky", "thumb")
+    role_neutral_fingertip_contact: bool = False
+    """Count any fingertip contact with any screwdriver part for turn authority.
+
+    The lateral task keeps its historical index-cap/drive-body roles. Palm-down
+    top-down variants enable this flag because those side-grasp roles do not
+    describe their contact geometry.
+    """
+    role_neutral_min_contact_fingers: int = 3
+    """Minimum simultaneous fingertip contacts in role-neutral tasks."""
 
     # ---- Turn direction ----
     # The Linker is a LEFT hand (mirror of the right-handed Allegro), so the
     # natural grip drives the screwdriver the opposite way: +1 (vs Allegro -1).
     turn_direction: float = 1.0
 
-    # ---- Contact model (force-based; no distance / pad-facing gate) ----
-    # The pad-facing gate is disabled outright: contact is judged purely by the
-    # per-fingertip ContactSensor force (see the env class).  fingertip_pad_axis_local
-    # is still set because the base __init__ builds a tensor from it, but it is
-    # never consulted by the reward.
+    # ---- Force-free contact model ----
+    # Contact authority and shaping use fingertip-to-handle-axis distance only.
+    # Contact sensors remain enabled for diagnostics and the binary wrong-surface
+    # safety predicate, never as reward magnitudes or privileged observations.
     require_pad_facing: bool = False
 
-    # Trapezoidal "good contact pressure" window (Newtons) shared by the grip,
-    # index-cap and drive force scores.  Below f_min = not touching; above f_max =
-    # crushing.  FIRST-CUT values — calibrate from the logged per-finger forces at
-    # the resting pregrasp (see docs/verification).
+    contact_d_margin: float = 0.008
+    """Surface-clearance threshold (m) for binary kinematic contact."""
+    contact_d_far_margin: float = 0.020
+    """Surface-clearance outer edge (m) of the linear distance-score ramp."""
+    contact_d_margin_by_finger: dict[str, float] = field(default_factory=dict)
+    """Optional calibrated per-finger contact thresholds.
+
+    An override shifts both distance-window endpoints by the same amount relative
+    to contact_d_margin. This compensates fixed distal-body frame/pad offsets
+    while preserving the shared ramp width.
+    """
+    pen_deadband: float = 0.06
+    """Free target-tracking error (rad) before the squeeze-intent proxy activates.
+
+    Calibrated for a zero-tension episode start (``reset_zero_tension_targets``):
+    free-motion tracking lag stays well inside the band, so only deliberate
+    squeezing past the surface is charged.  Without the zero-tension snap the
+    validated hold itself sits ~0.19 rad beyond this band and is permanently
+    taxed — do not lower this band without re-checking that interaction.
+    """
+    target_penetration_scale: float = 10.0
+    """Scale from summed rad² target penetration to reward units.
+
+    At 10, an exploratory squeeze (~0.1 rad past the deadband on three joints)
+    costs ~0.05-0.5/step across the curriculum — cheap enough for PPO to
+    discover active turning — while a crushing 0.3 rad five-finger squeeze
+    costs ~5-13/step.  The original 100 priced exploratory squeezes at ~5/step,
+    which blocked the gradient path to active rotation entirely (the 20260728
+    frozen-finger/creep-exploit run).
+    """
+    wrong_surface_force_threshold: float = 1.0e-3
+    """Diagnostic force floor (N) used only as a binary wrong-surface predicate."""
+
+
+    # Legacy force-window values remain available to calibration/audit tooling.
+    # They are not read by the reward or privileged-observation paths.
     contact_f_min: float = 0.1
     contact_f_lo: float = 0.5
     contact_f_hi: float = 4.0
     contact_f_max: float = 8.0
 
+    # Turn progress is authorized only while the prescribed contact roles are
+    # physically present for several consecutive policy steps.  At 10 Hz, three
+    # steps reject single-frame contact flicker while adding only 0.2 s before
+    # the first authorized transition (steps 1 and 2 prime the streak).
+    turn_contact_hold_steps: int = 3
+    """Consecutive policy steps required before turn reward/progress is credited."""
+    turn_require_index_cap: bool = True
+    """Require the index stabilizer to press the cap as well as drive fingers."""
+
+    # ---- Co-motion authorization (anti-coasting / anti-creep) ----
+    # Handle rotation only pays while enough contacting fingertips move *with*
+    # the handle surface.  Distance contact alone cannot distinguish an active
+    # drive from solver creep under motionless fingers (the 20260728 run froze
+    # the hand and collected turn reward from creep); the surface-co-motion
+    # projection can.  See ``rewards.surface_co_motion``.
+    turn_motion_authorized: bool = False
+    """Multiply turn reward, milestone and qualified-progress metrics by the
+    co-motion authorization gate.  Off by default; the top-down task enables it."""
+    turn_motion_min_fingers: float = 2.0
+    """Contacting, co-moving fingertips needed for full motion authorization
+    (soft count: partial credit below, saturates at this many)."""
+    turn_motion_surface_speed_floor: float = 0.002
+    """Local surface speed (m/s) at or below which the handle counts as static
+    and the gate stays open — starting a stationary handle must not be vetoed."""
+    reset_action_hold_steps: int = 5
+    """Policy steps after reset during which the validated grasp is held."""
+    reset_action_ramp_steps: int = 10
+    """Policy steps used to ramp actions from zero to their commanded value."""
+    absolute_action_targets: bool = False
+    """Map actions directly to home-relative joint targets instead of integrating
+    delta targets. Disabled by default for checkpoint compatibility."""
+
     # Drive-finger turning: tangential fingertip speed (m/s) at which the
     # turning-work factor saturates.  ~handle_radius (0.02 m) x target spin
     # (~1 rad/s) => ~0.02 m/s.
     drive_full_tangential_speed: float = 0.02
+
 
     # ---- Joint-range restriction (stay near the working grip) ----
     # Each finger DOF is hard-clamped to home +/- joint_motion_range (the env
@@ -169,18 +313,41 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     w_home_dev: float = 2.0
     """Weight on the quadratic stay-home deviation penalty."""
 
+    w_target_bound: float = 0.0
+    """Penalty on accumulated joint targets entering the outer 20% of their
+    available action band. Disabled by default; used for auditable A/B runs
+    that test whether target saturation prevents cyclic finger gaiting."""
+
+    reverse_to_turn_ratio: float = 1.0
+    """Multiplier on the active turn weight when reverse matching is enabled."""
+    turn_reward_power: float = 1.0
+    """Exponent applied symmetrically to forward and reverse angular speed.
+    One preserves the legacy linear, target-free progress objective."""
+
+    # A tilt termination must be costly in the same transition that receives
+    # the final turn reward. The final phase is 600 policy steps and a viable
+    # policy earns roughly 100 shaped reward per full episode. With the PPO
+    # reward-shaper scale of 0.005, 30,000 raw units price one drop at -150:
+    # enough to make a mid/late-episode fall unprofitable, unlike the rejected
+    # 5,000 (-25) corrective branch.
+    reward_fall_weight: float = 30000.0
+    """One-shot penalty when tilt crosses the active phase termination limit."""
+
     # ---- Curriculum (3 phases; load scale PINNED to 1.0 throughout) ----
     curriculum_phases: list[LinkerCurriculumPhaseCfg] = field(
         default_factory=lambda: [
             LinkerCurriculumPhaseCfg(
-                # --- P0: establish the five-finger grip; gentle turning ---
+                # --- P0: establish a stable grip; gentle turning ---
                 step_start=0,
+                dynamics_randomization_scale=0.25,
                 reward_turn_weight=120.0,
                 screwdriver_load_scale=1.0,
                 min_drive_fingers=2.0,
                 w_grip=1.5,
                 w_index_cap=0.5,
                 w_drive=0.5,
+                w_contact_authority=8.0,
+                reward_fall_weight=5_000.0,
                 w_excess=0.5,
                 w_wrong=1.0,
                 w_idle=0.3,
@@ -190,12 +357,15 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             LinkerCurriculumPhaseCfg(
                 # --- P1: steady multi-finger rotation; tighten contact quality ---
                 step_start=40_000_000,
+                dynamics_randomization_scale=0.60,
                 reward_turn_weight=170.0,
                 screwdriver_load_scale=1.0,
                 min_drive_fingers=3.0,
                 w_grip=0.6,
                 w_index_cap=1.0,
                 w_drive=1.0,
+                w_contact_authority=5.0,
+                reward_fall_weight=15_000.0,
                 w_excess=1.0,
                 w_wrong=2.0,
                 w_idle=0.5,
@@ -205,12 +375,15 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             LinkerCurriculumPhaseCfg(
                 # --- P2: refined steady rotation; strict upright + anti-crush ---
                 step_start=90_000_000,
+                dynamics_randomization_scale=1.0,
                 reward_turn_weight=200.0,
                 screwdriver_load_scale=1.0,
                 min_drive_fingers=3.0,
                 w_grip=0.3,
                 w_index_cap=1.2,
                 w_drive=1.2,
+                w_contact_authority=3.0,
+                reward_fall_weight=30_000.0,
                 w_excess=1.5,
                 w_wrong=3.0,
                 w_idle=0.6,
@@ -225,10 +398,35 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     episode_length_s: float = 25.0
 
     # ---- RMA dims (hand-specific) ----
-    privileged_obs_dim: int = 19
-    """3 euler + 3 angvel + 3 rel-pos + 4 quat + 1 friction + 5 per-finger force."""
+    privileged_obs_dim: int = 20
+    """3 euler + 3 angvel + 3 rel-pos + 4 quat + 1 friction + 5 distance scores.
+    Bumped to 21 in ``__post_init__`` when ``domain_rand.randomize_geometry`` is
+    on (+2 channels: handle diameter scale + length scale)."""
     history_obs_dim: int = 32
     """[finger_q(16), cur_targets(16)] per frame."""
+    actor_frame_count: int = 1
+    """Proprio frames the ACTOR sees, newest last (HORA stacks 3).  A single
+    frame carries no velocity or phase information; once the object state is
+    removed from the latent (``slow_extrinsics_only``) that leaves the policy
+    with no temporal signal at all.  The stack is assembled from the same
+    history buffer and codec the deployed ``DeployPolicy`` uses, so sim and
+    hardware build the actor input identically.  Changing this changes the obs
+    contract: retrain Stage 1 + Stage 2."""
+
+    # ---- HORA-faithful extrinsics split (validation) ----
+    slow_extrinsics_only: bool = False
+    """When True the ACTOR's latent encoder sees only slow, per-episode-constant
+    extrinsics (load proxy, contact friction, [geometry]) instead of the full
+    privileged vector.  This mirrors HORA, whose ``priv_info`` is mass/friction/
+    scale/COM — not object state.  Routing fast object state (euler/angvel/quat/
+    rel-pos/contact) through the latent turns it into a state observer the Stage-2
+    adapter must reconstruct online, which compounds into covariate-shift collapse
+    at deployment.  The asymmetric CRITIC keeps the full ``privileged_obs_dim``
+    state (it is never deployed), so value learning is unaffected."""
+    actor_extrinsics_dim: int = 0
+    """Width of the actor's slow-extrinsics tail; derived in ``__post_init__``
+    when ``slow_extrinsics_only`` is set.  0 means the actor uses the full
+    privileged vector (legacy behaviour)."""
 
     # ---- Fingertip pad axis (kept for base __init__; unused by the reward) ----
     fingertip_pad_axis_local: tuple[float, float, float] = (0.0, 0.0, 1.0)
@@ -335,27 +533,26 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            # Five-contact full-mesh grasp generated by
-            # tools/render_linker_posture.py.  The index terminal/front pad presses
-            # near the cap center with ~0.52 mm preload and a larger downward
-            # attack angle.  Middle/ring/pinky stack down one handle side and the
-            # thumb opposes them.  Only *_distal meshes touch the screwdriver.
-            pos=(0.17506961, -0.07684517, 1.31203946),
-            rot=(0.42902518, -0.48771970, -0.20276002, 0.73277232),
+            # Hardware-safe legacy-task seed. The original lateral posture used
+            # PIP values above the real 1.08-rad limit. These conservative values
+            # retain >=0.10 rad margin (including the thin-handle flex offset);
+            # baseline/DR policies still require their own posture search and
+            # retraining before release.
+            pos=(0.15107654, -0.06682857, 1.32253946),
+            rot=(0.44578500, -0.47244983, -0.22820989, 0.72524971),
             joint_pos={
                 # index / middle / ring / pinky: roll, pitch, pip, dip(=0.8917*pip)
-                "index_mcp_roll": 0.112665, "index_mcp_pitch": 0.073330,
-                "index_pip": 1.073807, "index_dip": 0.957514,
-                "middle_mcp_roll": -0.024834, "middle_mcp_pitch": 0.138236,
-                "middle_pip": 1.057659, "middle_dip": 0.943115,
-                "ring_mcp_roll": 0.053014, "ring_mcp_pitch": 0.399275,
-                "ring_pip": 0.909139, "ring_dip": 0.810679,
-                "pinky_mcp_roll": 0.123575, "pinky_mcp_pitch": 0.694853,
-                "pinky_pip": 0.638524, "pinky_dip": 0.569372,
-                # All joints retain at least 0.04 rad of URDF-limit margin.
-                "thumb_cmc_yaw": 1.065296, "thumb_cmc_roll": 0.601400,
-                "thumb_cmc_pitch": 0.040001, "thumb_mcp": 0.574150,
-                "thumb_ip": 0.667105,
+                "index_mcp_roll": 0.070000, "index_mcp_pitch": 0.140535,
+                "index_pip": 0.970000, "index_dip": 0.864949,
+                "middle_mcp_roll": -0.070000, "middle_mcp_pitch": 0.184823,
+                "middle_pip": 0.930000, "middle_dip": 0.829281,
+                "ring_mcp_roll": -0.070000, "ring_mcp_pitch": 0.449762,
+                "ring_pip": 0.930000, "ring_dip": 0.829281,
+                "pinky_mcp_roll": 0.045669, "pinky_mcp_pitch": 0.654302,
+                "pinky_pip": 0.930000, "pinky_dip": 0.829281,
+                "thumb_cmc_yaw": 0.673745, "thumb_cmc_roll": 1.120000,
+                "thumb_cmc_pitch": 0.100000, "thumb_mcp": 0.876434,
+                "thumb_ip": 1.018329,
             },
         ),
         actuators={
@@ -373,10 +570,65 @@ class LinkerL20ScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     # Must stay in sync with init_state.joint_pos above.
     pregrasp_positions: dict[str, tuple[float, ...]] = field(
         default_factory=lambda: {
-            "index":  (0.112665, 0.073330, 1.073807),
-            "middle": (-0.024834, 0.138236, 1.057659),
-            "ring":   (0.053014, 0.399275, 0.909139),
-            "pinky":  (0.123575, 0.694853, 0.638524),
-            "thumb":  (1.065296, 0.601400, 0.040001, 0.574150),
+            "index":  (0.070000, 0.140535, 0.970000),
+            "middle": (-0.070000, 0.184823, 0.930000),
+            "ring":   (-0.070000, 0.449762, 0.930000),
+            "pinky":  (0.045669, 0.654302, 0.930000),
+            "thumb":  (0.673745, 1.120000, 0.100000, 0.876434),
         }
     )
+
+    def __post_init__(self) -> None:
+        # Base wires the geometry MultiAssetSpawner + replicate_physics when
+        # randomize_geometry is on; then we add the LinkerL20-specific pieces:
+        # the +2 privileged-obs channels and the per-(d,L)-bucket pregrasp table.
+        if self.contact_d_far_margin <= self.contact_d_margin:
+            raise ValueError(
+                "contact_d_far_margin must be greater than contact_d_margin"
+            )
+        if self.pen_deadband < 0.0 or self.target_penetration_scale < 0.0:
+            raise ValueError(
+                "force-free penetration proxy parameters must be non-negative"
+            )
+        if any(value < 0.0 for value in self.contact_d_margin_by_finger.values()):
+            raise ValueError(
+                "per-finger contact distance margins must be non-negative"
+            )
+        super().__post_init__()
+        if self.domain_rand.randomize_geometry:
+            self.privileged_obs_dim += 2  # +diameter scale, +length scale → 22
+            manifest_path = Path(self.screwdriver_variants_dir) / "manifest.json"
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            self.pregrasp_positions_buckets = seed_pregrasp_buckets(
+                self.pregrasp_positions, manifest, _FLEX_WEIGHTS
+            )
+            base_length = float(manifest["base"]["length"])
+            root_offsets = [(0.0, 0.0, 0.0)] * int(manifest["num_buckets"])
+            for variant in manifest["variants"]:
+                root_offsets[int(variant["bucket"])] = (
+                    0.0,
+                    0.0,
+                    float(variant["length"]) - base_length,
+                )
+            self.pregrasp_root_pos_offsets_buckets = root_offsets
+
+        # Finalise the actor obs space for the latent-conditioned (deployable)
+        # mode: [proprio(history_obs_dim) , privileged(privileged_obs_dim)].
+        # history_obs_dim = 2 * n_finger_dofs = 32; privileged_obs_dim is 20
+        # (or 22 under geometry DR, bumped just above).
+        if self.latent_conditioned:
+            if self.slow_extrinsics_only:
+                # Actor sees only the slow extrinsics tail: load proxy + contact
+                # friction (+2 geometry when geometry DR is on).  The critic
+                # still receives the full privileged_obs_dim via state_space.
+                self.actor_extrinsics_dim = 2 + (
+                    2 if self.domain_rand.randomize_geometry else 0
+                )
+                actor_priv = self.actor_extrinsics_dim
+            else:
+                actor_priv = self.privileged_obs_dim
+            obs_dim = self.history_obs_dim * self.actor_frame_count + actor_priv
+            self.observation_space = gym.spaces.Box(
+                low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+            )

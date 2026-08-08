@@ -1,0 +1,132 @@
+{
+  "candidate_group_index": 112,
+  "candidate_index": 624,
+  "cost": 0.016741983592510223,
+  "fingertip_total_force_max_n": {
+    "index": 1.657015323638916,
+    "middle": 3.646144151687622,
+    "pinky": 2.6186351776123047,
+    "ring": 1.77793288230896,
+    "thumb": 3.478814125061035
+  },
+  "first_done_step": -1,
+  "functional_contact_topology": {
+    "active_role_count": 5,
+    "active_roles": [
+      "index",
+      "middle",
+      "ring",
+      "pinky",
+      "thumb"
+    ],
+    "critical_roles_pass": true,
+    "mean_role_contact_fraction": 1.0,
+    "pass": true
+  },
+  "functional_physics_gate": true,
+  "joint_positions_independent": {
+    "index_mcp_pitch": 0.5461605996458497,
+    "index_mcp_roll": 0.05414624541908073,
+    "index_pip": 0.9885106328788478,
+    "middle_mcp_pitch": 0.7656786579772658,
+    "middle_mcp_roll": 0.0006154768077150623,
+    "middle_pip": 1.372393166378685,
+    "pinky_mcp_pitch": 0.7322323193351579,
+    "pinky_mcp_roll": 0.0458935652917647,
+    "pinky_pip": 1.14897143528816,
+    "ring_mcp_pitch": 0.6507791025586955,
+    "ring_mcp_roll": -0.015733775224370507,
+    "ring_pip": 0.7018963003365457,
+    "thumb_cmc_pitch": 0.20380961699860453,
+    "thumb_cmc_roll": 1.0608869680859287,
+    "thumb_cmc_yaw": 0.89291068971524,
+    "thumb_mcp": 0.31407836112665954
+  },
+  "label": "preload_0.108_0.075_0.090_0.450_0.388:group=112:replica=4",
+  "physics_contact_gate": true,
+  "proximal_force_max_n": {
+    "hand_base_link": 0.0,
+    "index_metacarpals": 0.0,
+    "index_middle": 0.0,
+    "index_proximal": 0.0,
+    "middle_metacarpals": 0.0,
+    "middle_middle": 0.0,
+    "middle_proximal": 0.0,
+    "pinky_metacarpals": 0.0,
+    "pinky_middle": 0.0,
+    "pinky_proximal": 0.0,
+    "ring_metacarpals": 0.0,
+    "ring_middle": 0.0,
+    "ring_proximal": 0.0,
+    "thumb_metacarpals": 0.0,
+    "thumb_metacarpals_base1": 0.0,
+    "thumb_metacarpals_base2": 0.0,
+    "thumb_proximal": 0.0
+  },
+  "replica_index": 4,
+  "role_contact_fraction": {
+    "index": 1.0,
+    "middle": 1.0,
+    "pinky": 1.0,
+    "ring": 1.0,
+    "thumb": 1.0
+  },
+  "role_force_max_n": {
+    "index": 1.657015323638916,
+    "middle": 3.646144151687622,
+    "pinky": 2.6186351776123047,
+    "ring": 1.77793288230896,
+    "thumb": 3.478814125061035
+  },
+  "role_force_mean_n": {
+    "index": 1.6224546432495117,
+    "middle": 3.5815227031707764,
+    "pinky": 2.5699777603149414,
+    "ring": 1.5591278076171875,
+    "thumb": 3.402600049972534
+  },
+  "root_pos_w": [
+    -0.023818780134293113,
+    0.1742023017880395,
+    1.4570639296862542
+  ],
+  "root_quat_wxyz": [
+    0.520240224512027,
+    0.47890511461006113,
+    0.520240224512027,
+    -0.47890511461006113
+  ],
+  "settled_joint_positions_independent": {
+    "index_mcp_pitch": 0.5653604865074158,
+    "index_mcp_roll": 0.05934353545308113,
+    "index_pip": 0.968222439289093,
+    "middle_mcp_pitch": 0.7624386548995972,
+    "middle_mcp_roll": 0.000274857971817255,
+    "middle_pip": 1.3253849744796753,
+    "pinky_mcp_pitch": 0.7313147187232971,
+    "pinky_mcp_roll": 0.03855222463607788,
+    "pinky_pip": 1.099283218383789,
+    "ring_mcp_pitch": 0.6979696750640869,
+    "ring_mcp_roll": -0.019332852214574814,
+    "ring_pip": 0.7066357135772705,
+    "thumb_cmc_pitch": -0.0008721723570488393,
+    "thumb_cmc_roll": 1.143662929534912,
+    "thumb_cmc_yaw": 0.7757692337036133,
+    "thumb_mcp": 0.22159861028194427
+  },
+  "settled_screwdriver_joint_positions": {
+    "screwdriver_body_cap_joint": 0.026065973564982414,
+    "table_screwdriver_joint_1": -0.04309025779366493,
+    "table_screwdriver_joint_2": -0.013870046474039555,
+    "table_screwdriver_joint_3": 0.004318596329540014
+  },
+  "settled_target_error_max_rad": 0.20468178935565337,
+  "strict_all_finger_physics_gate": true,
+  "terminated": false,
+  "terminated_or_truncated": false,
+  "tilt_max_rad": 0.04528570920228958,
+  "truncated": false,
+  "wrong_surface_force_max_n": 0.0,
+  "zero_action_qualified_shaft_drift_rad_s": 9.98439077193325e-07,
+  "zero_action_raw_shaft_drift_rad_s": 9.98439077193325e-07
+}

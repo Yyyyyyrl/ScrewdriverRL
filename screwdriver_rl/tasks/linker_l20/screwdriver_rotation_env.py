@@ -9,12 +9,11 @@ Allegro task.
 
 Key differences from the base/Allegro design
 ---------------------------------------------
-* **Per-fingertip ContactSensors** (one per ``*_distal`` body, filtered against the
-  screwdriver's stick/body/cap) measure exactly how hard each finger presses the
-  screwdriver — and the cap specifically.  Contact is judged purely from this
-  force through a trapezoidal "good pressure" window; there is no distance gate and
-  no pad-facing gate.  A separate unfiltered sensor over the non-fingertip links
-  flags wrong-surface (back/knuckle/palm) contact.
+* **Kinematic fingertip contact** uses signed surface clearance and fixed
+  per-finger margins.  ContactSensor forces remain diagnostic-only; they do not
+  gate progress, scale rewards, or enter policy/privileged observations.  A
+  separate unfiltered sensor over non-fingertip links supplies the binary
+  wrong-surface safety predicate.
 * **Full Coulomb load from step 0** (the curriculum pins ``screwdriver_load_scale``
   to 1.0) plus strong rotation/tilt damping ⇒ the handle never free-spins.
 * **Prescribed-lite finger roles**: the index holds the cap down, the thumb +
@@ -36,6 +35,7 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from screwdriver_rl.core import rewards
+from screwdriver_rl.utils.linker_topdown_grasp_wrench import PAD_AXIS_LOCAL
 from screwdriver_rl.tasks.base.screwdriver_rotation_env import ScrewdriverRotationEnv
 
 from .screwdriver_rotation_env_cfg import LinkerL20ScrewdriverRotationEnvCfg
@@ -145,15 +145,354 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             self._drive_tip_idxs, dtype=torch.long, device=self.device
         )
 
+        contact_margins = [
+            float(
+                cfg.contact_d_margin_by_finger.get(
+                    finger, cfg.contact_d_margin
+                )
+            )
+            for finger in self.fingers
+        ]
+        self._contact_d_margin = torch.tensor(
+            contact_margins, dtype=torch.float32, device=self.device
+        ).unsqueeze(0)
+        self._contact_d_ramp_width = float(
+            cfg.contact_d_far_margin - cfg.contact_d_margin
+        )
+
         # Home (pregrasp) targets per finger DOF, and the per-DOF motion window.
         self._home_targets: torch.Tensor = self._default_finger_pos.clone()  # (N, D)
         range_t = self._build_joint_range_tensor()  # (1, D)
+        self._joint_range = range_t
         # Tighten the base target-clamp bounds to home +/- range so base
         # _pre_physics_step physically restricts each DOF to a small window.
         self._finger_lower = torch.maximum(self._finger_lower, self._home_targets - range_t)
         self._finger_upper = torch.minimum(self._finger_upper, self._home_targets + range_t)
         # Keep the reset pose inside the (now tighter) window.
         self._cur_targets = torch.clamp(self._cur_targets, self._finger_lower, self._finger_upper)
+
+        # Reward authorization state.  The base counters are repurposed below to
+        # track only contact-authorized turn progress; raw shaft motion is kept in
+        # separate diagnostics so coasting cannot satisfy evaluation success.
+        self._drive_contact_streak = torch.zeros(self.num_envs, device=self.device)
+        self._raw_total_turn = torch.zeros(self.num_envs, device=self.device)
+        self._raw_net_turn = torch.zeros(self.num_envs, device=self.device)
+        self._steps_since_reset = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._reset_action_scale = torch.zeros(self.num_envs, device=self.device)
+        self._reset_contact_guard_retries = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._reset_contact_guard_donor_repaired = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        # Cached, already-settled kinematic states form an empirical
+        # contact-conditioned proposal bank.  They let large batches repair
+        # rejection-sampling tails without advancing the entire PhysX scene by
+        # another 32 hidden steps for every remaining outlier.
+        self._reset_contact_cache_valid = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._reset_contact_cache_variant = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        self._reset_contact_cache_hand_root = torch.zeros(
+            self.num_envs, 7, device=self.device
+        )
+        self._reset_contact_cache_hand_q = torch.zeros_like(
+            self.allegro.data.joint_pos
+        )
+        self._reset_contact_cache_hand_target = torch.zeros_like(
+            self.allegro.data.joint_pos
+        )
+        self._reset_contact_cache_screw_root = torch.zeros(
+            self.num_envs, 7, device=self.device
+        )
+        self._reset_contact_cache_screw_q = torch.zeros_like(
+            self.screwdriver.data.joint_pos
+        )
+        self._reset_contact_cache_cur_targets = torch.zeros_like(
+            self._cur_targets
+        )
+        self._reset_contact_cache_root_pos_noise = torch.zeros_like(
+            self._env_reset_root_pos_noise
+        )
+        self._reset_contact_cache_root_rpy_noise = torch.zeros_like(
+            self._env_reset_root_rpy_noise
+        )
+        self._reset_contact_cache_screw_tilt_noise = torch.zeros_like(
+            self._env_reset_screwdriver_tilt_noise
+        )
+        self._reset_contact_cache_joint_bias = torch.zeros_like(
+            self._env_joint_position_bias
+        )
+
+    def _reset_idx(self, env_ids) -> None:
+        """Reset Linker-only contact authorization and raw-motion diagnostics."""
+        if env_ids is None:
+            reset_ids = self.allegro._ALL_INDICES
+        elif isinstance(env_ids, torch.Tensor):
+            reset_ids = env_ids.to(dtype=torch.long, device=self.device)
+        else:
+            reset_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
+
+        super()._reset_idx(env_ids)
+
+        # The base reset performs the normal compliant settle.  Top-down tasks
+        # may opt into a hard distance-contact precondition: failed environment
+        # rows are resampled, while a bounded exhaustion raises instead of
+        # silently starting an invalid episode.
+        if hasattr(self, "_reset_contact_guard_retries"):
+            self._enforce_initial_contact_guard(reset_ids)
+
+        # DirectRLEnv may dispatch here while ``super().__init__`` is still
+        # constructing the subclass, before these Linker-only buffers exist.
+        if hasattr(self, "_drive_contact_streak"):
+            self._drive_contact_streak[reset_ids] = 0.0
+            self._raw_total_turn[reset_ids] = 0.0
+            self._raw_net_turn[reset_ids] = 0.0
+            self._steps_since_reset[reset_ids] = 0
+            self._reset_action_scale[reset_ids] = 0.0
+
+    def _enforce_initial_contact_guard(self, reset_ids: torch.Tensor) -> None:
+        """Guarantee the configured distance-contact count before policy step 0."""
+        min_fingers = int(self.cfg.reset_contact_guard_min_fingers)
+        max_resamples = int(self.cfg.reset_contact_guard_max_resamples)
+        if min_fingers <= 0 or reset_ids.numel() == 0:
+            return
+        if min_fingers > len(self.fingers):
+            raise ValueError(
+                "reset_contact_guard_min_fingers exceeds resolved fingertips"
+            )
+        if max_resamples < 0:
+            raise ValueError("reset_contact_guard_max_resamples must be non-negative")
+        if self.cfg.reset_contact_steps <= 0:
+            raise ValueError("reset contact guard requires reset_contact_steps > 0")
+
+        self._reset_contact_guard_retries[reset_ids] = 0
+        self._reset_contact_guard_donor_repaired[reset_ids] = False
+        donor_attempted = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        for resample_round in range(max_resamples + 1):
+            _, _, present = self._compute_distance_contact()
+            contact_count = present[reset_ids].sum(dim=-1)
+            passing = reset_ids[contact_count >= min_fingers]
+            self._cache_reset_contact_states(passing)
+            failed = reset_ids[contact_count < min_fingers]
+            if failed.numel() == 0:
+                retries = self._reset_contact_guard_retries[reset_ids].float()
+                self.extras["reset_contact_guard_retry_mean"] = retries.mean()
+                self.extras["reset_contact_guard_retry_max"] = retries.max()
+                self.extras["reset_contact_guard_pass"] = torch.tensor(
+                    True, device=self.device
+                )
+                self.extras["reset_contact_guard_donor_repair_fraction"] = (
+                    self._reset_contact_guard_donor_repaired[reset_ids]
+                    .float()
+                    .mean()
+                )
+                return
+            if resample_round >= max_resamples:
+                self.extras["reset_contact_guard_pass"] = torch.tensor(
+                    False, device=self.device
+                )
+                failed_preview = failed[:16].detach().cpu().tolist()
+                raise RuntimeError(
+                    "reset contact guard exhausted after "
+                    f"{max_resamples} resamples; {failed.numel()} envs still "
+                    f"have fewer than {min_fingers} contacts; ids={failed_preview}"
+                )
+
+            donor_candidates = failed[~donor_attempted[failed]]
+            repaired = self._restore_contact_states_from_donors(
+                donor_candidates
+            )
+            if repaired.numel() > 0:
+                donor_attempted[repaired] = True
+                self._reset_contact_guard_donor_repaired[repaired] = True
+                self._reset_contact_guard_retries[repaired] += 1
+
+            unresolved = failed[~torch.isin(failed, repaired)]
+            if unresolved.numel() == 0:
+                # One forward in the donor restore updated body poses; validate
+                # the kinematic predicate at the top of the next loop.
+                continue
+
+            self._reset_contact_guard_retries[unresolved] += 1
+            # No cached donor exists for this geometry (possible for a tiny
+            # asynchronous reset subset).  Fall back to the original physical
+            # rejection sample, with complement-state freezing in the base env.
+            super()._reset_idx(unresolved)
+
+    def _cache_reset_contact_states(self, env_ids: torch.Tensor) -> None:
+        """Store settled initial states that already satisfy the contact guard."""
+        if env_ids.numel() == 0:
+            return
+        variant = getattr(self, "_env_variant_idx", None)
+        if variant is None:
+            self._reset_contact_cache_variant[env_ids] = 0
+        else:
+            self._reset_contact_cache_variant[env_ids] = variant[env_ids]
+        self._reset_contact_cache_hand_root[env_ids] = (
+            self.allegro.data.root_state_w[env_ids, :7]
+        )
+        self._reset_contact_cache_hand_q[env_ids] = self.allegro.data.joint_pos[
+            env_ids
+        ]
+        self._reset_contact_cache_hand_target[env_ids] = (
+            self.allegro.data.joint_pos_target[env_ids]
+        )
+        self._reset_contact_cache_screw_root[env_ids] = (
+            self.screwdriver.data.root_state_w[env_ids, :7]
+        )
+        self._reset_contact_cache_screw_q[env_ids] = (
+            self.screwdriver.data.joint_pos[env_ids]
+        )
+        self._reset_contact_cache_cur_targets[env_ids] = self._cur_targets[
+            env_ids
+        ]
+        self._reset_contact_cache_root_pos_noise[env_ids] = (
+            self._env_reset_root_pos_noise[env_ids]
+        )
+        self._reset_contact_cache_root_rpy_noise[env_ids] = (
+            self._env_reset_root_rpy_noise[env_ids]
+        )
+        self._reset_contact_cache_screw_tilt_noise[env_ids] = (
+            self._env_reset_screwdriver_tilt_noise[env_ids]
+        )
+        self._reset_contact_cache_joint_bias[env_ids] = (
+            self._env_joint_position_bias[env_ids]
+        )
+        self._reset_contact_cache_valid[env_ids] = True
+
+    def _restore_contact_states_from_donors(
+        self, failed: torch.Tensor
+    ) -> torch.Tensor:
+        """Repair failed rows from cached, same-geometry settled reset states."""
+        if failed.numel() == 0:
+            return failed
+        variant = getattr(self, "_env_variant_idx", None)
+        current_variant = (
+            torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            if variant is None
+            else variant
+        )
+        repaired_chunks: list[torch.Tensor] = []
+        donor_chunks: list[torch.Tensor] = []
+        for bucket in torch.unique(current_variant[failed]):
+            bucket_failed = failed[current_variant[failed] == bucket]
+            donor_pool = torch.nonzero(
+                self._reset_contact_cache_valid
+                & (self._reset_contact_cache_variant == bucket),
+                as_tuple=False,
+            ).squeeze(-1)
+            if donor_pool.numel() == 0:
+                continue
+            donor_index = torch.arange(
+                bucket_failed.numel(), device=self.device
+            ) % donor_pool.numel()
+            repaired_chunks.append(bucket_failed)
+            donor_chunks.append(donor_pool[donor_index])
+        if not repaired_chunks:
+            return failed[:0]
+
+        repaired = torch.cat(repaired_chunks)
+        donors = torch.cat(donor_chunks)
+        donor_hand_root = self._reset_contact_cache_hand_root[donors].clone()
+        donor_hand_root[:, :3] += (
+            self.scene.env_origins[repaired] - self.scene.env_origins[donors]
+        )
+        donor_screw_root = self._reset_contact_cache_screw_root[donors].clone()
+        donor_screw_root[:, :3] += (
+            self.scene.env_origins[repaired] - self.scene.env_origins[donors]
+        )
+
+        self.allegro.write_root_pose_to_sim(donor_hand_root, env_ids=repaired)
+        self.allegro.write_root_velocity_to_sim(
+            torch.zeros((repaired.numel(), 6), device=self.device),
+            env_ids=repaired,
+        )
+        hand_q = self._reset_contact_cache_hand_q[donors].clone()
+        self.allegro.set_joint_position_target(
+            self._reset_contact_cache_hand_target[donors], env_ids=repaired
+        )
+        self.allegro.write_joint_state_to_sim(
+            hand_q, torch.zeros_like(hand_q), env_ids=repaired
+        )
+        self.screwdriver.write_root_pose_to_sim(
+            donor_screw_root, env_ids=repaired
+        )
+        self.screwdriver.write_root_velocity_to_sim(
+            torch.zeros((repaired.numel(), 6), device=self.device),
+            env_ids=repaired,
+        )
+        screw_q = self._reset_contact_cache_screw_q[donors].clone()
+        self.screwdriver.write_joint_state_to_sim(
+            screw_q, torch.zeros_like(screw_q), env_ids=repaired
+        )
+
+        self._cur_targets[repaired] = self._reset_contact_cache_cur_targets[
+            donors
+        ]
+        self._env_reset_root_pos_noise[repaired] = (
+            self._reset_contact_cache_root_pos_noise[donors]
+        )
+        self._env_reset_root_rpy_noise[repaired] = (
+            self._reset_contact_cache_root_rpy_noise[donors]
+        )
+        self._env_reset_screwdriver_tilt_noise[repaired] = (
+            self._reset_contact_cache_screw_tilt_noise[donors]
+        )
+        self._env_joint_position_bias[repaired] = (
+            self._reset_contact_cache_joint_bias[donors]
+        )
+        self._prev_z[repaired] = screw_q[:, self._screwdriver_z_id]
+        self._prev_tilt_xy[repaired] = screw_q[
+            :, self._screwdriver_euler_ids[:2]
+        ]
+        self.scene.write_data_to_sim()
+        self.sim.forward()
+        self.scene.update(dt=self.physics_dt)
+        if self._prev_shaft_quat is not None:
+            shaft_quat = self._get_shaft_quat()
+            if shaft_quat is not None:
+                self._prev_shaft_quat[repaired] = shaft_quat[repaired].detach()
+        if self.cfg.asymmetric_obs:
+            finger_q = hand_q[:, self._finger_joint_ids]
+            observed_finger_q = self._observed_finger_q(finger_q, repaired)
+            frame = self._proprio_codec.encode_frame(
+                observed_finger_q, self._cur_targets[repaired]
+            )
+            self._prop_hist_buf[repaired] = frame.unsqueeze(1).expand(
+                -1, self.cfg.prop_hist_len, -1
+            )
+        return repaired
+
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        """Preserve the validated reset grasp before blending in policy actions."""
+        hold = max(int(self.cfg.reset_action_hold_steps), 0)
+        ramp = max(int(self.cfg.reset_action_ramp_steps), 0)
+        age = self._steps_since_reset
+        if ramp > 0:
+            scale = ((age - hold + 1).float() / float(ramp)).clamp(0.0, 1.0)
+        else:
+            scale = (age >= hold).to(dtype=actions.dtype)
+        self._reset_action_scale = scale
+        phase = getattr(self, "_curriculum_phase", None)
+        phase_action_scale = float(
+            getattr(phase, "action_scale_multiplier", 1.0)
+        )
+        super()._pre_physics_step(
+            actions * scale.unsqueeze(-1) * phase_action_scale
+        )
+        if self.cfg.absolute_action_targets:
+            target = self._home_targets + self._joint_range * self.actions
+            self._cur_targets = torch.clamp(
+                target, self._finger_lower, self._finger_upper
+            )
+        self._steps_since_reset += 1
 
     def _build_joint_range_tensor(self) -> torch.Tensor:
         """Per-DOF motion half-width (rad) around home, shape ``(1, num_finger_dofs)``.
@@ -205,7 +544,16 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
         # attribute is set; we use our own per-finger sensors instead.
         self._fingertip_contact_sensor = None
 
-        # --- Wrong-surface sensor (one unfiltered sensor over all non-tip links) ---
+        # --- Wrong-surface sensor (all non-tip links) ---
+        # Filters are attached so the same sensor yields two different readings:
+        # net_forces_w over ALL contact sources, and force_matrix_w restricted to
+        # the screwdriver.  They are not the same quantity and the difference is
+        # not small.  Self-collision is enabled between the palm and each
+        # proximal phalanx (see SELF_COLLISION_PAIRS above), so a finger folding
+        # against the palm registers on net_forces_w exactly like a proximal link
+        # pressing the handle would.  The reward reads the unfiltered one for
+        # continuity with every run to date; eval reports both, and the gap
+        # between them is the self-contact the name never meant to cover.
         prox_regex = "(" + "|".join(p.strip("^$") for p in self.PROXIMAL_BODY_PATTERNS) + ")"
         self._proximal_sensor = ContactSensor(
             ContactSensorCfg(
@@ -213,6 +561,7 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
                 history_length=0,
                 update_period=0.0,
                 track_air_time=False,
+                filter_prim_paths_expr=list(filters),
             )
         )
         self.scene.sensors["contact_proximal"] = self._proximal_sensor
@@ -226,9 +575,9 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
                 )
             ),
         )
-        # Apply self-collision pair filters on the source env BEFORE cloning.
-        self._apply_self_collision_filters()
-        self.scene.clone_environments(copy_from_source=False)
+        # Clone envs + collision filtering (replicate-physics vs per-env-geometry
+        # paths differ; see base._finalize_scene).
+        self._finalize_scene()
         self.scene.articulations["allegro"] = self.allegro
         self.scene.articulations["screwdriver"] = self.screwdriver
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -261,11 +610,114 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             F_cap[:, i] = mag[:, _SD_CAP]
 
         wrong = torch.zeros(n, device=self.device)
+        wrong_obj = torch.zeros(n, device=self.device)
         if self._proximal_sensor is not None:
             net = self._proximal_sensor.data.net_forces_w  # (N, n_prox, 3) or None
             if net is not None:
                 wrong = torch.linalg.norm(net, dim=-1).sum(dim=-1)
+            # Same links, screwdriver contacts only.  This is what the metric's
+            # name claims to measure; `wrong` above also counts hand self-contact.
+            fmat = self._proximal_sensor.data.force_matrix_w  # (N, n_prox, 3, 3)
+            if fmat is not None:
+                wrong_obj = torch.linalg.norm(fmat, dim=-1).sum(dim=(-1, -2))
+        self._wrong_surface_object_force = wrong_obj
         return F_total, F_body, F_cap, wrong
+
+    def _compute_pad_orientation(self) -> torch.Tensor:
+        """Per-finger cosine between the pad direction and the handle axis.
+
+        The force-based ``_compute_pad_facing`` is undefined when a fingertip
+        rests on the handle without pressing it, which is the normal situation
+        under ``reset_zero_tension_targets``: the snap sets targets equal to
+        measured positions, so contacts persist geometrically while their forces
+        relax to nearly nothing.  Judging "pad or back" by force alone therefore
+        reports a light but perfectly good pad contact as no contact at all.
+
+        This measures orientation instead: +1 means the pad points squarely at
+        the handle axis, -1 means the back of the finger does.  Body poses come
+        from the simulator, so nothing here reconstructs the wrist placement or
+        the object's settled tilt.
+        """
+        n, nf = self.num_envs, len(self.fingers)
+        out = torch.zeros(n, nf, device=self.device)
+        if not self._fingertip_body_ids or not self._handle_body_ids:
+            return out
+        state = self.allegro.data.body_state_w[:, self._fingertip_body_ids, :]
+        tip_pos, tip_quat = state[..., :3], state[..., 3:7]
+        base = self.screwdriver.data.body_state_w[
+            :, self._handle_body_ids[self._handle_base_idx], :3
+        ]
+        top = self.screwdriver.data.body_state_w[
+            :, self._handle_body_ids[self._handle_cap_idx], :3
+        ]
+        axis = top - base
+        axis = axis / axis.norm(dim=-1, keepdim=True).clamp(min=1.0e-9)
+        for i, finger in enumerate(self.fingers):
+            rel = tip_pos[:, i, :] - base
+            along = (rel * axis).sum(dim=-1, keepdim=True)
+            radial = rel - along * axis                     # tip -> axis, in-plane
+            inward = -radial / radial.norm(dim=-1, keepdim=True).clamp(min=1.0e-9)
+            axis_local = torch.tensor(
+                PAD_AXIS_LOCAL[finger], device=self.device, dtype=tip_pos.dtype
+            ).expand(n, 3)
+            pad_w = rewards.quat_apply(tip_quat[:, i, :], axis_local)
+            out[:, i] = (pad_w * inward).sum(dim=-1)
+        return out
+
+    def _compute_pad_facing(self) -> torch.Tensor:
+        """Per-finger cosine of the contact force against the inward pad normal.
+
+        ``+1`` means the handle bears squarely on the fingertip pad, ``-1`` on the
+        back of the finger, ``0`` on the side or when there is no load.
+
+        Measured entirely from simulator state -- the contact force vector from
+        each fingertip's filtered sensor, and the pad direction as a per-link
+        constant rotated by that body's own orientation.  Nothing here
+        reconstructs contact points, object pose or wrist placement, which is
+        deliberate: four separate offline reconstructions of this same quantity
+        each disagreed with the simulator in a different way, and the last one
+        still attributed 37.6 N to a fingertip it placed 7.4 mm clear of the
+        object.
+        """
+        n, nf = self.num_envs, len(self.fingers)
+        out = torch.zeros(n, nf, device=self.device)
+        if not self._fingertip_body_ids:
+            return out
+        quats = self.allegro.data.body_state_w[:, self._fingertip_body_ids, 3:7]
+        for i, (finger, sensor) in enumerate(zip(self.fingers, self._finger_sensors)):
+            fmat = sensor.data.force_matrix_w  # (N, 1, 3, 3) or None
+            if fmat is None:
+                continue
+            # Sum the handle columns; the stick is not part of the grasp.
+            force = fmat[:, 0, _SD_BODY, :] + fmat[:, 0, _SD_CAP, :]
+            axis_local = torch.tensor(
+                PAD_AXIS_LOCAL[finger], device=self.device, dtype=force.dtype
+            ).expand(n, 3)
+            axis_w = rewards.quat_apply(quats[:, i, :], axis_local)
+            magnitude = torch.linalg.norm(force, dim=-1)
+            safe = magnitude.clamp(min=1.0e-6)
+            cosine = (force * -axis_w).sum(dim=-1) / safe
+            out[:, i] = torch.where(
+                magnitude > 1.0e-6, cosine, torch.zeros_like(cosine)
+            )
+        return out
+
+    def _compute_distance_contact(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return surface clearance, soft contact score, and binary contact."""
+        clearance = self.compute_surface_clearance()
+        if clearance.shape[1] == 0:
+            return clearance, clearance, clearance.to(dtype=torch.bool)
+        margin = self._contact_d_margin
+        if margin.shape[1] != clearance.shape[1]:
+            raise RuntimeError(
+                "contact distance margin width does not match resolved fingertips"
+            )
+        far = margin + self._contact_d_ramp_width
+        score = rewards.distance_window(clearance, margin, far)
+        present = rewards.contact_present_dist(clearance, margin)
+        return clearance, score, present
 
     def _compute_fingertip_tangential_speed(self) -> torch.Tensor:
         """Per-finger fingertip speed tangential to the handle axis, ``(N, n_fingers)``."""
@@ -274,6 +726,25 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
         base = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_base_idx], :3]
         top = self.screwdriver.data.body_state_w[:, self._handle_body_ids[self._handle_cap_idx], :3]
         return rewards.tangential_speed(tip_pos, tip_vel, base, top)
+
+    def _compute_surface_co_motion(self) -> torch.Tensor:
+        """Per-finger co-motion score with the handle surface, ``(N, n_fingers)``.
+
+        Measured from the handle body's world twist, so precession/tilt do not
+        alias into the score; see ``rewards.surface_co_motion``.
+        """
+        tip = self.allegro.data.body_state_w[:, self._fingertip_body_ids]
+        handle = self.screwdriver.data.body_state_w[
+            :, self._handle_body_ids[self._handle_base_idx]
+        ]
+        return rewards.surface_co_motion(
+            tip[..., :3],
+            tip[..., 7:10],
+            handle[..., :3],
+            handle[..., 7:10],
+            handle[..., 10:13],
+            self.cfg.turn_motion_surface_speed_floor,
+        )
 
     # -----------------------------------------------------------------------
     # Curriculum (same selection as base; prints the new phase fields)
@@ -306,7 +777,7 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             self.cfg.episode_length_s = active.episode_length_s
 
     # -----------------------------------------------------------------------
-    # Rewards (force-based; prescribed-lite finger roles; stay-home)
+    # Rewards (distance-contact; prescribed-lite finger roles; stay-home)
     # -----------------------------------------------------------------------
 
     def _get_rewards(self) -> torch.Tensor:
@@ -332,51 +803,165 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
         tilt_norm = torch.linalg.norm(tilt_xy, dim=-1)
         upright_gate = rewards.upright_gate(tilt_norm, cfg.turn_upright_gate_std)
 
-        # ---- Contact forces -> per-finger "good pressure" scores ----
-        F_total, F_body, F_cap, wrong_force = self._read_contact_forces()
-        fw = lambda f: rewards.force_window(  # noqa: E731
-            f, cfg.contact_f_min, cfg.contact_f_lo, cfg.contact_f_hi, cfg.contact_f_max
+        # ---- Kinematic fingertip contact; force remains diagnostic only ----
+        clearance, distance_score, distance_present = (
+            self._compute_distance_contact()
         )
-        engage = fw(F_total)        # (N, nf) total touch quality per finger
-        body_engage = fw(F_body)    # (N, nf) touch quality on the handle body
-        cap_engage = fw(F_cap)      # (N, nf) touch quality on the cap
-
-        # Turn gate: enough DRIVE fingers (non-index) pressing the body.
-        drive_body_engage = body_engage.index_select(1, self._drive_tip_idxs_t)  # (N, n_drive)
-        turn_gate = rewards.soft_count_gate(drive_body_engage, phase.min_drive_fingers)
+        diagnostic_tip_force, _, diagnostic_cap_force, wrong_force = (
+            self._read_contact_forces()
+        )
+        index_contact_binary = distance_present[:, self._index_tip_idx]
+        if cfg.role_neutral_fingertip_contact:
+            # Palm-down top-down grasp: any three fingertips may authorize
+            # rotation, so
+            # fingers can release and re-contact without a five-finger hard gate.
+            drive_score = distance_score
+            drive_present = distance_present
+            required_contacts = float(cfg.role_neutral_min_contact_fingers)
+            drive_count = drive_present.float().sum(dim=-1)
+            valid_contact = drive_count >= required_contacts
+        else:
+            # Historical lateral grasp keeps its drive/index roles, but both are
+            # judged by geometry rather than body/cap force labels.
+            drive_score = distance_score.index_select(1, self._drive_tip_idxs_t)
+            drive_present = distance_present.index_select(
+                1, self._drive_tip_idxs_t
+            )
+            required_contacts = float(phase.min_drive_fingers)
+            drive_count = drive_present.float().sum(dim=-1)
+            valid_contact = drive_count >= required_contacts
+            if cfg.turn_require_index_cap:
+                valid_contact = valid_contact & index_contact_binary
+        sustained_gate, self._drive_contact_streak = rewards.sustained_binary_gate(
+            valid_contact,
+            self._drive_contact_streak,
+            cfg.turn_contact_hold_steps,
+        )
+        contact_quality = rewards.soft_count_gate(
+            drive_score, required_contacts
+        )
+        turn_gate = sustained_gate * contact_quality
         combined_gate = turn_gate * upright_gate
 
-        # ---- Positive terms ----
-        turn_reward = phase.reward_turn_weight * fwd_vel * combined_gate
+        # ---- Co-motion authorization (anti-coasting / anti-creep) ----
+        # Distance contact is satisfied by a motionless resting grasp, so it
+        # cannot tell an active drive from solver creep.  Progress only pays
+        # while >= turn_motion_min_fingers contacting tips move with the
+        # handle surface.
+        if getattr(cfg, "turn_motion_authorized", False):
+            co_motion = self._compute_surface_co_motion()
+            motion_auth = rewards.soft_count_gate(
+                co_motion * distance_present.to(co_motion.dtype),
+                cfg.turn_motion_min_fingers,
+            )
+        else:
+            co_motion = None
+            motion_auth = torch.ones_like(upright_gate)
 
-        index_cap_reward = phase.w_index_cap * cap_engage[:, self._index_tip_idx] * upright_gate
+        # ---- Positive terms ----
+        turn_reward_gate = (
+            upright_gate
+            if getattr(cfg, "reward_physical_progress_outside_contact", False)
+            else combined_gate
+        ) * motion_auth
+        speed_power = float(cfg.turn_reward_power)
+        fwd_signal = fwd_vel.pow(speed_power)
+        rev_signal = rev_vel.pow(speed_power)
+        turn_reward = phase.reward_turn_weight * fwd_signal * turn_reward_gate
+        contact_authority_reward = phase.w_contact_authority * combined_gate
+        if cfg.role_neutral_fingertip_contact:
+            index_cap_reward = torch.zeros_like(turn_reward)
+        else:
+            index_cap_reward = (
+                phase.w_index_cap
+                * distance_score[:, self._index_tip_idx]
+                * upright_gate
+            )
 
         tang = self._compute_fingertip_tangential_speed()  # (N, nf)
-        tang_factor = (tang / max(cfg.drive_full_tangential_speed, 1e-6)).clamp(0.0, 1.0)
-        drive_terms = drive_body_engage * tang_factor.index_select(1, self._drive_tip_idxs_t)
+        drive_speed_ref: float | torch.Tensor = max(
+            cfg.drive_full_tangential_speed, 1.0e-6
+        )
+        if (
+            getattr(cfg, "scale_drive_speed_with_geometry", False)
+            and self._env_geom_scale is not None
+        ):
+            drive_speed_ref = drive_speed_ref * self._env_geom_scale[:, :1]
+        tang_factor = (tang / drive_speed_ref).clamp(0.0, 1.0)
+        if cfg.role_neutral_fingertip_contact:
+            drive_terms = drive_score * tang_factor
+        else:
+            drive_terms = drive_score * tang_factor.index_select(
+                1, self._drive_tip_idxs_t
+            )
         drive_reward = phase.w_drive * drive_terms.mean(dim=-1) * upright_gate
 
-        grip_reward = phase.w_grip * engage.mean(dim=-1)
+        grip_reward = phase.w_grip * distance_score.mean(dim=-1)
 
         # ---- Progress tracking + milestone ----
-        self._total_turn += torch.clamp(delta_z, min=0.0).detach()
-        self._net_turn += delta_z.detach()
-        milestone_reward = self._compute_milestone_reward(gate=combined_gate)
+        # Existing public metrics are authorization-qualified (contact AND
+        # co-motion) and therefore safe for checkpoint selection/promotion:
+        # creep-rotation under motionless fingers accrues nothing.  Raw shaft
+        # motion remains visible under explicit ``eval_raw_*`` diagnostics.
+        qualified_delta_z = delta_z * sustained_gate * motion_auth
+        self._total_turn += torch.clamp(qualified_delta_z, min=0.0).detach()
+        self._net_turn += qualified_delta_z.detach()
+        self._raw_total_turn += torch.clamp(delta_z, min=0.0).detach()
+        self._raw_net_turn += delta_z.detach()
+        milestone_reward = self._compute_milestone_reward(
+            gate=combined_gate * motion_auth
+        )
 
         # ---- Negative terms ----
-        reverse_cost = cfg.reward_reverse_weight * rev_vel * combined_gate
+        # Forward credit remains contact-authorized, but reverse shaft motion is
+        # a real loss even while the three-tip gate is temporarily closed.  Do
+        # not let the policy hide back-drive by deliberately dropping contact.
+        reverse_gate = (
+            upright_gate
+            if getattr(cfg, "penalize_reverse_outside_contact", False)
+            else combined_gate
+        )
+        reverse_weight = (
+            phase.reward_turn_weight * cfg.reverse_to_turn_ratio
+            if getattr(cfg, "match_reverse_weight_to_turn_weight", False)
+            else cfg.reward_reverse_weight
+        )
+        reverse_cost = reverse_weight * rev_signal * reverse_gate
         upright_cost = cfg.reward_upright_weight * torch.sum(tilt_xy ** 2, dim=-1)
+        fall_cost = phase.reward_fall_weight * (
+            tilt_norm > phase.upright_termination_threshold
+        ).to(dtype=tilt_norm.dtype)
         tilt_vel = (tilt_xy - self._prev_tilt_xy) / self._policy_dt
         self._prev_tilt_xy = tilt_xy.detach().clone()
         tilt_vel_cost = cfg.reward_tilt_velocity_weight * torch.linalg.norm(tilt_vel, ord=1, dim=-1)
 
-        excess_cost = phase.w_excess * rewards.excess_force(F_total, cfg.contact_f_max).sum(dim=-1)
-        wrong_surface_cost = phase.w_wrong * wrong_force
-        idle_cost = phase.w_idle * (F_total < cfg.contact_f_min).float().sum(dim=-1)
-
         finger_q = self.allegro.data.joint_pos[:, self._finger_joint_ids]
+        excess_cost = (
+            phase.w_excess
+            * cfg.target_penetration_scale
+            * rewards.target_penetration(
+                self._cur_targets, finger_q, cfg.pen_deadband
+            )
+        )
+        wrong_surface_present = (
+            wrong_force > cfg.wrong_surface_force_threshold
+        ).to(dtype=wrong_force.dtype)
+        wrong_surface_cost = phase.w_wrong * wrong_surface_present
+        idle_count = torch.relu(
+            torch.as_tensor(required_contacts, device=self.device) - drive_count
+        )
+        idle_cost = phase.w_idle * idle_count
+
         home_dev_cost = cfg.w_home_dev * rewards.home_deviation(
             finger_q, self._home_targets, cfg.home_deviation_deadband
+        )
+        target_span = (self._finger_upper - self._finger_lower).clamp_min(1.0e-6)
+        target_center = 0.5 * (self._finger_upper + self._finger_lower)
+        target_edge_fraction = (
+            2.0 * (self._cur_targets - target_center).abs() / target_span
+        )
+        target_bound_cost = cfg.w_target_bound * torch.mean(
+            torch.relu(target_edge_fraction - 0.8) ** 2, dim=-1
         )
 
         action_cost = cfg.reward_action_weight * torch.sum(self.actions ** 2, dim=-1)
@@ -389,17 +974,20 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
 
         reward = (
             turn_reward
+            + contact_authority_reward
             + index_cap_reward
             + drive_reward
             + grip_reward
             + milestone_reward
             - reverse_cost
             - upright_cost
+            - fall_cost
             - tilt_vel_cost
             - excess_cost
             - wrong_surface_cost
             - idle_cost
             - home_dev_cost
+            - target_bound_cost
             - action_cost
             - action_rate_cost
             - finger_vel_cost
@@ -407,14 +995,13 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
 
         # ---- Logging extras ----
         osc_ratio = (self._total_turn - self._net_turn.clamp(min=0.0)) / (self._total_turn + 1e-6)
-        drive_count = (drive_body_engage > 0.5).float().sum(dim=-1)
-        binary_gate = (drive_count >= phase.min_drive_fingers).float()
-        idle_count = (F_total < cfg.contact_f_min).float().sum(dim=-1)
         max_joint_dev = (finger_q - self._home_targets).abs().max(dim=-1).values
         self.extras.update({
             # Progress
             "eval_total_turns":      (self._total_turn / (2.0 * math.pi)).detach(),
             "eval_net_turns":        (self._net_turn / (2.0 * math.pi)).detach(),
+            "eval_raw_total_turns":  (self._raw_total_turn / (2.0 * math.pi)).detach(),
+            "eval_raw_net_turns":    (self._raw_net_turn / (2.0 * math.pi)).detach(),
             "eval_osc_ratio":        osc_ratio.detach(),
             "eval_turn_vel":         turn_vel.detach(),
             "eval_fwd_vel":          fwd_vel.detach(),
@@ -423,20 +1010,43 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             "eval_tilt_norm":        tilt_norm.detach(),
             "eval_upright_gate":     upright_gate.detach(),
             "eval_upright_cost":     upright_cost.detach(),
+            "eval_fall_cost":        fall_cost.detach(),
             "eval_tilt_vel_cost":    tilt_vel_cost.detach(),
-            # Contact (force-based)
+            "eval_reset_action_scale": self._reset_action_scale.detach(),
+            # Contact (distance-based; force values below are diagnostics only)
             "eval_contact_gate":     turn_gate.detach(),
-            "eval_binary_gate":      binary_gate.detach(),
+            "eval_binary_gate":      sustained_gate.detach(),
+            "eval_instant_contact_gate": valid_contact.float().detach(),
+            "eval_motion_auth":      motion_auth.detach(),
+            "eval_co_motion":        (
+                co_motion.mean(dim=-1).detach()
+                if co_motion is not None
+                else torch.ones_like(motion_auth)
+            ),
+            "eval_contact_streak":   self._drive_contact_streak.detach(),
+            "eval_pad_facing":       self._compute_pad_facing().detach(),
+            "eval_pad_orientation":  self._compute_pad_orientation().detach(),
+            "eval_index_cap_binary": index_contact_binary.float().detach(),
             "eval_drive_count":      drive_count.detach(),
-            "eval_in_window":        engage.mean(dim=-1).detach(),
-            "eval_contact_force":    F_total.mean(dim=-1).detach(),
-            "eval_contact_force_max": F_total.max(dim=-1).values.detach(),
-            "eval_index_cap_force":  F_cap[:, self._index_tip_idx].detach(),
+            "eval_contact_count":    distance_present.float().sum(dim=-1).detach(),
+            "eval_in_window":        distance_score.mean(dim=-1).detach(),
+            "eval_distance_score":   distance_score.mean(dim=-1).detach(),
+            "eval_surface_clearance": clearance.mean(dim=-1).detach(),
+            "eval_contact_force":    diagnostic_tip_force.mean(dim=-1).detach(),
+            "eval_contact_force_max": diagnostic_tip_force.max(dim=-1).values.detach(),
+            "eval_index_cap_force":  diagnostic_cap_force[
+                :, self._index_tip_idx
+            ].detach(),
             "eval_idle_count":       idle_count.detach(),
             "eval_wrong_surface_force": wrong_force.detach(),
+            "eval_wrong_surface_object_force": getattr(
+                self, "_wrong_surface_object_force", torch.zeros_like(wrong_force)
+            ).detach(),
+            "eval_wrong_surface_present": wrong_surface_present.detach(),
             "eval_max_joint_dev":    max_joint_dev.detach(),
             # Reward breakdown
             "eval_turn_reward":      turn_reward.detach(),
+            "eval_contact_authority_reward": contact_authority_reward.detach(),
             "eval_index_cap_reward": index_cap_reward.detach(),
             "eval_drive_reward":     drive_reward.detach(),
             "eval_grip_reward":      grip_reward.detach(),
@@ -446,6 +1056,8 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             "eval_wrong_surface_cost": wrong_surface_cost.detach(),
             "eval_idle_cost":        idle_cost.detach(),
             "eval_home_dev_cost":    home_dev_cost.detach(),
+            "eval_target_bound_cost": target_bound_cost.detach(),
+            "eval_target_edge_fraction": target_edge_fraction.mean(dim=-1).detach(),
             "eval_action_cost":      action_cost.detach(),
             "eval_action_rate":      action_rate_cost.detach(),
             "eval_finger_vel_cost":  finger_vel_cost.detach(),
@@ -461,11 +1073,14 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
             ),
         })
 
-        self._logger.log(self._global_steps, self.extras, epoch=self._current_epoch)
+        # Stage 2 suppresses the per-step log (the adaptation trainer drives the
+        # logger once per iter); see base env _get_rewards.
+        if self._log_stage == 1:
+            self._logger.log(self._global_steps, self.extras, epoch=self._current_epoch)
         return torch.nan_to_num(reward, nan=-1.0e6)
 
     # -----------------------------------------------------------------------
-    # Privileged observations (per-finger force replaces fingertip distances)
+    # Privileged observations (force-free per-finger distance contact scores)
     # -----------------------------------------------------------------------
 
     def _compute_privileged_obs(self) -> torch.Tensor:
@@ -473,9 +1088,47 @@ class LinkerL20ScrewdriverRotationEnv(ScrewdriverRotationEnv):
         angvel = self.screwdriver.data.joint_vel[:, self._screwdriver_euler_ids]
         rel_pos = self.screwdriver.data.root_pos_w - self.allegro.data.root_pos_w
         quat = self.screwdriver.data.root_quat_w
+        # Keep load/bearing resistance and real contact friction as independent
+        # channels: enabling friction DR must not silently erase the load proxy.
         if self._base_load_torque > 0.0:
-            friction = (self._env_load_torque / self._base_load_torque).unsqueeze(-1)
+            load_proxy = (
+                self._env_load_torque / self._base_load_torque
+            ).unsqueeze(-1)
         else:
-            friction = (self._env_rotation_damping / self._base_rotation_damping).unsqueeze(-1)
-        F_total, _, _, _ = self._read_contact_forces()  # (N, n_fingers)
-        return torch.cat([euler, angvel, rel_pos, quat, friction, F_total], dim=-1)
+            load_proxy = (
+                self._env_rotation_damping / self._base_rotation_damping
+            ).unsqueeze(-1)
+        contact_friction = (
+            self._env_friction / self._base_friction
+        ).unsqueeze(-1)
+        _, distance_score, _ = self._compute_distance_contact()
+        parts = [
+            euler, angvel, rel_pos, quat, load_proxy, contact_friction,
+            distance_score,
+        ]
+        # +2 geometry channels (diameter, length scale) when geometry DR is on;
+        # privileged_obs_dim is bumped 20→22 to match (see cfg __post_init__).
+        if self._env_geom_scale is not None:
+            parts.append(self._env_geom_scale)  # (N, 2)
+        return torch.cat(parts, dim=-1)
+
+    def _compute_actor_extrinsics(self) -> torch.Tensor:
+        """HORA-faithful slow extrinsics for the actor's latent encoder.
+
+        Only per-episode-constant dynamics params — load resistance, contact
+        friction, and (under geometry DR) handle geometry.  Excludes all fast
+        object state (euler/angvel/quat/rel-pos/contact) so the latent the
+        Stage-2 adapter must reconstruct online is a slow, well-posed target
+        rather than a state observer.  The critic still sees the full state.
+        """
+        if self._base_load_torque > 0.0:
+            load_proxy = (self._env_load_torque / self._base_load_torque).unsqueeze(-1)
+        else:
+            load_proxy = (
+                self._env_rotation_damping / self._base_rotation_damping
+            ).unsqueeze(-1)
+        contact_friction = (self._env_friction / self._base_friction).unsqueeze(-1)
+        parts = [load_proxy, contact_friction]
+        if self._env_geom_scale is not None:
+            parts.append(self._env_geom_scale)  # (N, 2)
+        return torch.cat(parts, dim=-1)

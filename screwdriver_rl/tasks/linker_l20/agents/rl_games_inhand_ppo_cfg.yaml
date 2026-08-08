@@ -1,0 +1,87 @@
+params:
+  seed: 42
+
+  env:
+    clip_observations: 5.0
+    clip_actions: 1.0
+
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  network:
+    name: priv_latent_actor_critic
+    separate: False
+    proprio_dim: 96
+    latent_dim: 8
+    priv_mlp_units: [256, 128]
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+    mlp:
+      units: [512, 256, 128]
+      activation: elu
+      d2rl: False
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+  load_checkpoint: False
+  load_path: ''
+
+  config:
+    name: linker_l20_inhand_rotation
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+    normalize_input: True
+    normalize_value: True
+    value_bootstrap: True
+    num_actors: -1
+    reward_shaper:
+      scale_value: 0.01
+    normalize_advantage: True
+    # 0.995 (HORA uses 0.99): effective horizon ~200 steps so holding a grasp
+    # to the 400-step timeout outvalues spinning fast and dropping at ~50.
+    gamma: 0.995
+    tau: 0.95
+    # HORA starts at lr=5e-3 / kl=0.02. If the LinkerL20 port shows early
+    # instability, use the fallback ladder 5e-3 -> 1e-3 with kl_threshold 0.008.
+    learning_rate: 5e-3
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.02
+    score_to_win: 100000
+    max_epochs: 25000
+    save_best_after: 100
+    save_frequency: 200
+    print_stats: True
+    grad_norm: 1.0
+    entropy_coef: 0.0
+    truncate_grads: True
+    e_clip: 0.2
+    horizon_length: 8
+    minibatch_size: 16384
+    mini_epochs: 5
+    critic_coef: 4
+    clip_value: True
+    seq_length: 4
+    bounds_loss_coef: 0.0001
+
+    player:
+      deterministic: True
+      games_num: 100000
+      print_stats: True

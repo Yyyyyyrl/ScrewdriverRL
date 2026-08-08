@@ -1,0 +1,891 @@
+{
+  "asset": {
+    "body_radii_m": {
+      "collision": 0.032,
+      "visual": 0.032
+    },
+    "body_visual_collision_64mm": true,
+    "cap_radii_m": {
+      "collision": 0.032,
+      "visual": 0.032
+    },
+    "cap_visual_collision_64mm": true,
+    "expected_original_sha256": "aa6b2a38f82845e7c0665d2d480114dead56f4457930f90fc765a3d937b6a949",
+    "original_sha256": "aa6b2a38f82845e7c0665d2d480114dead56f4457930f90fc765a3d937b6a949",
+    "original_unchanged": true,
+    "pass": true,
+    "topology_matches_original": true,
+    "unchanged_except_robot_name_and_body_cap_radii": true
+  },
+  "fingertip_contacts": {
+    "contacting_count": 4,
+    "fingers": {
+      "index": {
+        "contacting": true,
+        "convex_contact": true,
+        "deepest_penetration_m": 0.00010082565131597221,
+        "first": "index_distal",
+        "intersects": true,
+        "pass": true,
+        "penetration_by_target_m": {
+          "screwdriver_body": 4.203042044537142e-05,
+          "screwdriver_cap": 0.00010082565131597221
+        },
+        "penetration_m": 4.203042044537142e-05,
+        "second": "screwdriver_body",
+        "surface_distance_m": 1.1755992090911604e-06,
+        "target": "screwdriver_body"
+      },
+      "middle": {
+        "contacting": false,
+        "convex_contact": false,
+        "deepest_penetration_m": 0.0,
+        "first": "middle_distal",
+        "intersects": false,
+        "pass": true,
+        "penetration_by_target_m": {
+          "screwdriver_body": 0.0,
+          "screwdriver_cap": 0.0
+        },
+        "penetration_m": 0.0,
+        "second": "screwdriver_cap",
+        "surface_distance_m": 0.004100918769836426,
+        "target": "screwdriver_cap"
+      },
+      "pinky": {
+        "contacting": true,
+        "convex_contact": true,
+        "deepest_penetration_m": 0.00012315457570366561,
+        "first": "pinky_distal",
+        "intersects": true,
+        "pass": true,
+        "penetration_by_target_m": {
+          "screwdriver_body": 0.00010010338155552745,
+          "screwdriver_cap": 0.00012315457570366561
+        },
+        "penetration_m": 0.00010010338155552745,
+        "second": "screwdriver_body",
+        "surface_distance_m": 8.487000968671055e-07,
+        "target": "screwdriver_body"
+      },
+      "ring": {
+        "contacting": true,
+        "convex_contact": true,
+        "deepest_penetration_m": 0.0004204116412438452,
+        "first": "ring_distal",
+        "intersects": true,
+        "pass": true,
+        "penetration_by_target_m": {
+          "screwdriver_body": 0.0002002800174523145,
+          "screwdriver_cap": 0.0004204116412438452
+        },
+        "penetration_m": 0.0002002800174523145,
+        "second": "screwdriver_body",
+        "surface_distance_m": 1.7454534884109307e-07,
+        "target": "screwdriver_body"
+      },
+      "thumb": {
+        "contacting": true,
+        "convex_contact": true,
+        "deepest_penetration_m": 0.00011160517169628292,
+        "first": "thumb_distal",
+        "intersects": true,
+        "pass": true,
+        "penetration_by_target_m": {
+          "screwdriver_body": 0.00011160517169628292,
+          "screwdriver_cap": 0.0
+        },
+        "penetration_m": 0.00011160517169628292,
+        "second": "screwdriver_body",
+        "surface_distance_m": 1.8233241405596345e-07,
+        "target": "screwdriver_body"
+      }
+    },
+    "minimum_contacting": 4,
+    "pass": true
+  },
+  "grasp_wrench": {
+    "contacts": {
+      "index": {
+        "azimuth_rad": -2.3101701089670867,
+        "height_fraction": 0.9926962003965891,
+        "radius_m": 0.03199777223018731,
+        "z_m": 1.4042696200396592
+      },
+      "middle": {
+        "azimuth_rad": 1.9708849942917313,
+        "height_fraction": 1.0687697708271484,
+        "radius_m": 0.02208476055090077,
+        "z_m": 1.411876977082715
+      },
+      "pinky": {
+        "azimuth_rad": -0.3379641672977105,
+        "height_fraction": 0.9749530399524278,
+        "radius_m": 0.031999667549643396,
+        "z_m": 1.402495303995243
+      },
+      "ring": {
+        "azimuth_rad": -1.0850822197911012,
+        "height_fraction": 0.9989992065593203,
+        "radius_m": 0.03199857521661952,
+        "z_m": 1.4048999206559323
+      },
+      "thumb": {
+        "azimuth_rad": 2.7071935233832263,
+        "height_fraction": 0.46631487856037396,
+        "radius_m": 0.03200114518379054,
+        "z_m": 1.3516314878560376
+      }
+    },
+    "evaluated_fingers": [
+      "index",
+      "ring",
+      "pinky",
+      "thumb"
+    ],
+    "height_band_failures": {},
+    "height_band_pass": true,
+    "opposing_mean_z_m": 1.4038882815636116,
+    "opposition_height_mismatch_m": 0.05225679370757397,
+    "opposition_height_pass": true,
+    "pass": true,
+    "radial_closure": 0.38585008314562236,
+    "radial_closure_pass": true,
+    "side_wall_vertices": {
+      "index": 119,
+      "middle": 0,
+      "pinky": 254,
+      "ring": 91,
+      "thumb": 245
+    },
+    "thresholds": {
+      "height_band": [
+        0.2,
+        1.05
+      ],
+      "max_opposition_height_mismatch_m": Infinity,
+      "max_radial_closure": 0.4
+    }
+  },
+  "non_distal_clearance": {
+    "links": {
+      "hand_base_link": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.019063946792787112,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.020063946792787002,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.020063946792787002,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.019063946792787112,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.019063946792787112,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.12006396312326353,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.12006396312326353,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "index_metacarpals": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.06115934668639622,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.06215934668639611,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.06215934668639611,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.06115934668639622,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.06115934668639622,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.16282286311437869,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.16282286311437869,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "index_middle": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.011988393223118177,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.012988393223118067,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.012988393223118067,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.011988393223118177,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.011988393223118177,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.1149320734560989,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.1149320734560989,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "index_proximal": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.04143989879997023,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.04243989879997012,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.04243989879997012,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.04143989879997023,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.04143989879997023,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.1431425225246524,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.1431425225246524,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "middle_metacarpals": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.06589318645778142,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.0668931864577813,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.0668931864577813,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.06589318645778142,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.06589318645778142,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.1668931864577814,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.1668931864577814,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "middle_middle": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.012223786670942038,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.013223786670941928,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.013223786670941928,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.012223786670942038,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.012223786670942038,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.11322378667094202,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.11322378667094202,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "middle_proximal": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.0395058316917154,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.04050583169171529,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.04050583169171529,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.0395058316917154,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.0395058316917154,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.14050583169171538,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.14050583169171538,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "pinky_metacarpals": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.059964593194303806,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.060964593194303696,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.060964593194303696,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.059964593194303806,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.059964593194303806,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.1629027058300343,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.1629027058300343,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "pinky_middle": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.008142953738570213,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.009102813022792144,
+            "convex_intersection": false,
+            "first": "pinky_middle",
+            "intersects": false,
+            "penetration_m": 0.0,
+            "second": "screwdriver_body",
+            "surface_distance_m": 0.009138604626059532,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.008102813022792255,
+            "convex_intersection": false,
+            "first": "pinky_middle",
+            "intersects": false,
+            "penetration_m": 0.0,
+            "second": "screwdriver_cap",
+            "surface_distance_m": 0.008142953738570213,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.11165957730657892,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.11165957730657892,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "pinky_proximal": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.03864771283253643,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.03964771283253632,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.03964771283253632,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.03864771283253643,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.03864771283253643,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.14135454874595293,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.14135454874595293,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "ring_metacarpals": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.06358835825055364,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.06458835825055353,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.06458835825055353,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.06358835825055364,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.06358835825055364,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.16459489969709226,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.16459489969709226,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "ring_middle": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.0107086774134999,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.01170867741349979,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.01170867741349979,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.0107086774134999,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.0107086774134999,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.11253070093775035,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.11253070093775035,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "ring_proximal": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.04125102928553437,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.04225102928553426,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.04225102928553426,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.04125102928553437,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.04125102928553437,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.1422536260481307,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.1422536260481307,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "thumb_metacarpals": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.014536546927213345,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.014536546927213345,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.014536546927213345,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.014536546927213345,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.014536546927213345,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.07135186087669174,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.07135186087669174,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "thumb_metacarpals_base1": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.0635102991722385,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.0635172506551646,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.0635172506551646,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.0635102991722385,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.0635102991722385,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.13559052268375488,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.13559052268375488,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "thumb_metacarpals_base2": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.059836477456963036,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.0602192277769103,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.0602192277769103,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.059836477456963036,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.059836477456963036,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.14847577878887774,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.14847577878887774,
+            "target": "screwdriver_stick"
+          }
+        ]
+      },
+      "thumb_proximal": {
+        "any_convex_intersection": false,
+        "maximum_penetration_m": 0.0,
+        "minimum_surface_distance_m": 0.011831305921077728,
+        "pass": true,
+        "targets": [
+          {
+            "aabb_distance_m": 0.0,
+            "convex_intersection": false,
+            "first": "thumb_proximal",
+            "intersects": false,
+            "penetration_m": 0.0,
+            "second": "screwdriver_body",
+            "surface_distance_m": 0.011831305921077728,
+            "target": "screwdriver_body"
+          },
+          {
+            "aabb_distance_m": 0.017826062095283257,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.017826062095283257,
+            "target": "screwdriver_cap"
+          },
+          {
+            "aabb_distance_m": 0.055744576949200465,
+            "convex_intersection": false,
+            "penetration_m": 0.0,
+            "surface_distance_m": 0.055744576949200465,
+            "target": "screwdriver_stick"
+          }
+        ]
+      }
+    },
+    "minimum_required_surface_distance_m": 0.0015,
+    "pass": true
+  },
+  "pose_and_joint_limits": {
+    "hand_root_above_handle": true,
+    "handle_top_z_m": 1.4060000000000001,
+    "joint_limit_margins_rad": {
+      "index_dip": 0.581033707424028,
+      "index_mcp_pitch": 0.5084262399237393,
+      "index_mcp_roll": 0.11585375458091929,
+      "index_pip": 0.651567463747929,
+      "middle_dip": 0.13034502471402076,
+      "middle_mcp_pitch": 0.5004551812940707,
+      "middle_mcp_roll": 0.16938452319228495,
+      "middle_pip": 0.1461411065537972,
+      "pinky_dip": 0.636495628257517,
+      "pinky_mcp_pitch": 0.5653952200863261,
+      "pinky_mcp_roll": 0.12410643470823532,
+      "pinky_pip": 0.7137654236374534,
+      "ring_dip": 0.5735160550735642,
+      "ring_mcp_pitch": 0.6191580734478584,
+      "ring_mcp_roll": 0.1542662247756295,
+      "ring_pip": 0.6231715319878481,
+      "thumb_cmc_pitch": 0.14556519674274296,
+      "thumb_cmc_roll": 0.333846292681656,
+      "thumb_cmc_yaw": 0.2270893102847601,
+      "thumb_ip": 0.18446313607230416,
+      "thumb_mcp": 0.15875990711102864
+    },
+    "minimum_joint_limit_margin_rad": 0.11585375458091929,
+    "minimum_required_joint_limit_margin_rad": 0.1,
+    "palm_normal_error": 3.1401849173675503e-16,
+    "palm_normal_w": [
+      -2.220446049250313e-16,
+      0.0,
+      -1.0000000000000002
+    ],
+    "pass": true,
+    "root_z_m": 1.4570639296862542
+  },
+  "posture_json": "records/topdown_posture_refit_20260806/posture_fit.json",
+  "static_validation_pass": true,
+  "thresholds": {
+    "max_contact_distance_m": 0.001,
+    "max_contact_penetration_m": 0.001,
+    "min_joint_margin_rad": 0.1,
+    "min_non_distal_clearance_m": 0.0015,
+    "min_self_clearance_m": 0.00025
+  },
+  "unfiltered_self_collision": {
+    "failures": [],
+    "minimum_unfiltered_pair_clearance_m": 0.0,
+    "near_pairs_checked": [
+      {
+        "aabb_distance_m": 0.0,
+        "convex_intersection": false,
+        "first": "hand_base_link",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "middle_distal",
+        "surface_distance_m": 0.028400827199220657
+      },
+      {
+        "aabb_distance_m": 0.0035938622418434166,
+        "convex_intersection": false,
+        "first": "index_middle",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "middle_proximal",
+        "surface_distance_m": 0.008481843397021294
+      },
+      {
+        "aabb_distance_m": 0.0039379502069957495,
+        "convex_intersection": false,
+        "first": "index_proximal",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "middle_proximal",
+        "surface_distance_m": 0.004599474836140871
+      },
+      {
+        "aabb_distance_m": 0.003511433231877462,
+        "convex_intersection": false,
+        "first": "middle_metacarpals",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_proximal",
+        "surface_distance_m": 0.0052946810610592365
+      },
+      {
+        "aabb_distance_m": 0.0016677154135841558,
+        "convex_intersection": false,
+        "first": "middle_middle",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_proximal",
+        "surface_distance_m": 0.007516132201999426
+      },
+      {
+        "aabb_distance_m": 0.0020911520704667477,
+        "convex_intersection": false,
+        "first": "middle_proximal",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_metacarpals",
+        "surface_distance_m": 0.004636053461581469
+      },
+      {
+        "aabb_distance_m": 0.0019173630268905619,
+        "convex_intersection": false,
+        "first": "middle_proximal",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_proximal",
+        "surface_distance_m": 0.004619371145963669
+      },
+      {
+        "aabb_distance_m": 0.002015571853035525,
+        "convex_intersection": false,
+        "first": "pinky_distal",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_distal",
+        "surface_distance_m": 0.005979717243462801
+      },
+      {
+        "aabb_distance_m": 0.001996253912801251,
+        "convex_intersection": false,
+        "first": "pinky_distal",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_middle",
+        "surface_distance_m": 0.005889267195016146
+      },
+      {
+        "aabb_distance_m": 0.0010977240184662403,
+        "convex_intersection": false,
+        "first": "pinky_metacarpals",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_proximal",
+        "surface_distance_m": 0.005054305773228407
+      },
+      {
+        "aabb_distance_m": 0.0012691670845955474,
+        "convex_intersection": false,
+        "first": "pinky_middle",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_distal",
+        "surface_distance_m": 0.006465692538768053
+      },
+      {
+        "aabb_distance_m": 0.0012498491443612737,
+        "convex_intersection": false,
+        "first": "pinky_middle",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_middle",
+        "surface_distance_m": 0.004161753226071596
+      },
+      {
+        "aabb_distance_m": 0.0028897061870313406,
+        "convex_intersection": false,
+        "first": "pinky_middle",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_proximal",
+        "surface_distance_m": 0.00352647015824914
+      },
+      {
+        "aabb_distance_m": 0.003360839364274096,
+        "convex_intersection": false,
+        "first": "pinky_proximal",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_metacarpals",
+        "surface_distance_m": 0.005551533307880163
+      },
+      {
+        "aabb_distance_m": 0.001887536730537362,
+        "convex_intersection": false,
+        "first": "pinky_proximal",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_middle",
+        "surface_distance_m": 0.006637727841734886
+      },
+      {
+        "aabb_distance_m": 0.001032797070648999,
+        "convex_intersection": false,
+        "first": "pinky_proximal",
+        "intersects": false,
+        "pass": true,
+        "penetration_m": 0.0,
+        "second": "ring_proximal",
+        "surface_distance_m": 0.003701969515532255
+      }
+    ],
+    "pass": true
+  }
+}

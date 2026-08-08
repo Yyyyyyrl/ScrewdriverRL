@@ -49,68 +49,80 @@ class AllegroScrewdriverRotationEnvCfg(ScrewdriverRotationEnvCfg):
     fingers: tuple[str, ...] = ("index", "middle", "thumb")
     """3-finger configuration: 1–2 fingers stabilise, 1–2 push/reposition."""
 
-    # ---- Reward weight overrides (validated June-13 "good run" design) ----
-    # The shared base _get_rewards computes:
-    #   turn_reward × (distance+motion contact gate) × upright_gate + near + milestone
-    #   − reverse − proximal − action/finger regularizers.
-    # No contact sensor / no pad-facing (removed in 4168046; the good run never had them).
-    # Allegro inherits the base reward weights — including reward_tilt_velocity_weight (7)
-    # and turn_upright_gate_std (0.2), which are the good-design values.  (Do NOT re-add
-    # the 5.0 / 0.25 overrides: they entered with the regressed curriculum in 4168046 and
-    # are not what the 96k-reward run used.)
+    # ---- Reward / upright-gate overrides (restore the validated 3bc6e70 "good run") ----
+    # CORRECTION (2026-06-24): the 96k June-13 run launched at commit 3bc6e70, which used
+    # reward_tilt_velocity_weight=5.0 and turn_upright_gate_std=0.25 — the LOOSER upright
+    # gate that tolerates the transient tilt of genuine finger-rolling.  The base defaults
+    # (7 / 0.2) are STRICTER and bias the policy toward minimal-disturbance finger
+    # "flicker" (handle still rotates, fingers don't properly roll it), so they are
+    # overridden back to the good-run values here (Allegro-only; base + LinkerL20 keep
+    # 7 / 0.2).  The shared base _get_rewards is byte-identical to the good run — only
+    # these knobs + the curriculum below had regressed.
+    reward_tilt_velocity_weight: float = 5.0
+    turn_upright_gate_std: float = 0.25
 
     # ---- Screw load (Allegro-specific) ----
-    # The good run used a Coulomb screw load of 0.02 N·m, ramped via screwdriver_load_scale
-    # in the curriculum below (NOT free-spinning).  Kept as an Allegro-only override so the
-    # shared base default (0.045, used by LinkerL20) is left untouched.
+    # Coulomb screw load 0.02 N·m, ramped via screwdriver_load_scale in the curriculum.
+    # NOTE: the 3bc6e70 good run had NO load (free, lightly-damped handle, rotation
+    # damping 0.15); the load + the base damping 0.5 are deliberately KEPT here for
+    # screwdriver realism (user recovery choice = "reward-shaping only").  If flicker
+    # persists after this reward-shaping revert, the free handle (load→0, damping→0.15
+    # Allegro-only) is the next lever.  Kept as an override so the shared base default
+    # (0.045, LinkerL20) is untouched.
     screwdriver_load_torque: float = 0.02
 
     # episode_length_s must match curriculum_phases[0] for the initial stagger.
-    episode_length_s: float = 30.0
+    episode_length_s: float = 20.0
 
-    # ---- Curriculum (Allegro — validated June-13 "good run" design) ----
-    # P0 "reach & grasp": contact gate ON but generous (0.10 m), free-spinning, near-reward
-    # dominant.  P1 "contact rotation": half screw load, gate tightens to 0.07 m, proximal
-    # penalty on.  P2 "sustained rotation": full load, strict gate (0.05 m) + strict upright.
-    # Phase boundaries 0 / 40M / 90M frames; episodes 30 / 50 / 60 s.
+    # ---- Curriculum (Allegro — restored to the validated 3bc6e70 "good run") ----
+    # The 96k run used this exact schedule.  The KEY anti-flicker property is P0:
+    # the contact gate is OFF (turn_reward_contact_distance=0.0 → the gate returns
+    # all-ones), so turn reward = 30·fwd_vel·upright_gate is UNGATED.  The only way
+    # to earn it is to actually rotate the handle, so the policy learns a genuine
+    # rolling gait FIRST — before the raw-fingertip-speed motion gate (P1+) exists to
+    # be hacked by flicking.  The later regression (P0 gate ON @0.10 + turn weight 120
+    # + boundaries 0/40M/90M + proximal 0/3/5) let the policy hack the motion gate with
+    # flicker from step 0; that is reverted here.  Boundaries 0/15M/60M; episodes
+    # 20/40/60 s.  screwdriver_load_scale 0/0.5/1.0 ramps the (kept) screw load in.
     curriculum_phases: list[CurriculumPhaseCfg] = field(
         default_factory=lambda: [
             CurriculumPhaseCfg(
-                # P0: gate ON @0.10 m, free-spinning; the ungated near-reward (0.8) gives
-                # the approach gradient and turn-reward is already strong (120).
+                # P0 "learn to rotate at all": contact gate OFF (UNGATED turn reward),
+                # low turn weight, free handle.  This ungated bootstrap is what makes
+                # the policy learn genuine rotation instead of flicker.
                 step_start=0,
-                reward_turn_weight=120.0,
-                turn_reward_contact_distance=0.10,
+                reward_turn_weight=30.0,
+                turn_reward_contact_distance=0.0,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.0,
                 screwdriver_load_scale=0.0,
                 reward_proximal_penalty_weight=0.0,
                 near_reward_weight=0.8,
-                episode_length_s=30.0,
+                episode_length_s=20.0,
                 upright_termination_threshold=2.0,
             ),
             CurriculumPhaseCfg(
-                # P1: introduce half screw load and tighten the contact gate to 0.07 m.
-                step_start=40_000_000,
-                reward_turn_weight=180.0,
-                turn_reward_contact_distance=0.07,
+                # P1: turn the contact gate ON (0.10 m) + half screw load.
+                step_start=15_000_000,
+                reward_turn_weight=150.0,
+                turn_reward_contact_distance=0.10,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.003,
                 screwdriver_load_scale=0.5,
-                reward_proximal_penalty_weight=3.0,
+                reward_proximal_penalty_weight=0.0,
                 near_reward_weight=0.3,
-                episode_length_s=50.0,
-                upright_termination_threshold=1.3,
+                episode_length_s=40.0,
+                upright_termination_threshold=1.5,
             ),
             CurriculumPhaseCfg(
                 # P2: full screw load, strict gate (0.05 m), strict upright.
-                step_start=90_000_000,
+                step_start=60_000_000,
                 reward_turn_weight=200.0,
                 turn_reward_contact_distance=0.05,
                 turn_reward_min_contact_fingers=2,
                 turn_reward_min_fingertip_speed=0.003,
                 screwdriver_load_scale=1.0,
-                reward_proximal_penalty_weight=5.0,
+                reward_proximal_penalty_weight=0.0,
                 near_reward_weight=0.15,
                 episode_length_s=60.0,
                 upright_termination_threshold=1.0,

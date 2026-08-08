@@ -20,6 +20,8 @@ Every entry script (`train.py`, `play.py`, `eval.py`, `calibrate_pad.py`, `rende
 | `Isaac-Allegro-Screwdriver-Rotation-Direct-v0` | Allegro (right) | index, middle, thumb (3) | 12 | 27 / 17 | −z (CCW from above) | on |
 | `Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0` | Linker Hand L20 (left) | index, middle, ring, pinky, thumb (5) | 16 | 35 / 19 | +z (mirror of Allegro) | on (pair-filtered) |
 | `Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0` | Linker Hand L20 (left, top-down grasp) | index, middle, ring, pinky, thumb (5) | 16 | 35 / 19 | +z (mirror of Allegro) | on (pair-filtered) |
+| `Isaac-LinkerL20-Inhand-Rotation` | Linker Hand L20 (left, palm-up) | index, middle, ring, pinky, thumb (5) | 16 | 105 / 9 privileged | −palm normal | on (pair-filtered) |
+| `Isaac-LinkerL20-Inhand-Rotation-Topdown` | Linker Hand L20 (left, palm-down) | index, middle, ring, pinky, thumb (5) | 16 | 105 / 9 privileged | −z (gravity axis) | on (pair-filtered) |
 
 `train.py`/`play.py`/`eval.py`/`calibrate_pad.py` **default to the Allegro task** if `--task` is omitted.
 
@@ -61,6 +63,9 @@ python train.py --task Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0 --stage 1 
 
 # Linker Hand L20 — alternate top-down initial grasp
 python train.py --task Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0 --stage 1 --num_envs 2048 --headless
+
+# Linker Hand L20 free-object rotation — top-down fingertip-only grasp
+python train.py --task Isaac-LinkerL20-Inhand-Rotation-Topdown --stage 1 --num_envs 2048 --headless
 
 # Resume from a checkpoint
 python train.py --task <id> --stage 1 --headless \
@@ -110,6 +115,27 @@ runs/<task>/                       # (override with --output DIR)
 ## Evaluation & tooling
 
 All take `--task <id>` and run in `env_isaac`. Isaac boots in ~2–3 min; run headless when you don't need the viewport.
+
+### Top-down in-hand grasp caches
+
+`Isaac-LinkerL20-Inhand-Rotation-Topdown` requires a complete set of
+physics-harvested caches before training. Generate every scale and shape on an
+Isaac Lab GPU machine:
+
+```bash
+for shape in cylinder cuboid sphere; do
+  for scale in 0.70 0.72 0.74 0.76 0.78 0.80 0.82 0.84 0.86; do
+    python tools/gen_inhand_grasp_cache.py \
+      --task Isaac-LinkerL20-Inhand-GraspGen-Topdown \
+      --shape "$shape" --scale "$scale" \
+      --num_envs 8192 --num_states 12500 --headless
+  done
+done
+```
+
+The generator writes `linker_l20_topdown_grasp_*.npy`. The training task fails
+fast if any per-scale, per-shape, or per-prototype file is absent, so an
+incomplete or unvalidated reset distribution cannot silently enter training.
 
 ### `play.py` — viewport playback / quick stats
 Loads a Stage 1 checkpoint and runs the deterministic policy.
@@ -200,6 +226,28 @@ Pure-PyTorch / pure-Python — **no Isaac Sim required**:
 
 ```bash
 python -m pytest tests/ -q
+```
+
+---
+
+## Deployment (real hand)
+
+Stage 2 writes a self-contained `stage2_nn/deploy.pth`; `screwdriver_rl/deploy/`
+runs it on a physical LinkerHand L20/G20 (left) via the LinkerHand SDK — no
+Isaac/ROS needed on the deploy box. Full runbook: **`docs/DEPLOY.md`**
+(design notes: `docs/3-deployment.md`).
+
+```bash
+# Offline dry-run (echo simulator, any machine):
+python -m screwdriver_rl.deploy.deploy_linker --checkpoint <stage2_nn/deploy.pth> \
+    --hand-joint L20 --calib linker_calib_deploy.json --dry-run \
+    --max-ticks 50 --record /tmp/dry.csv
+# One-time hardware calibration (per-joint direction test → overlay JSON):
+python -m screwdriver_rl.deploy.hand_check wiggle --out linker_calib.json
+# Live (direct CAN, 10 Hz, bounded + recorded):
+python -m screwdriver_rl.deploy.deploy_linker --checkpoint <stage2_nn/deploy.pth> \
+    --hand-joint L20 --calib linker_calib_deploy.json --ramp-s 5 \
+    --contact-ramp-s 8 --max-ticks 100 --record run1.csv
 ```
 
 ---

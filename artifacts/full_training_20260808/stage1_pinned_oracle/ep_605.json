@@ -1,0 +1,206 @@
+{
+  "checkpoint": "/home/fresh/Workspace/dex-forge/runs/Isaac-LinkerL20-Screwdriver-Rotation-Topdown-Hora/full_stage1_20260807_env12288/linker_l20_screwdriver_rotation_07-23-29-15/nn/last_linker_l20_screwdriver_rotation_ep_605_rew_21799.455.pth",
+  "coasting": {
+    "contact_fraction": 0.9931987847222222,
+    "fwd_velocity_in_contact": 0.40367064218229015,
+    "fwd_velocity_without_contact": 0.07737945673491595
+  },
+  "deploy_eval": false,
+  "domain_rand_enabled": true,
+  "episodes": {
+    "authorized_net_turns_mean": 2.3601431846618652,
+    "authorized_total_turns_mean": 2.4015469551086426,
+    "count": 512,
+    "fall_rate": 0.0,
+    "geometry_buckets": [],
+    "net_turns_mean": 2.9236910343170166,
+    "net_turns_p10": 2.400116443634033,
+    "net_turns_p50": 2.987537384033203,
+    "net_turns_p90": 3.3485376834869385,
+    "net_turns_std": 0.38993072509765625,
+    "success_rate": 0.48828125,
+    "total_turns_mean": 2.990899085998535
+  },
+  "fall_dr_crosstab": {
+    "by_load_torque_scale": {
+      "available": true,
+      "edges": [
+        1.3897745609283447,
+        2.0549144744873047
+      ],
+      "high": {
+        "fall_rate": 0.0,
+        "n": 171
+      },
+      "low": {
+        "fall_rate": 0.0,
+        "n": 171
+      },
+      "mid": {
+        "fall_rate": 0.0,
+        "n": 170
+      },
+      "unit": "\u00d7base"
+    },
+    "by_placement_noise": {
+      "available": true,
+      "edges": [
+        3.137418031692505,
+        4.410600185394287
+      ],
+      "high": {
+        "fall_rate": 0.0,
+        "n": 171
+      },
+      "low": {
+        "fall_rate": 0.0,
+        "n": 171
+      },
+      "mid": {
+        "fall_rate": 0.0,
+        "n": 170
+      },
+      "unit": "mm"
+    },
+    "high_load_high_placement_corner": {
+      "fall_rate": 0.0,
+      "n": 58,
+      "rest_fall_rate": 0.0
+    },
+    "n_episodes": 512,
+    "overall_fall_rate": 0.0
+  },
+  "fixed_start": false,
+  "geometry_randomized": false,
+  "num_envs": 256,
+  "root_pos_bias_mm": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "root_rpy_bias_deg": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "seed": 0,
+  "step_metrics": {
+    "eval_avg_contact_speed": {
+      "mean": null,
+      "std": null
+    },
+    "eval_binary_gate": {
+      "mean": 0.9931987847222222,
+      "std": 0.08218855606788
+    },
+    "eval_contact_authority_reward": {
+      "mean": 4.965792643229166,
+      "std": 0.41105412103920197
+    },
+    "eval_contact_count": {
+      "mean": 3.9631380208333336,
+      "std": 0.25300220968012455
+    },
+    "eval_contact_force": {
+      "mean": 6.648015950520834,
+      "std": 2.2643541507970175
+    },
+    "eval_contact_gate": {
+      "mean": 0.9931987847222222,
+      "std": 0.08218855606788
+    },
+    "eval_drive_count": {
+      "mean": 3.9631380208333336,
+      "std": 0.25300220968012455
+    },
+    "eval_fwd_vel": {
+      "mean": 0.40145148383246526,
+      "std": 0.36313239314078877
+    },
+    "eval_idle_count": {
+      "mean": 5.642361111111111e-05,
+      "std": 0.007511353239411676
+    },
+    "eval_in_window": {
+      "mean": 0.839279310438368,
+      "std": 0.06106997998619417
+    },
+    "eval_index_cap_force": {
+      "mean": 1.470865478515625,
+      "std": 2.634151098501375
+    },
+    "eval_max_joint_dev": {
+      "mean": 0.3549267578125,
+      "std": 0.04402802278080806
+    },
+    "eval_min_tip_dist": {
+      "mean": null,
+      "std": null
+    },
+    "eval_motion_auth": {
+      "mean": 0.7558001030815972,
+      "std": 0.2691318926961687
+    },
+    "eval_motion_gate": {
+      "mean": null,
+      "std": null
+    },
+    "eval_osc_ratio": {
+      "mean": 0.020403770870632595,
+      "std": 0.04953601122708228
+    },
+    "eval_pad_cos": {
+      "mean": null,
+      "std": null
+    },
+    "eval_pad_gate": {
+      "mean": null,
+      "std": null
+    },
+    "eval_rev_vel": {
+      "mean": 0.00943278948465983,
+      "std": 0.02878620373717927
+    },
+    "eval_tilt_norm": {
+      "mean": 0.05534146202935113,
+      "std": 0.028843418436011462
+    },
+    "eval_total_reward": {
+      "mean": 51.877118055555556,
+      "std": 56.62089975368299
+    },
+    "eval_turn_reward": {
+      "mean": 55.00214409722222,
+      "std": 54.784737637792304
+    },
+    "eval_upright_gate": {
+      "mean": 0.9999541558159722,
+      "std": 0.004502791751108271
+    },
+    "eval_wrong_surface_force": {
+      "mean": 0.00021582823660638598,
+      "std": 0.04695010959123687
+    },
+    "eval_wrong_surface_object_force": {
+      "mean": 0.0,
+      "std": 0.0
+    }
+  },
+  "steps": 900,
+  "success_turns": 3.0,
+  "task": "Isaac-LinkerL20-Screwdriver-Rotation-Topdown-Hora",
+  "tilt_distribution": {
+    "fraction_below_0_10_rad": 0.9135547280311584,
+    "p50": 0.05088668316602707,
+    "p90": 0.09727604687213898,
+    "p99": 0.12584838271141052
+  },
+  "wrong_surface_distribution": {
+    "fraction_above_0_05_n": 3.0381945180124603e-05,
+    "max_n": 13.132272720336914,
+    "p50_n": 0.0,
+    "p90_n": 0.0,
+    "p99_n": 0.0
+  },
+  "zero_action_probe": false
+}

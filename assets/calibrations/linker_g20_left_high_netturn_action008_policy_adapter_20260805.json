@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "adapter_id": "linker-g20-left-high-netturn-action008-to-og-local-q-visual-v1",
+  "status": "offline_validated_live_gate_required",
+  "joint_order": [
+    "index_mcp_roll",
+    "index_mcp_pitch",
+    "index_pip",
+    "middle_mcp_roll",
+    "middle_mcp_pitch",
+    "middle_pip",
+    "ring_mcp_roll",
+    "ring_mcp_pitch",
+    "ring_pip",
+    "pinky_mcp_roll",
+    "pinky_mcp_pitch",
+    "pinky_pip",
+    "thumb_cmc_yaw",
+    "thumb_cmc_roll",
+    "thumb_cmc_pitch",
+    "thumb_mcp"
+  ],
+  "source_checkpoint": {
+    "path": "deliverables/linker_g20_topdown_d64_action008_stage2_commissioning_20260727/runtime/deploy.pth",
+    "sha256": "cc2468b6dacaa2c76e6bbb0855760f73d2f6caecb45bc19ca2e26d96968eb326",
+    "immutable_package_digest": "ccccbd7015fc67792cbefa0bbf0ef594da7afbd290d6235de93157753b9ecd80"
+  },
+  "target_calibration": {
+    "calibration_id": "linker-g20-left-lht20-010-415-v1",
+    "calibration_artifact_path": "assets/calibrations/linker_g20_left_lht20_010_415_v1.json",
+    "calibration_artifact_sha256": "75ea78f32f0b6e154c9e720f0b39c5ef613d934690fa4f8216422a7c71806a10",
+    "calibration_artifact_digest": "354d057686e2d47e562b0cf3e40993c677e39bd651302b14b1b88495c28a62dd",
+    "semantic_schema_digest": "1bb09533ebf945a693d2726f394b5004cbf0dc2132f045e7d45d3c106a5181ad",
+    "overlay_path": "linker_calib_deploy.json",
+    "overlay_sha256": "b728cd58f15408193080a0bd35dc6ae281adff9a96d6115ded012498b6f7ecb7"
+  },
+  "source_policy_contract": {
+    "task_id": "Isaac-LinkerL20-Screwdriver-Rotation-Topdown",
+    "action_delta_scale_rad": 0.08,
+    "position_lower_rad": [-0.15000000000000002, 0.3703785375536257, 0.17809071686235867, -0.15000000000000002, 0.19813593646542704, 0.4130190464548652, -0.15000000000000002, 0.2885637202016128, 0.2374077435541302, -0.15000000000000002, 0.39404006049862184, 0.42949771818915927, 0.8906667465104224, 0.5072340336349436, 0.02, 0.02],
+    "position_upper_rad": [0.15000000000000002, 1.0703785375536257, 0.8780907168623586, 0.15000000000000002, 0.898135936465427, 1.06, 0.15000000000000002, 0.9885637202016128, 0.9374077435541301, 0.15000000000000002, 1.0940400604986218, 1.06, 1.38, 1.2, 0.45499999999999996, 0.45499999999999996],
+    "home_target_rad": [-0.042032288312911996, 0.7203785375536257, 0.5280907168623586, -0.03899578297327875, 0.548135936465427, 0.7630190464548652, -0.0481909389793873, 0.6385637202016128, 0.5874077435541302, 0.03948873943645571, 0.7440400604986218, 0.7794977181891592, 1.2406667465104224, 0.8572340336349435, 0.105, 0.105],
+    "startup_reset_target_rad": [-0.04091014713048935, 0.8236588835716248, 0.5197473168373108, -0.043827660381793976, 0.6052597761154175, 0.79217129945755, -0.06000000000000001, 0.7350769639015198, 0.6084202527999878, 0.040318358689546585, 0.7814591526985168, 0.7680953145027161, 0.7977368235588074, 1.0845370292663574, 0.11, 0.3222019672393799]
+  },
+  "target_hardware_contract": {
+    "coordinate": "promoted-og-local-joint-q-rad",
+    "position_lower_rad": [-0.17, 0.0, 0.04, -0.17, 0.0, 0.06, -0.17, 0.0, 0.02, -0.17, 0.0, 0.03, 0.0, 0.42, 0.0, 0.0],
+    "position_upper_rad": [0.17, 1.26, 1.57, 0.17, 1.24, 1.57, 0.17, 1.24, 1.57, 0.17, 1.14, 1.57, 1.12, 1.22, 0.79, 1.05]
+  },
+  "transform": {
+    "kind": "per-joint-positive-affine-bidirectional",
+    "equation": "hardware_q = scale * legacy_policy_q + offset_rad",
+    "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    "offset_rad": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.26, 0.0, 0.0, 0.0],
+    "derivation": "The action rails and home/reset targets are identical to the previously live-gated fixed64 policy except for action_delta_scale_rad=0.08. All legacy rails already lie inside the promoted physical contract except thumb_cmc_yaw, so translate that axis by validated_upper(1.12)-legacy_upper(1.38)=-0.26 rad. The inverse readback adds 0.26 rad, preserving policy action span, virtual proprioceptive history, and per-step delta semantics."
+  },
+  "validation": {
+    "offline_contract": "pending",
+    "dry_run": {
+      "status": "required"
+    },
+    "hardware_no_send": "required",
+    "startup_only": "required",
+    "bounded_dynamic_ab": "required_before_live_promoted",
+    "current_result": "not_yet_live_promoted"
+  },
+  "adapter_digest_algorithm": "sha256-canonical-json-excluding-adapter-digest",
+  "adapter_digest": "cd85cccad841c1ae4f209c5dfe11356d906a0e820006a8f1f07020a4f290ec9c"
+}

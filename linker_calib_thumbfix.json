@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "note": "absolute 2026-07-06 + all four pip mapped 0..1.08 after sim URDF root fix 2026-07-22 | 2026-07-30 thumb_cmc_roll rescaled hi 1.22->1.6559 from a back-driven readback: the visually sim-matching thumb pose reads 0.799 rad while the policy commands 1.0845 rad (16 deg over-abducted)",
+  "joints": {
+    "index_mcp_roll": {
+      "flip": false,
+      "lo": -0.26,
+      "hi": 0.26
+    },
+    "index_mcp_pitch": {
+      "flip": false
+    },
+    "index_pip": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.08
+    },
+    "middle_mcp_roll": {
+      "flip": false,
+      "lo": -0.26,
+      "hi": 0.26
+    },
+    "middle_mcp_pitch": {
+      "flip": false
+    },
+    "middle_pip": {
+      "flip": false,
+      "lo": 0,
+      "hi": 1.08
+    },
+    "ring_mcp_roll": {
+      "flip": false,
+      "lo": -0.26,
+      "hi": 0.26
+    },
+    "ring_mcp_pitch": {
+      "flip": false
+    },
+    "ring_pip": {
+      "flip": false,
+      "lo": 0,
+      "hi": 1.08
+    },
+    "pinky_mcp_roll": {
+      "flip": false,
+      "lo": -0.26,
+      "hi": 0.26
+    },
+    "pinky_mcp_pitch": {
+      "flip": false
+    },
+    "pinky_pip": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.08
+    },
+    "thumb_cmc_yaw": {
+      "flip": false
+    },
+    "thumb_cmc_roll": {
+      "flip": false,
+      "lo": 0.0,
+      "hi": 1.6559
+    },
+    "thumb_cmc_pitch": {
+      "flip": false,
+      "lo": 0,
+      "hi": 0.87
+    },
+    "thumb_mcp": {
+      "flip": false,
+      "lo": 0,
+      "hi": 1.29
+    }
+  }
+}

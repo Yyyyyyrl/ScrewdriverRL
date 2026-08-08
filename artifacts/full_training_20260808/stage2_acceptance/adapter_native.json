@@ -1,0 +1,241 @@
+{
+  "checkpoint": "/home/fresh/Workspace/dex-forge/runs/Isaac-LinkerL20-Screwdriver-Rotation-Topdown-Hora/full_stage1_20260807_env12288/linker_l20_screwdriver_rotation_07-23-29-15/nn/last_linker_l20_screwdriver_rotation_ep_760_rew_22314.447.pth",
+  "coasting": {
+    "contact_fraction": 0.99201171875,
+    "fwd_velocity_in_contact": 0.35570667867666844,
+    "fwd_velocity_without_contact": 0.14131111076622352
+  },
+  "deploy_eval": true,
+  "domain_rand_enabled": true,
+  "episodes": {
+    "authorized_net_turns_mean": 2.6099941730499268,
+    "authorized_total_turns_mean": 2.6808090209960938,
+    "count": 512,
+    "fall_rate": 0.0078125,
+    "geometry_buckets": [],
+    "net_turns_mean": 3.3317389488220215,
+    "net_turns_p10": 2.336393356323242,
+    "net_turns_p50": 3.4998457431793213,
+    "net_turns_p90": 4.2312912940979,
+    "net_turns_std": 0.8688313364982605,
+    "success_rate": 0.736328125,
+    "total_turns_mean": 3.4465854167938232
+  },
+  "fall_age_steps": {
+    "count": 4,
+    "fraction_within_20_steps": 0.5,
+    "fraction_within_reset_mute_window": 0.0,
+    "p10": 16.600000381469727,
+    "p50": 24.5,
+    "p90": 139.49996948242188
+  },
+  "fall_dr_crosstab": {
+    "by_load_torque_scale": {
+      "available": true,
+      "edges": [
+        1.6626465320587158,
+        2.864910125732422
+      ],
+      "high": {
+        "fall_rate": 0.005847953259944916,
+        "n": 171
+      },
+      "low": {
+        "fall_rate": 0.017543859779834747,
+        "n": 171
+      },
+      "mid": {
+        "fall_rate": 0.0,
+        "n": 170
+      },
+      "unit": "\u00d7base"
+    },
+    "by_placement_noise": {
+      "available": true,
+      "edges": [
+        5.317951202392578,
+        7.284928798675537
+      ],
+      "high": {
+        "fall_rate": 0.011695906519889832,
+        "n": 171
+      },
+      "low": {
+        "fall_rate": 0.005847953259944916,
+        "n": 171
+      },
+      "mid": {
+        "fall_rate": 0.0058823530562222,
+        "n": 170
+      },
+      "unit": "mm"
+    },
+    "high_load_high_placement_corner": {
+      "fall_rate": 0.0,
+      "n": 48,
+      "rest_fall_rate": 0.008620689623057842
+    },
+    "n_episodes": 512,
+    "overall_fall_rate": 0.0078125
+  },
+  "fixed_start": false,
+  "geometry_randomized": false,
+  "latent_diagnostics": {
+    "action_mae": 0.13322314620018005,
+    "count": 307200,
+    "geometry_buckets": [],
+    "latent_bias": [
+      0.21875250339508057,
+      0.10424143821001053,
+      -0.184092178940773,
+      0.05287352204322815,
+      0.0004474965971894562,
+      0.00010697251855162904,
+      0.08117030560970306,
+      0.018868595361709595
+    ],
+    "latent_mae": 0.2659985423088074,
+    "latent_mae_by_channel": [
+      0.45492443442344666,
+      0.38915911316871643,
+      0.34040531516075134,
+      0.23041723668575287,
+      0.0034338682889938354,
+      0.0018356137443333864,
+      0.28348973393440247,
+      0.4243229627609253
+    ],
+    "latent_mse": 0.18069759011268616
+  },
+  "num_envs": 256,
+  "root_pos_bias_mm": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "root_rpy_bias_deg": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "seed": 0,
+  "step_metrics": {
+    "eval_avg_contact_speed": {
+      "mean": null,
+      "std": null
+    },
+    "eval_binary_gate": {
+      "mean": 0.99201171875,
+      "std": 0.08901948445520688
+    },
+    "eval_contact_authority_reward": {
+      "mean": 2.9758392333984376,
+      "std": 0.26739939977092037
+    },
+    "eval_contact_count": {
+      "mean": 3.9102734375,
+      "std": 0.3266124714121236
+    },
+    "eval_contact_force": {
+      "mean": 6.950634765625,
+      "std": 2.4277619153008194
+    },
+    "eval_contact_gate": {
+      "mean": 0.99201171875,
+      "std": 0.08901948445520688
+    },
+    "eval_drive_count": {
+      "mean": 3.9102734375,
+      "std": 0.3266124714121236
+    },
+    "eval_fwd_vel": {
+      "mean": 0.3539941151936849,
+      "std": 0.3424597442893046
+    },
+    "eval_idle_count": {
+      "mean": 0.002744140625,
+      "std": 0.06650419711489562
+    },
+    "eval_in_window": {
+      "mean": 0.8319287618001302,
+      "std": 0.06136745662858749
+    },
+    "eval_index_cap_force": {
+      "mean": 1.4315269978841145,
+      "std": 2.655581040499843
+    },
+    "eval_max_joint_dev": {
+      "mean": 0.3685423024495443,
+      "std": 0.05880970754484548
+    },
+    "eval_min_tip_dist": {
+      "mean": null,
+      "std": null
+    },
+    "eval_motion_auth": {
+      "mean": 0.7382053120930989,
+      "std": 0.2690358515711303
+    },
+    "eval_motion_gate": {
+      "mean": null,
+      "std": null
+    },
+    "eval_osc_ratio": {
+      "mean": 0.04149479866027832,
+      "std": 0.09248541916875049
+    },
+    "eval_pad_cos": {
+      "mean": null,
+      "std": null
+    },
+    "eval_pad_gate": {
+      "mean": null,
+      "std": null
+    },
+    "eval_rev_vel": {
+      "mean": 0.012155083815256755,
+      "std": 0.03804722889208839
+    },
+    "eval_tilt_norm": {
+      "mean": 0.06700095494588217,
+      "std": 0.037144574388294896
+    },
+    "eval_total_reward": {
+      "mean": 38.96381510416666,
+      "std": 124.14665163639458
+    },
+    "eval_turn_reward": {
+      "mean": 47.031223958333335,
+      "std": 50.34514431714766
+    },
+    "eval_upright_gate": {
+      "mean": 0.9999448649088541,
+      "std": 0.0
+    },
+    "eval_wrong_surface_force": {
+      "mean": 0.02485357920328776,
+      "std": 0.6138969638448893
+    },
+    "eval_wrong_surface_object_force": {
+      "mean": 0.0,
+      "std": 0.0
+    }
+  },
+  "steps": 1200,
+  "success_turns": 3.0,
+  "task": "Isaac-LinkerL20-Screwdriver-Rotation-Topdown-Hora",
+  "tilt_distribution": {
+    "fraction_below_0_10_rad": 0.8126302361488342,
+    "p50": 0.06185993179678917,
+    "p90": 0.117454893887043,
+    "p99": 0.1638244241476059
+  },
+  "wrong_surface_distribution": {
+    "fraction_above_0_05_n": 0.002268880372866988,
+    "max_n": 145.80142211914062,
+    "p50_n": 0.0,
+    "p90_n": 0.0,
+    "p99_n": 0.0
+  },
+  "zero_action_probe": false
+}

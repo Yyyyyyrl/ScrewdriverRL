@@ -27,8 +27,25 @@ logs/
 checkpoints/
 wandb/
 outputs/
+*.webm
+*.csv
 
 # Local editor and OS files
 .idea/
 .vscode/
 .DS_Store
+
+# Merge/patch conflict backups
+*.orig
+*.rej
+
+# Local hardware-calibration captures and debug renders (root level only;
+# curated renders under artifacts/ are tracked)
+/*.png
+/*.jpg
+/*.jpeg
+/*.mov
+/*.MOV
+
+# Release bundles: 152MB of checkpoints and tarballs, rebuilt by tools/export_policy_package.py
+deliverables/

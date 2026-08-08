@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "source_asset": "screwdriver_64mm_handle.urdf",
+  "source_sha256": "6a3cb36d8db843a5ad95d37e249fd0c205949a4669ad0f00802a669adcfd5268",
+  "assignment_mode": "cyclic",
+  "preserve_source_mass_inertia": true,
+  "base": {"diameter": 0.064, "radius": 0.032, "length": 0.1, "mass": 0.3, "izz": 0.00006},
+  "num_diameter_buckets": 3,
+  "num_length_buckets": 1,
+  "num_buckets": 3,
+  "variants": [
+    {
+      "file": "topdown_variants/screwdriver_topdown_d064.urdf",
+      "name": "screwdriver_topdown_d064.urdf",
+      "index": 0,
+      "diameter": 0.064,
+      "radius": 0.032,
+      "length": 0.1,
+      "mass": 0.3,
+      "izz": 0.00006,
+      "diameter_scale": 1.0,
+      "length_scale": 1.0,
+      "diameter_bucket": 1,
+      "length_bucket": 0,
+      "bucket": 1
+    }
+  ]
+}

@@ -118,6 +118,49 @@ def force_window(
     return torch.minimum(rise, fall)
 
 
+def distance_window(
+    distance: torch.Tensor,
+    d_contact: float | torch.Tensor,
+    d_far: float | torch.Tensor,
+) -> torch.Tensor:
+    """Kinematic contact-quality score, one at contact and zero when far away.
+
+    The score is one for distance at or below contact, decreases linearly to
+    zero over the ramp, and stays zero beyond the far threshold. Thresholds
+    may be scalars or broadcastable tensors such as per-environment columns
+    under geometry randomisation.
+    """
+    contact = torch.as_tensor(
+        d_contact, dtype=distance.dtype, device=distance.device
+    )
+    far = torch.as_tensor(d_far, dtype=distance.dtype, device=distance.device)
+    width = (far - contact).clamp_min(torch.finfo(distance.dtype).eps)
+    ramp = ((far - distance) / width).clamp(0.0, 1.0)
+    return torch.where(distance <= contact, torch.ones_like(ramp), ramp)
+
+
+def contact_present_dist(
+    distance: torch.Tensor,
+    d_contact: float | torch.Tensor,
+) -> torch.Tensor:
+    """Binary kinematic contact predicate: distance at or below contact."""
+    contact = torch.as_tensor(
+        d_contact, dtype=distance.dtype, device=distance.device
+    )
+    return distance <= contact
+
+
+def contact_present(force: torch.Tensor, min_force: float) -> torch.Tensor:
+    """Binary physical-contact predicate for task-progress authorization.
+
+    This intentionally uses the configured contact floor rather than the
+    midpoint of :func:`force_window`.  The force window still scales contact
+    quality, while this predicate answers only whether a required role is
+    physically present.
+    """
+    return force >= float(min_force)
+
+
 def excess_force(force: torch.Tensor, f_max: float) -> torch.Tensor:
     """Per-element overshoot above ``f_max`` (``relu(force - f_max)``).
 
@@ -137,6 +180,35 @@ def soft_count_gate(scores: torch.Tensor, target: float) -> torch.Tensor:
     one more finger.
     """
     return (scores.sum(dim=-1) / max(float(target), 1e-6)).clamp(0.0, 1.0)
+
+
+def sustained_binary_gate(
+    valid_now: torch.Tensor,
+    streak: torch.Tensor,
+    hold_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Require a binary condition to remain true for consecutive policy steps.
+
+    Args:
+        valid_now: Per-environment boolean condition for the current policy step.
+        streak: Previous consecutive-valid count, one value per environment.
+        hold_steps: Number of consecutive valid steps needed to authorize reward.
+
+    Returns:
+        ``(gate, updated_streak)``.  ``gate`` is floating point in ``{0, 1}``
+        with the same dtype/device as ``streak``.  A broken condition resets the
+        streak immediately.  ``hold_steps <= 1`` opens on the first valid step.
+
+    This is deliberately a *hard* authorization gate.  Dense contact-quality
+    shaping can still use a smooth score, but task progress must not be credited
+    while the required physical contact is absent or only flickers for one step.
+    """
+    required = max(int(hold_steps), 1)
+    valid = valid_now.to(dtype=torch.bool)
+    updated = torch.where(valid, streak + 1.0, torch.zeros_like(streak))
+    updated = updated.clamp(max=float(required))
+    gate = (updated >= float(required)).to(dtype=streak.dtype)
+    return gate, updated
 
 
 def joint_limit_barrier(
@@ -172,6 +244,24 @@ def home_deviation(
     """
     dev = ((q - home).abs() - deadband).clamp(min=0.0)
     return (dev ** 2).sum(dim=-1)
+
+
+def target_penetration(
+    cur_targets: torch.Tensor,
+    q: torch.Tensor,
+    deadband: float | torch.Tensor,
+) -> torch.Tensor:
+    """Per-row squared target-tracking error beyond a free deadband.
+
+    Under position control this is a force-free proxy for squeeze intent:
+    commanded targets that continue past measured independent-joint positions
+    accumulate cost, while normal tracking error inside the deadband is free.
+    """
+    band = torch.as_tensor(
+        deadband, dtype=cur_targets.dtype, device=cur_targets.device
+    )
+    error = ((cur_targets - q).abs() - band).clamp(min=0.0)
+    return (error ** 2).sum(dim=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +324,53 @@ def tangential_speed(
     r_hat = radial / torch.linalg.norm(radial, dim=-1, keepdim=True).clamp(min=1e-9)
     t_hat = torch.linalg.cross(a_hat_k.expand_as(r_hat), r_hat, dim=-1)
     return (velocities * t_hat).sum(-1).abs()                         # (N, K)
+
+
+def surface_co_motion(
+    point_pos: torch.Tensor,
+    point_vel: torch.Tensor,
+    body_pos: torch.Tensor,
+    body_lin_vel: torch.Tensor,
+    body_ang_vel: torch.Tensor,
+    surface_speed_floor: float,
+) -> torch.Tensor:
+    """Per-point ratio of point velocity projected onto the local surface velocity.
+
+    For each query point, the rigid-body surface velocity of the reference body
+    at that location is ``v_surf = v_body + omega x (p - p_body)``.  The score is
+    ``clamp(dot(v_point, v_surf) / |v_surf|^2, 0, 1)``: one when the point moves
+    with the surface (driving or rolling with it), zero when the point is static
+    or opposes the surface while the surface moves.  Where the local surface
+    speed is at or below ``surface_speed_floor`` the score is one — a stationary
+    handle must not veto the reward for fingers that are about to start it.
+
+    Built from measured body twist rather than joint-axis conventions, so it is
+    exact under tilt and precession and has no sign ambiguity.  This is the
+    anti-coasting authorization: solver creep that rotates the handle under
+    motionless fingertips scores zero.
+
+    Args:
+        point_pos: ``(N, K, 3)`` query points (fingertip positions, world).
+        point_vel: ``(N, K, 3)`` matching point velocities (world).
+        body_pos: ``(N, 3)`` reference body origin (handle body, world).
+        body_lin_vel: ``(N, 3)`` reference body linear velocity (world).
+        body_ang_vel: ``(N, 3)`` reference body angular velocity (world).
+        surface_speed_floor: speed (m/s) at or below which the surface counts
+            as static and the score is one.
+
+    Returns:
+        ``(N, K)`` co-motion scores in ``[0, 1]``.
+    """
+    rel = point_pos - body_pos.unsqueeze(1)                      # (N, K, 3)
+    v_surf = body_lin_vel.unsqueeze(1) + torch.linalg.cross(
+        body_ang_vel.unsqueeze(1).expand_as(rel), rel, dim=-1
+    )                                                            # (N, K, 3)
+    surf_speed_sq = (v_surf ** 2).sum(-1)                        # (N, K)
+    score = (
+        (point_vel * v_surf).sum(-1) / surf_speed_sq.clamp_min(1e-12)
+    ).clamp(0.0, 1.0)
+    static = surf_speed_sq <= float(surface_speed_floor) ** 2
+    return torch.where(static, torch.ones_like(score), score)
 
 
 def near_contact_score(

@@ -1,0 +1,38 @@
+{
+  "validation_scope": "Static full-resolution URDF meshes plus Isaac-style per-link convex hulls at representative scale 0.8",
+  "hand_root_position": [0.0, 0.0, 0.615],
+  "hand_root_quaternion_wxyz": [0.5, 0.5, 0.5, -0.5],
+  "palm_normal_world": [0.0, 0.0, -1.0],
+  "rotation_axis_world": [0.0, 0.0, -1.0],
+  "object_center": [0.0023, -0.1783, 0.55],
+  "results": {
+    "cylinder": {
+      "all_five_distal_meshes_contact": true,
+      "all_five_distal_convex_hulls_contact": true,
+      "non_distal_object_contacts": [],
+      "non_distal_convex_hull_object_contacts": [],
+      "blocking_self_collisions": [],
+      "palm_clearance_mm": 24.607,
+      "minimum_joint_limit_margin_rad": 0.04
+    },
+    "cuboid": {
+      "all_five_distal_meshes_contact": true,
+      "all_five_distal_convex_hulls_contact": true,
+      "non_distal_object_contacts": [],
+      "non_distal_convex_hull_object_contacts": [],
+      "blocking_self_collisions": [],
+      "palm_clearance_mm": 31.29,
+      "minimum_joint_limit_margin_rad": 0.046564
+    },
+    "sphere": {
+      "all_five_distal_meshes_contact": true,
+      "all_five_distal_convex_hulls_contact": true,
+      "non_distal_object_contacts": [],
+      "non_distal_convex_hull_object_contacts": [],
+      "blocking_self_collisions": [],
+      "palm_clearance_mm": 32.198,
+      "minimum_joint_limit_margin_rad": 0.040109
+    }
+  },
+  "required_remaining_validation": "Isaac Lab gravity settling and cache harvesting across every scale/shape/prototype; the training task refuses startup until that complete cache set exists."
+}
