@@ -328,6 +328,18 @@ def main() -> None:
     with open(agent_cfg_path) as f:
         agent_cfg = yaml.safe_load(f)
 
+    # Keep the latent actor's proprio slice in sync with frame-stacked tasks.
+    # The shared YAML describes the single-frame default, while HORA uses three
+    # proprio frames (96-D).  Training and eval.py derive this value from the
+    # task config; playback must do the same or it builds a 40-D actor and
+    # cannot load a checkpoint whose actor input is 104-D.
+    network_cfg = agent_cfg.get("params", {}).get("network", {})
+    if int(network_cfg.get("latent_dim", 0)) > 0:
+        history_dim = int(getattr(env_cfg, "history_obs_dim", 0))
+        frame_count = int(getattr(env_cfg, "actor_frame_count", 1))
+        if history_dim > 0:
+            network_cfg["proprio_dim"] = history_dim * frame_count
+
     # Register the HORA-faithful latent-conditioned network if the config selects
     # it (no-op for legacy ``actor_critic`` configs). Must run before
     # ``Runner.load`` builds the model/player.

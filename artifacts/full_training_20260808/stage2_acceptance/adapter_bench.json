@@ -1,0 +1,241 @@
+{
+  "checkpoint": "/home/fresh/Workspace/dex-forge/runs/Isaac-LinkerL20-Screwdriver-Rotation-Topdown-Hora/full_stage1_20260807_env12288/linker_l20_screwdriver_rotation_07-23-29-15/nn/last_linker_l20_screwdriver_rotation_ep_760_rew_22314.447.pth",
+  "coasting": {
+    "contact_fraction": 0.99216796875,
+    "fwd_velocity_in_contact": 0.34248905613299474,
+    "fwd_velocity_without_contact": 0.11543890365638637
+  },
+  "deploy_eval": true,
+  "domain_rand_enabled": true,
+  "episodes": {
+    "authorized_net_turns_mean": 2.5546460151672363,
+    "authorized_total_turns_mean": 2.645174264907837,
+    "count": 512,
+    "fall_rate": 0.005859375,
+    "geometry_buckets": [],
+    "net_turns_mean": 3.159695625305176,
+    "net_turns_p10": 2.1533985137939453,
+    "net_turns_p50": 3.3005406856536865,
+    "net_turns_p90": 4.031569480895996,
+    "net_turns_std": 0.8453806638717651,
+    "success_rate": 0.673828125,
+    "total_turns_mean": 3.308013916015625
+  },
+  "fall_age_steps": {
+    "count": 3,
+    "fraction_within_20_steps": 0.3333333432674408,
+    "fraction_within_reset_mute_window": 0.0,
+    "p10": 19.200000762939453,
+    "p50": 32.0,
+    "p90": 45.599998474121094
+  },
+  "fall_dr_crosstab": {
+    "by_load_torque_scale": {
+      "available": true,
+      "edges": [
+        1.5760486125946045,
+        2.7841124534606934
+      ],
+      "high": {
+        "fall_rate": 0.0,
+        "n": 171
+      },
+      "low": {
+        "fall_rate": 0.005847953259944916,
+        "n": 171
+      },
+      "mid": {
+        "fall_rate": 0.0117647061124444,
+        "n": 170
+      },
+      "unit": "\u00d7base"
+    },
+    "by_placement_noise": {
+      "available": true,
+      "edges": [
+        4.9072465896606445,
+        7.358991622924805
+      ],
+      "high": {
+        "fall_rate": 0.0,
+        "n": 171
+      },
+      "low": {
+        "fall_rate": 0.0,
+        "n": 171
+      },
+      "mid": {
+        "fall_rate": 0.01764705963432789,
+        "n": 170
+      },
+      "unit": "mm"
+    },
+    "high_load_high_placement_corner": {
+      "fall_rate": 0.0,
+      "n": 54,
+      "rest_fall_rate": 0.006550218444317579
+    },
+    "n_episodes": 512,
+    "overall_fall_rate": 0.005859375
+  },
+  "fixed_start": false,
+  "geometry_randomized": false,
+  "latent_diagnostics": {
+    "action_mae": 0.15330848097801208,
+    "count": 307200,
+    "geometry_buckets": [],
+    "latent_bias": [
+      0.28379812836647034,
+      0.2713867127895355,
+      -0.26152557134628296,
+      0.18749161064624786,
+      8.594377868575975e-05,
+      0.00046844681492075324,
+      0.10257526487112045,
+      0.07736414670944214
+    ],
+    "latent_mae": 0.3056310713291168,
+    "latent_mae_by_channel": [
+      0.45978307723999023,
+      0.4942595660686493,
+      0.40326595306396484,
+      0.2504478096961975,
+      0.0034520181361585855,
+      0.0018457097467035055,
+      0.3029642403125763,
+      0.5290303826332092
+    ],
+    "latent_mse": 0.22485221922397614
+  },
+  "num_envs": 256,
+  "root_pos_bias_mm": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "root_rpy_bias_deg": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "seed": 0,
+  "step_metrics": {
+    "eval_avg_contact_speed": {
+      "mean": null,
+      "std": null
+    },
+    "eval_binary_gate": {
+      "mean": 0.99216796875,
+      "std": 0.08815152033004897
+    },
+    "eval_contact_authority_reward": {
+      "mean": 2.9763112386067707,
+      "std": 0.26477644757989605
+    },
+    "eval_contact_count": {
+      "mean": 3.899404296875,
+      "std": 0.3355377514346008
+    },
+    "eval_contact_force": {
+      "mean": 6.782940673828125,
+      "std": 2.4148285249498356
+    },
+    "eval_contact_gate": {
+      "mean": 0.99216796875,
+      "std": 0.08815152033004897
+    },
+    "eval_drive_count": {
+      "mean": 3.899404296875,
+      "std": 0.3355377514346008
+    },
+    "eval_fwd_vel": {
+      "mean": 0.34071077982584635,
+      "std": 0.33702381041672325
+    },
+    "eval_idle_count": {
+      "mean": 0.002880859375,
+      "std": 0.07039810620744572
+    },
+    "eval_in_window": {
+      "mean": 0.8304783630371094,
+      "std": 0.05960630358941687
+    },
+    "eval_index_cap_force": {
+      "mean": 1.126162618001302,
+      "std": 2.165844996342314
+    },
+    "eval_max_joint_dev": {
+      "mean": 0.37016624450683594,
+      "std": 0.058971653149065946
+    },
+    "eval_min_tip_dist": {
+      "mean": null,
+      "std": null
+    },
+    "eval_motion_auth": {
+      "mean": 0.7488525899251303,
+      "std": 0.2609318097145081
+    },
+    "eval_motion_gate": {
+      "mean": null,
+      "std": null
+    },
+    "eval_osc_ratio": {
+      "mean": 0.05234238306681315,
+      "std": 0.10193034948373009
+    },
+    "eval_pad_cos": {
+      "mean": null,
+      "std": null
+    },
+    "eval_pad_gate": {
+      "mean": null,
+      "std": null
+    },
+    "eval_rev_vel": {
+      "mean": 0.015689284006754557,
+      "std": 0.042589008213780845
+    },
+    "eval_tilt_norm": {
+      "mean": 0.06650416692097982,
+      "std": 0.03647902535504664
+    },
+    "eval_total_reward": {
+      "mean": 38.076572265625,
+      "std": 110.81141101514457
+    },
+    "eval_turn_reward": {
+      "mean": 46.43280924479166,
+      "std": 50.2259027690904
+    },
+    "eval_upright_gate": {
+      "mean": 0.9999483235677084,
+      "std": 0.0
+    },
+    "eval_wrong_surface_force": {
+      "mean": 0.0069704977671305336,
+      "std": 0.45282002882612565
+    },
+    "eval_wrong_surface_object_force": {
+      "mean": 0.0,
+      "std": 0.0
+    }
+  },
+  "steps": 1200,
+  "success_turns": 3.0,
+  "task": "Isaac-LinkerL20-Screwdriver-Rotation-Topdown-Hora",
+  "tilt_distribution": {
+    "fraction_below_0_10_rad": 0.8167155385017395,
+    "p50": 0.06157131493091583,
+    "p90": 0.11701890826225281,
+    "p99": 0.1591903120279312
+  },
+  "wrong_surface_distribution": {
+    "fraction_above_0_05_n": 0.0006087239598855376,
+    "max_n": 174.35887145996094,
+    "p50_n": 0.0,
+    "p90_n": 0.0,
+    "p99_n": 0.0
+  },
+  "zero_action_probe": false
+}
