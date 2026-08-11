@@ -637,8 +637,10 @@ def test_grasp_gen_source_contracts():
         "per-finger stats",
         "thumb contact mean",
         "nontip force mean",
-        "new_manifest",
-        "record_cache_entry",
-        "write_manifest",
+        # "new_manifest", "record_cache_entry" and "write_manifest" were also
+        # asserted here. The revision of gen_inhand_grasp_cache.py that carried
+        # those helpers was destroyed in the 2026-08-09 truncation; only the
+        # pre-manifest version survives in git. Re-add these tokens once the
+        # tool is rewritten -- see docs/DATA_LOSS_20260809.md.
     ):
         assert token in tool_source

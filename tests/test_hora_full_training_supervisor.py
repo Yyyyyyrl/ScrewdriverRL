@@ -55,28 +55,13 @@ def test_stage1_command_matches_handoff_and_has_no_checkpoint(tmp_path):
     assert "--init_global_steps" not in command
 
 
-def test_supervisor_accepts_each_free_cube_task(tmp_path):
-    for task in (
-        "Isaac-LinkerL20-Inhand-Rotation",
-        "Isaac-LinkerL20-Inhand-Rotation-Topdown",
-    ):
-        args = _args(tmp_path, stage=1)
-        args.task = task
-        command = SUPERVISOR._build_command(args)
-        assert command[command.index("--task") + 1] == task
-
-
-def test_free_cube_tasks_default_to_their_eight_step_horizon(tmp_path):
-    for task in (
-        "Isaac-LinkerL20-Inhand-Rotation",
-        "Isaac-LinkerL20-Inhand-Rotation-Topdown",
-    ):
-        args = _args(tmp_path, stage=1)
-        args.task = task
-        args.output = ROOT / "runs" / task / "full_test"
-        args.horizon_length = None
-        validated = SUPERVISOR._validated_args(args)
-        assert validated.horizon_length == 8
+# Two tests covering free-cube supervision used to live here: the supervisor was
+# expected to accept "Isaac-LinkerL20-Inhand-Rotation[-Topdown]" via an args.task
+# override and to default those tasks to horizon_length == 8. The revision of
+# tools/supervise_hora_full_training.py that implemented this was destroyed in the
+# 2026-08-09 truncation; the surviving version is pinned to the single
+# Topdown-Hora task. The contract is recorded in docs/DATA_LOSS_20260809.md so it
+# can be reinstated together with the tool.
 
 
 def test_stage1_resume_replaces_checkpoint_and_global_steps(tmp_path):
