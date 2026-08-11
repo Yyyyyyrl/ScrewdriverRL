@@ -1,51 +1,102 @@
-# Python bytecode and caches
+# .gitignore for dex-forge
+#
+# The guiding rule: track anything a fresh clone needs in order to train, evaluate
+# or deploy. Do not track anything a training run produces -- those are large,
+# regenerable, and were the reason `git status` used to list 700+ entries.
+#
+# See docs/REPO_LAYOUT.md for what each top-level directory is actually for.
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Packaging and build outputs
 *.egg-info/
 build/
 dist/
 wheelhouse/
-
-# Virtual environments
 .venv/
 venv/
 env/
 
-# Test, coverage, and type-check caches
+# ---------------------------------------------------------------------------
+# Test / lint / type-check caches
+# ---------------------------------------------------------------------------
 .pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Training and experiment outputs
+# ---------------------------------------------------------------------------
+# Training and experiment output
+#
+# runs/ holds every RL-Games checkpoint and is the single biggest directory in a
+# working copy (tens of GB), so it is ignored wholesale.
+#
+# Three files under runs/ are nevertheless tracked -- the published HORA ep-760
+# policy, its Stage-2 deploy bundle, and the adaptation validation report -- because
+# deployment depends on those exact weights. They stay tracked because .gitignore
+# does not apply to files git already knows about. Note that a `!runs/...` negation
+# would NOT work here: git will not re-include anything beneath an excluded
+# directory. To publish another policy, force it in with `git add -f <path>`.
+# ---------------------------------------------------------------------------
 runs/
 logs/
 checkpoints/
 wandb/
 outputs/
-*.webm
+deliverables/
+
+# ---------------------------------------------------------------------------
+# Console logs and recorded telemetry
+#
+# Training is normally launched as `... > stage1.log 2>&1 &`, and the deploy tools
+# record CSV traces. Both land at the repo root and are pure run output; a single
+# stage-1 log reached 98 MB.
+# ---------------------------------------------------------------------------
+*.log
 *.csv
 
-# Local editor and OS files
-.idea/
-.vscode/
-.DS_Store
-
-# Merge/patch conflict backups
-*.orig
-*.rej
-
-# Local hardware-calibration captures and debug renders (root level only;
-# curated renders under artifacts/ are tracked)
+# ---------------------------------------------------------------------------
+# Local hardware captures and debug renders
+#
+# Root level only: curated renders committed under artifacts/ must stay tracked,
+# so these patterns are anchored with a leading slash.
+# ---------------------------------------------------------------------------
 /*.png
 /*.jpg
 /*.jpeg
 /*.mov
 /*.MOV
+/*.webm
+# One-off pose/readback dumps written by the hand_check and posture tools.
+/decoded_pose*.json
+/posed_state.json
+/startup*.json
+/*_readback.json
+/topdown_*_pose.json
+/wiggle_*.json
 
-# Release bundles: 152MB of checkpoints and tarballs, rebuilt by tools/export_policy_package.py
-deliverables/
+# ---------------------------------------------------------------------------
+# 3D-printing output (generated plates and slicer output, not source CAD)
+# ---------------------------------------------------------------------------
+print/
+*.3mf
+*.gcode
+
+# ---------------------------------------------------------------------------
+# Merge/patch conflict backups -- these caused real confusion (a README.md.orig
+# and train.py.orig sat at the root for weeks looking like live files).
+# ---------------------------------------------------------------------------
+*.orig
+*.rej
+
+# ---------------------------------------------------------------------------
+# Editor, OS, and a scratch area for throwaway work
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+_scratch/
