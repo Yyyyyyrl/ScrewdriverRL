@@ -55,6 +55,30 @@ def test_stage1_command_matches_handoff_and_has_no_checkpoint(tmp_path):
     assert "--init_global_steps" not in command
 
 
+def test_supervisor_accepts_each_free_cube_task(tmp_path):
+    for task in (
+        "Isaac-LinkerL20-Inhand-Rotation",
+        "Isaac-LinkerL20-Inhand-Rotation-Topdown",
+    ):
+        args = _args(tmp_path, stage=1)
+        args.task = task
+        command = SUPERVISOR._build_command(args)
+        assert command[command.index("--task") + 1] == task
+
+
+def test_free_cube_tasks_default_to_their_eight_step_horizon(tmp_path):
+    for task in (
+        "Isaac-LinkerL20-Inhand-Rotation",
+        "Isaac-LinkerL20-Inhand-Rotation-Topdown",
+    ):
+        args = _args(tmp_path, stage=1)
+        args.task = task
+        args.output = ROOT / "runs" / task / "full_test"
+        args.horizon_length = None
+        validated = SUPERVISOR._validated_args(args)
+        assert validated.horizon_length == 8
+
+
 def test_stage1_resume_replaces_checkpoint_and_global_steps(tmp_path):
     checkpoint_a = tmp_path / "a.pth"
     checkpoint_b = tmp_path / "b.pth"

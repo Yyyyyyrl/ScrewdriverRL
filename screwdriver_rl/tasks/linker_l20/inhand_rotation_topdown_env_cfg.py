@@ -4,7 +4,7 @@ The task dynamics, object distribution, observations, rewards, curriculum, and
 policy configuration are inherited unchanged from the standard Linker L20
 in-hand task.  This module only supplies:
 
-* a fixed hand root above the object with the palm normal exactly world ``-Z``;
+* a fixed hand root above the object with a 45-degree down-facing palm;
 * fingertip-only canonical seeds fitted separately to cylinders, cuboids, and
   spheres; and
 * a dedicated grasp-cache namespace and grasp-generation configuration.
@@ -28,23 +28,37 @@ from .inhand_rotation_env_cfg import (
 )
 
 
-# The L20 palm outward normal is base-local +X.  This unit quaternion maps +X
-# to world -Z and the finger direction (+Z) to world -Y: an exact, level
-# top-down palm rather than an oblique side grasp.
-TOPDOWN_HAND_POS: tuple[float, float, float] = (0.0, 0.0, 0.615)
-TOPDOWN_HAND_ROT: tuple[float, float, float, float] = (0.5, 0.5, 0.5, -0.5)
+# Strict world -Z was tested first, but every 64 mm cube candidate dropped
+# after release: 0 timeouts across the broad and mesh-guided searches.  Tilting
+# the down-facing palm 45 degrees lets the index distal curl under the cube
+# while the other fingertips oppose it.  The production seed was selected by
+# 20 s searches, then its cache rows were replay-certified with strict non-tip
+# rejection across independent full-domain-randomisation episodes.
+# Base-local palm +X maps to (0,+sqrt(1/2),-sqrt(1/2)); finger direction +Z
+# maps to (0,-sqrt(1/2),-sqrt(1/2)).
+TOPDOWN_HAND_POS: tuple[float, float, float] = (0.0, 0.0, 0.725)
+TOPDOWN_HAND_ROT: tuple[float, float, float, float] = (
+    0.27059805007309845,
+    0.6532814824381883,
+    0.6532814824381883,
+    -0.27059805007309845,
+)
 
-# Representative scale-0.8 object centre used by the static mesh fit.  The hand
-# root is 6.5 cm above the centre and the fingertip cage reaches down around it.
-TOPDOWN_OBJECT_INIT_POS: tuple[float, float, float] = (0.0023, -0.1783, 0.55)
+# Physics-selected nominal operator-load centre.  Production training resets
+# still come from the versioned, per-scale cache rather than this single seed.
+TOPDOWN_OBJECT_INIT_POS: tuple[float, float, float] = (
+    -0.009065027347372086,
+    -0.08247900578976629,
+    0.5695643860739765,
+)
 TOPDOWN_OBJECT_INIT_ROT: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
 # Reward rotation is aligned with the gravity vector exactly, per task design.
 TOPDOWN_ROT_AXIS: tuple[float, float, float] = (0.0, 0.0, -1.0)
 
-# Full-URDF-mesh optimized seeds.  At scale 0.8 each seed has contact on all
-# five distal meshes, no object contact on the palm/metacarpal/proximal/middle
-# links, no blocking self collision, and >= 0.04 rad joint-limit margin.
+# The cuboid seed below is the physics-selected production pose for the 64 mm
+# cube.  The legacy non-production shape seeds remain for tooling compatibility;
+# the cache CLI only permits cuboid generation for this deployment pipeline.
 TOPDOWN_PREGRASP_BY_SHAPE: dict[str, dict[str, tuple[float, ...]]] = {
     "cylinder": {
         "index": (0.130000, 0.464707, 1.065931),
@@ -54,11 +68,11 @@ TOPDOWN_PREGRASP_BY_SHAPE: dict[str, dict[str, tuple[float, ...]]] = {
         "thumb": (0.915593, 0.586972, 0.146910, 0.446909),
     },
     "cuboid": {
-        "index": (0.123436, 0.496310, 1.105027),
-        "middle": (0.029018, 0.601187, 0.719678),
-        "ring": (0.012912, 0.393539, 0.881700),
-        "pinky": (0.094346, 0.314292, 0.975750),
-        "thumb": (0.940885, 0.592575, 0.151998, 0.453834),
+        "index": (0.12000000000000001, 0.27542790417018326, 1.044469372720009),
+        "middle": (-0.12000000000000001, 0.6532812108471646, 0.7279558832753705),
+        "ring": (0.09427624393544437, 0.526782625834149, 0.6824411534684619),
+        "pinky": (0.11521066185128623, 0.39424901833581494, 0.6763672454250939),
+        "thumb": (0.7750714874040479, 1.0784517282082406, 0.42034865845335045, 0.4406184473026461),
     },
     "sphere": {
         "index": (0.129891, 0.465224, 1.066452),
@@ -92,17 +106,25 @@ def _apply_topdown_seed(cfg, shape: str) -> None:
 
 @configclass
 class LinkerL20InhandRotationTopdownEnvCfg(LinkerL20InhandRotationEnvCfg):
-    """Training config for the gravity-axis, top-down fingertip grasp."""
+    """Training config for the gravity-axis, tilted top-down fingertip grasp."""
 
     rot_axis: tuple[float, float, float] = TOPDOWN_ROT_AXIS
-    grasp_cache_name: str = "linker_l20_topdown"
+    # Preserve a ~27.6 mm centre-drop allowance below the selected cage centre.
+    reset_height_threshold: float = 0.542
+    grasp_cache_name: str = "linker_l20_topdown_cube64_v2"
+    grasp_orientation: str = "top-down-tilted-45deg-v2-replay-certified"
     require_complete_grasp_cache: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        # Mixed training env 0 is a cylinder; all actual training resets come
-        # from the required per-shape/per-prototype caches.
-        _apply_topdown_seed(self, "cylinder")
+        # The bottom-up D=0.1 ablation passed its palm gate, but the same
+        # damping made this gravity-axis grasp rest on hand_base_link for
+        # 1.451% of step-env samples (>1% hard limit).  Keep top-down on the
+        # replay-certified G20 damping; reward/actor changes remain shared.
+        self.robot_cfg.actuators["fingers"].damping = 1.0
+        # The production object is a 64 mm cube.  All actual training resets
+        # come from the required per-scale cuboid caches.
+        _apply_topdown_seed(self, "cuboid")
 
 
 @configclass
@@ -111,11 +133,22 @@ class LinkerL20InhandRotationTopdownGraspGenEnvCfg(
 ):
     """Cache harvester using the top-down seed for the requested shape."""
 
-    grasp_cache_name: str = "linker_l20_topdown"
+    grasp_cache_name: str = "linker_l20_topdown_cube64_v2"
+    grasp_orientation: str = "top-down-tilted-45deg-v2-replay-certified"
+    # This class inherits the generic bottom-up generator directly, so repeat
+    # the orientation-specific height frame explicitly.
+    reset_height_threshold: float = 0.542
+    # The replay-certified candidate has a broad stable basin.  Independent
+    # 0.02 rad q16 noise retained 89.45% of rows across four full-DR replays
+    # while preserving useful reset diversity.
+    grasp_gen_pose_noise: float = 0.02
+    # Require harvested rows to sit at least 10 mm above the actual fall gate.
+    grasp_gen_accept_z_margin: float = 0.01
 
     def __post_init__(self) -> None:
         super().__post_init__()
         _apply_topdown_seed(self, str(self.cache_shape))
+        self.grasp_gen_pose_noise = 0.02
 
     def configure_cache_shape(self, shape: str) -> None:
         """Refresh the seed after the cache tool pins a shape and rebuilds it."""

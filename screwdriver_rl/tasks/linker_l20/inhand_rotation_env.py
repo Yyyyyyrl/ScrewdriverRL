@@ -1,4 +1,4 @@
-"""Linker Hand L20 free-object in-hand cylinder rotation environment."""
+"""Linker G20/L20 64 mm free-cube in-hand rotation environment."""
 
 from __future__ import annotations
 
@@ -17,8 +17,15 @@ from isaaclab.sensors import ContactSensor, ContactSensorCfg
 
 from screwdriver_rl.core import rewards
 from screwdriver_rl.deploy.codecs import ProprioCodec, inhand_linker_g20_codec_spec
+from screwdriver_rl.utils.inhand_grasp_cache_manifest import (
+    CACHE_ROW_WIDTH,
+    load_and_validate_manifest,
+    manifest_path,
+    new_manifest,
+)
 
 from .inhand_rotation_env_cfg import (
+    INHAND_CUBE_EDGE_M,
     LinkerL20InhandRotationEnvCfg,
     grasp_cache_filename,
 )
@@ -38,7 +45,7 @@ def _spawn_local_ground() -> None:
 
 
 class LinkerL20InhandRotationEnv(DirectRLEnv):
-    """HORA-style free cylinder in-hand rotation for the Linker Hand L20."""
+    """HORA-style free-cube rotation for the current left Linker G20 mapping."""
 
     cfg: LinkerL20InhandRotationEnvCfg
 
@@ -80,6 +87,10 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         "thumb_metacarpals_base1", "thumb_metacarpals_base2",
         "thumb_metacarpals", "thumb_proximal",
     )
+    # Deployment rejects support on the physical palm.  Contacts on finger
+    # sides are allowed; they remain separately instrumented for diagnostics
+    # and cache generation can still impose the stronger fingertip-only rule.
+    PALM_BODY_NAMES = ("hand_base_link",)
 
     SELF_COLLISION_FILTER_PAIRS = [
         ("hand_base_link", "index_proximal"),
@@ -131,7 +142,14 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         self._finger_upper = finger_limits[..., 1] - margin
         self._default_finger_pos = self._make_default_finger_pos()
         self._cur_targets = self._default_finger_pos.clone()
+        self._home_targets = self._default_finger_pos.clone()
         self._init_pose_buf = self._default_finger_pos.clone()
+        self._steps_since_reset = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._reset_action_scale = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
 
         self._policy_dt = float(cfg.decimation) * float(cfg.sim.dt)
         self._proprio_codec = ProprioCodec(
@@ -170,6 +188,9 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         self._env_scale = scale_values[self._env_scale_idx]
 
         self._grasp_cache = self._load_grasp_caches()
+        # Validation-only hook used by the cache replay certifier.  Production
+        # reset sampling leaves this as None and remains uniformly random.
+        self._forced_cache_row_indices: torch.Tensor | None = None
         self._canonical_obj_pos = torch.tensor(
             cfg.grasp_gen_obj_init_pos, dtype=torch.float32, device=self.device
         )
@@ -186,6 +207,13 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         self._rb_forces = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
         self._obj_pos_prev = self.object.data.root_pos_w.detach().clone()
         self._obj_quat_prev = self.object.data.root_quat_w.detach().clone()
+        self._tilt_prev = self._object_vertical_tilt(self._obj_quat_prev)
+        self._episode_forward_turns = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
+        self._episode_reverse_turns = torch.zeros_like(
+            self._episode_forward_turns
+        )
 
         self._env_mass = self._default_object_mass()
         self._env_friction = torch.ones(self.num_envs, dtype=torch.float32, device=self.device)
@@ -245,8 +273,14 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 self._finger_sensors.append(sensor)
 
         self._nontip_sensors: list[ContactSensor] = []
-        if self.cfg.enable_nontip_sensors:
-            for body in self.NONTIP_BODY_NAMES:
+        self._nontip_sensor_names: list[str] = []
+        if self.cfg.enable_nontip_sensors or self.cfg.enable_palm_sensor:
+            sensor_bodies = (
+                self.NONTIP_BODY_NAMES
+                if self.cfg.enable_nontip_sensors
+                else self.PALM_BODY_NAMES
+            )
+            for body in sensor_bodies:
                 sensor = ContactSensor(
                     ContactSensorCfg(
                         prim_path=f"{self.cfg.robot_cfg.prim_path}/{body}",
@@ -258,6 +292,7 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 )
                 self.scene.sensors[f"contact_nontip_{body}"] = sensor
                 self._nontip_sensors.append(sensor)
+                self._nontip_sensor_names.append(body)
 
         _spawn_local_ground()
         self._finalize_scene()
@@ -275,12 +310,36 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
 
         if self.cfg.action_clip > 0.0:
             actions = torch.clamp(actions, -self.cfg.action_clip, self.cfg.action_clip)
-        self.actions = actions.clone()
-        self._cur_targets = torch.clamp(
-            self._cur_targets + float(self.cfg.action_delta_scale) * self.actions,
-            self._finger_lower,
-            self._finger_upper,
-        )
+        hold = max(int(self.cfg.reset_action_hold_steps), 0)
+        ramp = max(int(self.cfg.reset_action_ramp_steps), 0)
+        if ramp > 0:
+            action_scale = (
+                (self._steps_since_reset - hold + 1).to(actions.dtype)
+                / float(ramp)
+            ).clamp(0.0, 1.0)
+        else:
+            action_scale = (self._steps_since_reset >= hold).to(actions.dtype)
+        self._reset_action_scale = action_scale
+        self.actions = actions * action_scale.unsqueeze(-1)
+        motion_range = float(self.cfg.joint_motion_range)
+        if motion_range > 0.0:
+            lower = torch.maximum(
+                self._finger_lower, self._home_targets - motion_range
+            )
+            upper = torch.minimum(
+                self._finger_upper, self._home_targets + motion_range
+            )
+        else:
+            lower, upper = self._finger_lower, self._finger_upper
+        if self.cfg.absolute_action_targets:
+            target = self._home_targets + motion_range * self.actions
+        else:
+            target = (
+                self._cur_targets
+                + float(self.cfg.action_delta_scale) * self.actions
+            )
+        self._cur_targets = torch.clamp(target, lower, upper)
+        self._steps_since_reset += 1
         self._update_random_forces()
 
     def _apply_action(self) -> None:
@@ -296,9 +355,14 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             self._obs_hist[ids] = frame[ids].unsqueeze(1).expand(-1, self.cfg.prop_hist_len, -1)
             self._hist_reset_mask[ids] = False
 
-        priv = self._compute_privileged_obs()
         proprio = self._proprio_codec.assemble_actor_input(self._obs_hist)
-        result = {"policy": torch.cat([proprio, priv], dim=-1)}
+        priv = self._compute_privileged_obs()
+        actor_extrinsics = (
+            self._compute_actor_extrinsics()
+            if self.cfg.slow_extrinsics_only
+            else priv
+        )
+        result = {"policy": torch.cat([proprio, actor_extrinsics], dim=-1)}
         if self.cfg.asymmetric_obs:
             result["critic"] = priv
             result["proprio_hist"] = self._obs_hist.clone()
@@ -313,19 +377,36 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         obj_linvel = (obj_pos - self._obj_pos_prev) / max(self._policy_dt, 1e-6)
 
         raw_rotate = torch.sum(obj_angvel * self._rot_axis, dim=-1)
-        turn_weight = float(self._curriculum_phase.reward_turn_weight)
-        rotate_reward = (
-            turn_weight
-            * float(self.cfg.rotate_reward_scale)
-            * torch.clamp(
-                raw_rotate,
-                min=float(self.cfg.angvel_clip[0]),
-                max=float(self.cfg.angvel_clip[1]),
-            )
+        forward_vel = torch.clamp(raw_rotate, min=0.0)
+        reverse_vel = torch.clamp(-raw_rotate, min=0.0)
+        radians_to_turns = self._policy_dt / (2.0 * torch.pi)
+        self._episode_forward_turns += forward_vel * radians_to_turns
+        self._episode_reverse_turns += reverse_vel * radians_to_turns
+        net_turns = self._episode_forward_turns - self._episode_reverse_turns
+        total_turns = self._episode_forward_turns + self._episode_reverse_turns
+        osc_ratio = self._episode_reverse_turns / self._episode_forward_turns.clamp(
+            min=1.0e-6
+        )
+        # Mean(per-env ratio) is dominated by freshly-reset envs with almost
+        # zero forward progress.  Broadcast the batch aggregate separately for
+        # stable training/Stage-2 logging while retaining the per-env ratio for
+        # detailed evaluation.
+        osc_ratio_aggregate = self._episode_reverse_turns.sum() / (
+            self._episode_forward_turns.sum().clamp(min=1.0e-6)
         )
         linvel_cost = torch.linalg.norm(obj_linvel, ord=1, dim=-1)
         finger_q = self.hand.data.joint_pos[:, self._finger_joint_ids]
         pose_cost = torch.sum((finger_q - self._init_pose_buf) ** 2, dim=-1)
+        motion_range = float(self.cfg.joint_motion_range)
+        if motion_range > 0.0:
+            target_edge_fraction = (
+                (self._cur_targets - self._home_targets).abs() / motion_range
+            )
+            target_bound_cost = float(self.cfg.w_target_bound) * torch.mean(
+                torch.relu(target_edge_fraction - 0.8).square(), dim=-1
+            )
+        else:
+            target_bound_cost = torch.zeros_like(pose_cost)
         tau = self.hand.data.applied_torque[:, self._finger_joint_ids]
         qdot = self.hand.data.joint_vel[:, self._finger_joint_ids]
         torque_cost = torch.sum(tau**2, dim=-1)
@@ -333,23 +414,209 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
 
         obj_z = obj_pos[:, 2] - self.scene.env_origins[:, 2]
         fall = obj_z < float(self.cfg.reset_height_threshold)
+        drop_margin = max(float(self.cfg.drop_margin_m), 1.0e-6)
+        drop_margin_cost = torch.clamp(
+            (
+                float(self.cfg.reset_height_threshold)
+                + drop_margin
+                - obj_z
+            )
+            / drop_margin,
+            min=0.0,
+            max=1.0,
+        )
+        downward_velocity_cost = torch.clamp(-obj_linvel[:, 2], min=0.0)
+        tilt_norm = self._object_vertical_tilt(obj_quat)
+        upright_tilt_cost = tilt_norm.square()
+        tilt_velocity_cost = torch.abs(tilt_norm - self._tilt_prev) / max(
+            self._policy_dt, 1.0e-6
+        )
+        self._tilt_prev = tilt_norm.detach().clone()
+
+        tip_force = self._read_tip_object_forces()
+        nontip_force = self._read_nontip_object_forces()
+        palm_force = self._read_named_nontip_object_forces(self.PALM_BODY_NAMES)
+        if self._finger_sensors:
+            # Evaluation and grasp generation use exact filtered object force.
+            tip_contact = tip_force > float(self.cfg.nontip_force_eps)
+        else:
+            # Training-scale contact authority: distal origins are ~0.10 m from
+            # the cube centre at pad contact.  This is the same conservative
+            # geometry sanity bound used to certify cache candidates.
+            tip_pos = self.hand.data.body_state_w[:, self._fingertip_body_ids, :3]
+            tip_dist = torch.linalg.norm(
+                tip_pos - obj_pos.unsqueeze(1), dim=-1
+            )
+            tip_contact = tip_dist <= float(self.cfg.tip_dist_max)
+        # A rotating cube may transfer load from a distal pad to the same
+        # finger's middle/proximal/side surface.  Those contacts are explicitly
+        # legal; only the physical palm is forbidden.  Group all exact filtered
+        # forces by finger and require two independently contacting fingers so
+        # free-flight/coasting remains unauthorized without imposing the old
+        # thumb+two-TIP cage throughout a regrasp gait.
+        finger_force = tip_force.clone()
+        for finger_index, finger in enumerate(self.fingers):
+            side_bodies = tuple(
+                body
+                for body in self.NONTIP_BODY_NAMES
+                if body.startswith(f"{finger}_")
+            )
+            finger_force[:, finger_index] += self._read_named_nontip_object_forces(
+                side_bodies
+            )
+        finger_contact = finger_force > float(self.cfg.nontip_force_eps)
+        contact_count = finger_contact.float().sum(dim=-1)
+        contact_gate = contact_count >= 2.0
+        contact_quality = torch.clamp(contact_count / 2.0, max=1.0)
+        palm_support = palm_force > float(self.cfg.palm_support_force_threshold)
+        hold_gate = contact_gate & ~palm_support & ~fall
+        turn_upright_gate = torch.exp(
+            -0.5
+            * (
+                tilt_norm
+                / max(float(self.cfg.turn_upright_gate_std), 1.0e-6)
+            ).square()
+        )
+        turn_height_gate = torch.clamp(
+            (obj_z - float(self.cfg.reset_height_threshold))
+            / max(float(self.cfg.turn_height_margin_m), 1.0e-6),
+            min=0.0,
+            max=1.0,
+        )
+        stability_gate = turn_upright_gate * turn_height_gate
+        turn_reward_gate = hold_gate.to(raw_rotate.dtype) * stability_gate
+        rotation_credit_gate = (
+            turn_reward_gate
+            if bool(self.cfg.gate_rotation_reward)
+            else torch.ones_like(turn_reward_gate)
+        )
+        tip_state = self.hand.data.body_state_w[:, self._fingertip_body_ids]
+        tip_rel = tip_state[..., :3] - obj_pos.unsqueeze(1)
+        desired_axis = self._rot_axis.view(1, 1, 3).expand_as(tip_rel)
+        desired_tangent = torch.linalg.cross(desired_axis, tip_rel, dim=-1)
+        desired_tangent = desired_tangent / torch.linalg.norm(
+            desired_tangent, dim=-1, keepdim=True
+        ).clamp_min(1.0e-6)
+        drive_velocity = torch.sum(
+            tip_state[..., 7:10] * desired_tangent, dim=-1
+        )
+        # Credit an in-contact push in the requested direction, but do not
+        # penalize the opposite fingertip motion here.  A finger must briefly
+        # return while contact unloads before it can regrasp; pricing that
+        # return created a local optimum at the target-window edge.  Actual
+        # reverse object rotation remains penalized by ``rotate_signal``.
+        drive_signal = torch.clamp(
+            drive_velocity / max(float(self.cfg.drive_speed_ref), 1.0e-6),
+            min=0.0,
+            max=1.0,
+        )
+        drive_reward = (
+            float(self.cfg.drive_reward_scale)
+            * (
+                drive_signal * finger_contact.to(drive_signal.dtype)
+            ).sum(dim=-1)
+            / contact_count.clamp_min(2.0)
+            * turn_reward_gate
+        )
+        turn_weight = float(self._curriculum_phase.reward_turn_weight)
+        clipped_forward = torch.clamp(
+            raw_rotate, min=0.0, max=float(self.cfg.angvel_clip[1])
+        )
+        clipped_reverse = torch.clamp(
+            -raw_rotate, min=0.0, max=-float(self.cfg.angvel_clip[0])
+        )
+        rotate_signal = (
+            clipped_forward
+            - float(self.cfg.reverse_reward_ratio) * clipped_reverse
+        )
+        rotate_reward_scale = (
+            float(self.cfg.rotate_reward_scale_final)
+            if turn_weight >= 1.0
+            else float(self.cfg.rotate_reward_scale)
+        )
+        rotate_reward = (
+            turn_weight
+            * rotate_reward_scale
+            * rotate_signal
+            * rotation_credit_gate
+        )
+        strict_contact_bonus_scale = float(
+            self._curriculum_phase.strict_contact_bonus
+        )
+        partial_contact_bonus_scale = float(
+            self._curriculum_phase.partial_contact_bonus
+        )
+        contact_authority_reward = (
+            strict_contact_bonus_scale * contact_gate.float()
+            + partial_contact_bonus_scale * contact_quality
+        ) * (~palm_support & ~fall).float()
+        palm_support_cost = palm_support.float()
 
         reward = (
             rotate_reward
+            + drive_reward
             + float(self.cfg.linvel_penalty_scale) * linvel_cost
             + float(self.cfg.pose_penalty_scale) * pose_cost
+            - target_bound_cost
             + float(self.cfg.torque_penalty_scale) * torque_cost
             + float(self.cfg.work_penalty_scale) * work_cost
             + float(self.cfg.fall_penalty) * fall.float()
-            + float(self.cfg.hold_bonus) * (~fall).float()
+            + contact_authority_reward
+            + float(self.cfg.palm_support_penalty_scale) * palm_support_cost
+            + float(self.cfg.drop_margin_penalty_scale) * drop_margin_cost
+            + float(self.cfg.downward_velocity_penalty_scale)
+            * downward_velocity_cost
+            + float(self.cfg.upright_tilt_penalty_scale) * upright_tilt_cost
+            + float(self.cfg.tilt_velocity_penalty_scale) * tilt_velocity_cost
         )
         self.extras.update(
             {
                 "eval_rotate_reward": rotate_reward.detach(),
+                "eval_turn_reward": rotate_reward.detach(),
+                "eval_drive_reward": drive_reward.detach(),
+                "eval_drive_velocity": drive_velocity.mean(dim=-1).detach(),
+                "eval_fwd_vel": forward_vel.detach(),
+                "eval_rev_vel": reverse_vel.detach(),
+                "eval_net_turns": net_turns.detach().clone(),
+                "eval_total_turns": total_turns.detach().clone(),
+                "eval_raw_net_turns": net_turns.detach().clone(),
+                "eval_raw_total_turns": total_turns.detach().clone(),
+                "eval_osc_ratio": osc_ratio.detach(),
+                "eval_osc_ratio_aggregate": torch.full_like(
+                    osc_ratio, osc_ratio_aggregate
+                ).detach(),
                 "eval_obj_z": obj_z.detach(),
                 "eval_fall_frac": fall.float().detach(),
+                "eval_tilt_norm": tilt_norm.detach(),
+                "eval_upright_gate": (tilt_norm < 0.20).float().detach(),
+                "eval_contact_gate": contact_gate.float().detach(),
+                "eval_binary_gate": contact_gate.float().detach(),
+                "eval_turn_reward_gate": turn_reward_gate.detach(),
+                "eval_rotation_credit_gate": rotation_credit_gate.detach(),
+                "eval_turn_upright_gate": turn_upright_gate.detach(),
+                "eval_turn_height_gate": turn_height_gate.detach(),
+                "eval_stability_gate": stability_gate.detach(),
+                "eval_contact_count": contact_count.detach(),
+                "eval_contact_force": finger_force.sum(dim=-1).detach(),
+                "eval_tip_contact_count": tip_contact.float().sum(dim=-1).detach(),
+                "eval_contact_quality": contact_quality.detach(),
+                "eval_contact_authority_reward": contact_authority_reward.detach(),
+                # WrongSurf is the deployment no-palm guard.  Keep the full
+                # non-tip aggregate under its own diagnostic key so finger-side
+                # contact is visible without being misclassified as palm use.
+                "eval_wrong_surface_force": palm_force.detach(),
+                "eval_wrong_surface_object_force": palm_force.detach(),
+                "eval_palm_support_force": palm_force.detach(),
+                "eval_palm_support_present": palm_support_cost.detach(),
+                "eval_palm_support_cost": palm_support_cost.detach(),
+                "eval_nontip_surface_force": nontip_force.detach(),
+                "eval_drop_margin_cost": drop_margin_cost.detach(),
+                "eval_downward_velocity_cost": downward_velocity_cost.detach(),
+                "eval_upright_tilt_cost": upright_tilt_cost.detach(),
+                "eval_tilt_velocity_cost": tilt_velocity_cost.detach(),
                 "eval_linvel_cost": linvel_cost.detach(),
                 "eval_pose_cost": pose_cost.detach(),
+                "eval_target_bound_cost": target_bound_cost.detach(),
                 "eval_torque_cost": torque_cost.detach(),
                 "eval_work_cost": work_cost.detach(),
                 "eval_total_reward": reward.detach(),
@@ -425,9 +692,17 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         )
 
         self._cur_targets[env_ids] = finger_target
+        self._home_targets[env_ids] = finger_target
         self._init_pose_buf[env_ids] = finger_q
+        self._steps_since_reset[env_ids] = 0
+        self._reset_action_scale[env_ids] = 0.0
+        self._episode_forward_turns[env_ids] = 0.0
+        self._episode_reverse_turns[env_ids] = 0.0
         self._obj_pos_prev[env_ids] = obj_pose[:, :3].detach()
         self._obj_quat_prev[env_ids] = obj_pose[:, 3:7].detach()
+        self._tilt_prev[env_ids] = self._object_vertical_tilt(
+            obj_pose[:, 3:7]
+        ).detach()
         self._rb_forces[env_ids] = 0.0
         self.object.set_external_force_and_torque(
             self._rb_forces[env_ids].unsqueeze(1),
@@ -476,6 +751,9 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 f"  CURRICULUM TRANSITION @ {self._global_steps:,} steps\n"
                 f"  turn_weight : {self._curriculum_phase.reward_turn_weight}"
                 f"  ->  {active.reward_turn_weight}\n"
+                f"  strict_contact_bonus : "
+                f"{self._curriculum_phase.strict_contact_bonus}"
+                f"  ->  {active.strict_contact_bonus}\n"
                 f"{'=' * 60}\n",
                 flush=True,
             )
@@ -497,6 +775,9 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         return torch.cat(
             [
                 obj_pos_local,
+                self.object.data.root_quat_w,
+                self.object.data.root_lin_vel_w,
+                self.object.data.root_ang_vel_w,
                 self._env_scale.unsqueeze(-1),
                 self._env_mass.unsqueeze(-1),
                 self._env_friction.unsqueeze(-1),
@@ -504,6 +785,69 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
             ],
             dim=-1,
         )
+
+    def _compute_actor_extrinsics(self) -> torch.Tensor:
+        """Original-HORA 9-D teacher state encoded by the Stage-1 actor latent.
+
+        HORA includes object position xyz alongside the six slow physical
+        properties, but does not expose object orientation or linear/angular
+        velocity to the actor.  Stage 2 must infer the resulting 8-D latent from
+        proprioceptive history; deployment still requires no object sensor.
+        """
+        obj_pos_local = self.object.data.root_pos_w - self.scene.env_origins
+        return torch.cat(
+            [
+                obj_pos_local,
+                self._env_scale.unsqueeze(-1),
+                self._env_mass.unsqueeze(-1),
+                self._env_friction.unsqueeze(-1),
+                self._env_com,
+            ],
+            dim=-1,
+        )
+
+    def _read_tip_object_forces(self) -> torch.Tensor:
+        forces = torch.zeros(
+            self.num_envs,
+            len(self.fingers),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        for i, sensor in enumerate(getattr(self, "_finger_sensors", [])):
+            fmat = sensor.data.force_matrix_w
+            if fmat is not None:
+                forces[:, i] = torch.linalg.norm(fmat, dim=-1).sum(dim=(1, 2))
+        return forces
+
+    def _read_nontip_object_forces(self) -> torch.Tensor:
+        return self._read_named_nontip_object_forces(self.NONTIP_BODY_NAMES)
+
+    def _read_named_nontip_object_forces(
+        self, body_names: tuple[str, ...]
+    ) -> torch.Tensor:
+        forces = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
+        selected = set(body_names)
+        for body, sensor in zip(
+            getattr(self, "_nontip_sensor_names", []),
+            getattr(self, "_nontip_sensors", []),
+        ):
+            if body not in selected:
+                continue
+            fmat = sensor.data.force_matrix_w
+            if fmat is not None:
+                forces += torch.linalg.norm(fmat, dim=-1).sum(dim=(1, 2))
+        return forces
+
+    @staticmethod
+    def _object_vertical_tilt(obj_quat: torch.Tensor) -> torch.Tensor:
+        """Unsigned tilt of the cube's local Z axis from the gravity axis."""
+        w, x, y, z = obj_quat.unbind(dim=-1)
+        local_z_world_z = 1.0 - 2.0 * (x.square() + y.square())
+        # A cube is invariant under a 180-degree flip, so use the closest of
+        # local +Z/-Z rather than labeling an inverted cube as a failure.
+        return torch.acos(local_z_world_z.abs().clamp(max=1.0))
 
     def _load_grasp_caches(self) -> dict[tuple[int, int, int], torch.Tensor]:
         """Caches keyed by (scale_idx, shape_idx, proto_idx) — one file per
@@ -515,28 +859,73 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
         from .inhand_rotation_env_cfg import INHAND_CACHE_SHAPES
 
         root = Path(self.cfg.grasp_cache_dir)
+        repo_root = Path(__file__).resolve().parents[3]
         shape_protos = sorted(
             set(zip(self.cfg.object_asset_shape_idx, self.cfg.object_asset_proto_idx))
         )
-        missing: list[tuple[tuple[int, int, int], Path]] = []
+        required: list[tuple[tuple[int, int, int], float, str, int, Path]] = []
         for i, scale in enumerate(self.cfg.object_scales):
             for si, pi in shape_protos:
-                path = root / grasp_cache_filename(
-                    scale, self.cfg.grasp_cache_name, INHAND_CACHE_SHAPES[si], pi
-                )
-                if not path.exists():
-                    missing.append(((i, si, pi), path))
-                    continue
-                arr = np.load(path)
-                if arr.ndim != 2 or arr.shape[1] != 39:
-                    raise ValueError(
-                        f"Invalid grasp cache shape {arr.shape} in {path}; expected "
-                        "(N, 39) = [q(16), pd_targets(16), obj pose(7)] — regenerate "
-                        "stale caches with tools/gen_inhand_grasp_cache.py"
+                required.append(
+                    (
+                        (i, si, pi),
+                        float(scale),
+                        INHAND_CACHE_SHAPES[si],
+                        int(pi),
+                        root
+                        / grasp_cache_filename(
+                            scale,
+                            self.cfg.grasp_cache_name,
+                            INHAND_CACHE_SHAPES[si],
+                            pi,
+                        ),
                     )
-                caches[(i, si, pi)] = torch.as_tensor(
-                    arr, dtype=torch.float32, device=self.device
                 )
+
+        if self.cfg.require_complete_grasp_cache:
+            expected_manifest = new_manifest(
+                cache_name=self.cfg.grasp_cache_name,
+                orientation=self.cfg.grasp_orientation,
+                object_scales=self.cfg.grasp_manifest_scales,
+                cube_edge_m=INHAND_CUBE_EDGE_M,
+                repo_root=repo_root,
+                certification=self.cfg.grasp_cache_certification,
+            )
+            expected_manifest.pop("entries")
+            manifest = load_and_validate_manifest(
+                path=manifest_path(root, self.cfg.grasp_cache_name),
+                expected=expected_manifest,
+                required_files=[item[-1] for item in required],
+            )
+            for _, scale, shape, proto, cache_path in required:
+                entry = manifest["entries"][cache_path.name]
+                expected_entry = {
+                    "scale": scale,
+                    "shape": shape,
+                    "prototype": proto,
+                }
+                for field, expected_value in expected_entry.items():
+                    if entry.get(field) != expected_value:
+                        raise ValueError(
+                            f"grasp-cache manifest entry {cache_path.name} has "
+                            f"{field}={entry.get(field)!r}, expected {expected_value!r}"
+                        )
+
+        missing: list[tuple[tuple[int, int, int], Path]] = []
+        for key, _, _, _, path in required:
+            if not path.exists():
+                missing.append((key, path))
+                continue
+            arr = np.load(path)
+            if arr.ndim != 2 or arr.shape[1] != CACHE_ROW_WIDTH:
+                raise ValueError(
+                    f"Invalid grasp cache shape {arr.shape} in {path}; expected "
+                    f"(N, {CACHE_ROW_WIDTH}) = [q(16), pd_targets(16), obj pose(7)] "
+                    "— regenerate stale caches with tools/gen_inhand_grasp_cache.py"
+                )
+            caches[key] = torch.as_tensor(
+                arr, dtype=torch.float32, device=self.device
+            )
         if missing and caches:
             lines = "\n".join(f"  (scale,shape,proto)={k}: {p}" for k, p in missing)
             raise FileNotFoundError(
@@ -559,6 +948,58 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 flush=True,
             )
         return caches
+
+    def deployment_grasp_targets(self) -> dict[str, Any]:
+        """Return one deterministic, central nominal-cache posture for hardware.
+
+        Cache rows contain the settled measured joints followed by the PD target
+        that produced their squeeze.  The former is the collision-safe approach
+        posture and the latter is the policy home.  A robust central row avoids
+        making the exported bundle depend on environment/reset RNG state.
+        """
+        from .inhand_rotation_env_cfg import INHAND_CACHE_SHAPES
+
+        nominal = [
+            index
+            for index, scale in enumerate(self.cfg.object_scales)
+            if abs(float(scale) - 1.0) <= 1.0e-9
+        ]
+        if len(nominal) != 1:
+            raise ValueError(
+                "deployment requires exactly one nominal (scale=1.0) cube bucket"
+            )
+        shape_index = INHAND_CACHE_SHAPES.index("cuboid")
+        key = (nominal[0], shape_index, 0)
+        rows = self._grasp_cache.get(key)
+        if rows is None or rows.shape[0] < 1:
+            raise ValueError(f"deployment cache has no nominal cube rows for key {key}")
+        features = rows[:, : 2 * self.num_finger_dofs]
+        centre = features.median(dim=0).values
+        robust_scale = (features - centre).abs().median(dim=0).values.clamp(min=1.0e-3)
+        score = ((features - centre) / robust_scale).square().mean(dim=-1)
+        row_index = int(torch.argmin(score).item())
+        row = rows[row_index]
+        cache_file = grasp_cache_filename(
+            1.0,
+            self.cfg.grasp_cache_name,
+            "cuboid",
+            0,
+        )
+        return {
+            "startup_reset_targets": row[: self.num_finger_dofs]
+            .detach()
+            .cpu()
+            .tolist(),
+            "home_targets": row[
+                self.num_finger_dofs : 2 * self.num_finger_dofs
+            ]
+            .detach()
+            .cpu()
+            .tolist(),
+            "cache_file": cache_file,
+            "cache_row": row_index,
+            "cache_key": list(key),
+        }
 
     def _sample_reset_rows(
         self, env_ids: torch.Tensor
@@ -584,7 +1025,14 @@ class LinkerL20InhandRotationEnv(DirectRLEnv):
                 continue
             mask = key_code == code
             local = torch.nonzero(mask, as_tuple=False).squeeze(-1)
-            rows = torch.randint(0, cache.shape[0], (len(local),), device=self.device)
+            if self._forced_cache_row_indices is None:
+                rows = torch.randint(
+                    0, cache.shape[0], (len(local),), device=self.device
+                )
+            else:
+                rows = self._forced_cache_row_indices[env_ids[local]].remainder(
+                    cache.shape[0]
+                )
             sample = cache[rows]
             nd = self.num_finger_dofs
             finger_q[local] = sample[:, :nd]

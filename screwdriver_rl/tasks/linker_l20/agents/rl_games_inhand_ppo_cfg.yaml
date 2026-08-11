@@ -36,6 +36,33 @@ params:
       regularizer:
         name: None
 
+  # Stage-1 asymmetric critic: the actor encodes only six slow extrinsics,
+  # while the critic receives the complete 19-D object state.  Stage 2 learns
+  # the actor's slow latent from proprioceptive history; it never attempts to
+  # reconstruct the fast pose/velocity channels used only by this critic.
+  central_value_config:
+    minibatch_size: 16384
+    mini_epochs: 4
+    learning_rate: 0.0001
+    # CentralValueTrain does not inherit these from the actor config.
+    normalize_input: True
+    clip_value: True
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+    grad_norm: 1.0
+    truncate_grads: True
+    e_clip: 0.2
+    network:
+      name: actor_critic
+      central_value: True
+      mlp:
+        units: [512, 256, 128]
+        activation: elu
+        initializer:
+          name: default
+        regularizer:
+          name: None
+
   load_checkpoint: False
   load_path: ''
 
@@ -54,9 +81,10 @@ params:
     reward_shaper:
       scale_value: 0.01
     normalize_advantage: True
-    # 0.995 (HORA uses 0.99): effective horizon ~200 steps so holding a grasp
-    # to the 400-step timeout outvalues spinning fast and dropping at ~50.
-    gamma: 0.995
+    # Match the released HORA PPO horizon.  The previous 0.995 value propagated
+    # the large safety costs for roughly twice as long and reinforced the
+    # static-hold optimum seen in bounded pilots.
+    gamma: 0.99
     tau: 0.95
     # HORA starts at lr=5e-3 / kl=0.02. If the LinkerL20 port shows early
     # instability, use the fallback ladder 5e-3 -> 1e-3 with kl_threshold 0.008.
@@ -74,7 +102,10 @@ params:
     truncate_grads: True
     e_clip: 0.2
     horizon_length: 8
-    minibatch_size: 16384
+    # HORA uses 32,768.  At 12,288 env x horizon 8 this gives three minibatches
+    # per mini-epoch instead of six, while every sample is still reused five
+    # times.
+    minibatch_size: 32768
     mini_epochs: 5
     critic_coef: 4
     clip_value: True

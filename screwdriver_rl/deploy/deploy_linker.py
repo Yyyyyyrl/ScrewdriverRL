@@ -1,7 +1,8 @@
 """Live LinkerHand L20/G20 deployment node for a Stage-2 ``deploy.pth`` bundle.
 
-ScrewdriverRL analogue of HORA's ``deploy_ros2.py``.  Each control tick (10 Hz,
-matching the training ``policy_dt`` of 0.1 s):
+ScrewdriverRL analogue of HORA's ``deploy_ros2.py``.  Each control tick uses
+the rate declared by the policy bundle (20 Hz for free-object in-hand tasks,
+10 Hz for the mounted screwdriver tasks):
 
     read joint state ─▶ build finger_q ─▶ DeployPolicy.act(finger_q)
         ─▶ 16 rad targets ─▶ joints16_to_sdk_range ─▶ 20× 0..255
@@ -13,7 +14,7 @@ Session structure (shared by every transport):
               contact ramp reset→home → settle → re-read → policy.reset(measured
               finger_q, acknowledged home).  Legacy non-topdown bundles whose
               reset equals home retain the original single-ramp path.
-    loop      10 Hz; invalid/stale state → hold last command; ``stale_limit``
+    loop      bundle-declared rate; invalid/stale state → hold last command; ``stale_limit``
               consecutive bad reads trip the watchdog (exit code 2).
     shutdown  default HOLD (stop sending; the position servo keeps the last
               target — safest while gripping a tool).  ``--release`` ramps to
@@ -198,9 +199,17 @@ class LinkerDeployer:
     def _is_topdown(self) -> bool:
         return "Topdown" in str(self.policy.cfg.get("task", ""))
 
+    @property
+    def _is_free_inhand(self) -> bool:
+        return "Inhand-Rotation" in str(self.policy.cfg.get("task", ""))
+
+    @property
+    def _requires_fixed_wrist_gate(self) -> bool:
+        return self._is_topdown or self._is_free_inhand
+
     def _validate_topdown_mapping(self) -> None:
-        """Require measured pitch and PIP LUTs for every top-down finger."""
-        if not self._is_topdown:
+        """Require measured pitch and PIP LUTs for fixed-wrist task policies."""
+        if not self._requires_fixed_wrist_gate:
             return
         specs = {js.name: js for js in sdkmap.active_joints()}
         signed_limits = {js.name: js for js in sdkmap.DEFAULT_JOINTS}
@@ -229,7 +238,7 @@ class LinkerDeployer:
                 bad.append(f"{pip_name}=missing-physical-lut")
         if bad:
             raise HardwareSafetyError(
-                "top-down pitch/PIP mapping is not the required measured "
+                "fixed-wrist task pitch/PIP mapping is not the required measured "
                 f"physical-LUT contract ({', '.join(bad)}). Calibrate every "
                 "finger separately before live full-hand policy deployment."
             )
@@ -642,9 +651,9 @@ class LinkerDeployer:
 
     # -- CAN transport (direct SDK) ------------------------------------------ #
     def _validate_can_identity(self, api) -> tuple[str, list[int], int]:
-        if self._is_topdown and self.hand_joint != "G20":
+        if self._requires_fixed_wrist_gate and self.hand_joint != "G20":
             raise HardwareSafetyError(
-                "this top-down deployment is validated for the G20 transport only; "
+                "this fixed-wrist deployment is validated for the G20 transport only; "
                 f"got --hand-joint {self.hand_joint}"
             )
         serial = ""
@@ -718,11 +727,11 @@ class LinkerDeployer:
         api = LinkerHandApi(hand_type=self.side, hand_joint=self.hand_joint, can=self.can_channel)
         try:
             self._validate_can_identity(api)
-            if self._is_topdown and not self.no_send and not self.startup_only and not self.release_only:
+            if self._requires_fixed_wrist_gate and not self.no_send and not self.startup_only and not self.release_only:
                 if not self.task_frame_confirmed:
                     raise HardwareSafetyError(
-                        "top-down task-frame alignment has not been confirmed; "
-                        "run --startup-only first, align the 64-mm fixture, then add "
+                        "fixed-wrist task-frame alignment has not been confirmed; "
+                        "run --startup-only first, align and load the 64-mm cube, then add "
                         "--task-frame-confirmed"
                     )
             if self.no_send:
@@ -751,9 +760,9 @@ class LinkerDeployer:
 
     # -- ROS1 transport (SDK linker_hand.launch node) ------------------------ #
     def _run_ros(self) -> int:
-        if self._is_topdown and not self.no_send:
+        if self._requires_fixed_wrist_gate and not self.no_send:
             raise HardwareSafetyError(
-                "live top-down ROS transport has no identity/fault/tactile gates; use --transport can"
+                "live fixed-wrist task ROS transport has no identity/fault/tactile gates; use --transport can"
             )
         import rospy
         from sensor_msgs.msg import JointState
@@ -823,7 +832,7 @@ def main() -> None:
     p.add_argument("--side", default="left", choices=["left", "right"])
     p.add_argument("--transport", default="can", choices=["can", "ros"])
     p.add_argument("--hand-joint", default="G20", choices=["G20", "L20"],
-                   help="SDK model name; top-down live deployment requires G20")
+                   help="SDK model name; fixed-wrist live deployment requires G20")
     p.add_argument(
         "--expected-serial",
         default="LHT20-010-415-L-B-1-D",

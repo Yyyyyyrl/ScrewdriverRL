@@ -73,13 +73,37 @@ def test_topdown_root_and_palm_geometry(cfg_tree):
 
     assert sum(c * c for c in rot) == pytest.approx(1.0)
     # Linker base-local +X is the palm normal; +Z is the finger direction.
-    assert _quat_rotate(rot, (1.0, 0.0, 0.0)) == pytest.approx((0.0, 0.0, -1.0))
-    assert _quat_rotate(rot, (0.0, 0.0, 1.0)) == pytest.approx((0.0, -1.0, 0.0))
+    root_half = 2.0**-0.5
+    assert _quat_rotate(rot, (1.0, 0.0, 0.0)) == pytest.approx(
+        (0.0, root_half, -root_half)
+    )
+    assert _quat_rotate(rot, (0.0, 0.0, 1.0)) == pytest.approx(
+        (0.0, -root_half, -root_half)
+    )
     assert root[2] - obj[2] >= 0.06
 
 
 def test_rotation_axis_is_gravity(cfg_tree):
     assert _literal(cfg_tree, "TOPDOWN_ROT_AXIS") == (0.0, 0.0, -1.0)
+
+
+def test_topdown_fall_height_is_below_its_own_object_seed(cfg_tree):
+    training_class = next(
+        node
+        for node in cfg_tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "LinkerL20InhandRotationTopdownEnvCfg"
+    )
+    threshold = next(
+        ast.literal_eval(node.value)
+        for node in training_class.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "reset_height_threshold"
+    )
+    object_z = _literal(cfg_tree, "TOPDOWN_OBJECT_INIT_POS")[2]
+    assert threshold == pytest.approx(0.542)
+    assert object_z - threshold == pytest.approx(0.0275643861, abs=2.0e-4)
 
 
 def test_each_shape_has_a_complete_distinct_seed(cfg_tree):
@@ -138,7 +162,13 @@ def test_topdown_reuses_base_goal_and_requires_validated_caches(cfg_tree):
         "LinkerL20InhandRotationEnvCfg"
     ]
     source = _CFG.read_text()
-    assert 'grasp_cache_name: str = "linker_l20_topdown"' in source
+    assert 'grasp_cache_name: str = "linker_l20_topdown_cube64_v2"' in source
+    assert "grasp_gen_accept_z_margin: float = 0.01" in source
+    assert source.count("reset_height_threshold: float = 0.542") == 2
+    assert (
+        'grasp_orientation: str = "top-down-tilted-45deg-v2-replay-certified"'
+        in source
+    )
     assert "require_complete_grasp_cache: bool = True" in source
 
 

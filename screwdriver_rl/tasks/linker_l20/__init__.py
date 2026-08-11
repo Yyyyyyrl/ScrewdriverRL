@@ -5,7 +5,7 @@ Registers:
   Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0
   Isaac-LinkerL20-Screwdriver-Rotation-Topdown
   Isaac-LinkerL20-Screwdriver-Rotation-DR-Direct-v0
-  Isaac-LinkerL20-Inhand-Rotation        (HORA free-cylinder in-hand rotation)
+  Isaac-LinkerL20-Inhand-Rotation        (64 mm free-cube rotation, bottom-up)
   Isaac-LinkerL20-Inhand-Rotation-Topdown (top-down fingertip-only pre-grasp)
   Isaac-LinkerL20-Inhand-GraspGen        (grasp-cache collection for the above)
   Isaac-LinkerL20-Inhand-GraspGen-Topdown (top-down grasp-cache collection)
@@ -51,7 +51,7 @@ gym.register(
 )
 
 # ---------------------------------------------------------------------------
-# HORA in-hand cylinder rotation (free object) + its grasp-cache generator.
+# 64 mm free-cube in-hand rotation + its grasp-cache generator.
 # ---------------------------------------------------------------------------
 gym.register(
     id="Isaac-LinkerL20-Inhand-Rotation",

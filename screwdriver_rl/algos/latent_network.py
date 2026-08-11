@@ -71,13 +71,17 @@ class PrivLatentA2CBuilder(A2CBuilder):
             super().__init__(params, **kwargs)
 
             # Privileged encoder: priv_dim -> priv_mlp_units -> latent_dim.
-            # tanh is applied in forward() (bounded latent, matching HORA).
+            # HORA's MLP applies ELU after every Linear, including the final
+            # latent projection; tanh is then applied in forward().
             layers: list[nn.Module] = []
             d = self.priv_dim
             for u in self.priv_mlp_units:
                 layers += [nn.Linear(d, u), self.activations_factory.create(self.activation)]
                 d = u
-            layers += [nn.Linear(d, self.latent_dim)]
+            layers += [
+                nn.Linear(d, self.latent_dim),
+                self.activations_factory.create(self.activation),
+            ]
             self.env_mlp = nn.Sequential(*layers)
 
             # env_mlp is created after the base init loop, so initialise it here

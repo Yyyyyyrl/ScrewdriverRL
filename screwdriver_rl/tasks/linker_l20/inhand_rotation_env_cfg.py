@@ -1,9 +1,8 @@
-"""Configuration for Linker Hand L20 free-object in-hand rotation.
+"""Configuration for Linker G20/L20 64 mm free-cube in-hand rotation.
 
-This task is the HORA in-hand cylinder rotation setup ported onto the LinkerHand
-L20.  It intentionally does not subclass the mounted-screwdriver task config:
-the object is a free rigid cylinder, the reset comes from per-scale grasp caches,
-and the observation/reward contracts match the existing two-stage RMA pipeline.
+It intentionally does not subclass the mounted-screwdriver task config: the
+object is a free rigid cube, resets come from versioned physics-harvested grasp
+caches, and the observation contract supports the full two-stage RMA pipeline.
 """
 
 from __future__ import annotations
@@ -39,25 +38,25 @@ HORA_CYLINDER_LENGTHS: tuple[float, ...] = (
     0.092,
     0.096,
 )
-# Object scale buckets, centred on 1.0 (2026-07-27).  HORA's 0.70-0.86 range
-# was tuned to the Allegro hand; the L20 is the larger hand, so the same
-# absolute object was undersized for its fingertip cage — measured settled cage
-# diameter is 72 mm (tip origins) with the pads contacting ~20-30 mm from the
-# object centre, against a cuboid half-edge of only 22-31 mm at the old scales.
-# Same 9 buckets and same 0.02 step, shifted so 1.0 is the median.
-# NOTE: caches are keyed by scale, so changing this list orphans every
-# assets/grasp_cache/*_s*.npy and requires tools/gen_inhand_grasp_cache.py.
-HORA_CYLINDER_SCALES: tuple[float, ...] = (
-    0.92,
-    0.94,
-    0.96,
-    0.98,
-    1.00,
-    1.02,
-    1.04,
-    1.06,
-    1.08,
-)
+# Deployment target: a nominal 64 mm PLA cube.  The three geometry buckets
+# mirror the mounted 60/64/68 mm campaign: broad enough to prevent a policy from
+# keying on one exact contact geometry, while retaining an explicit nominal row
+# for deployment and bench evaluation.  Every bucket requires its own
+# physics-harvested cache; changing this tuple invalidates those caches.
+INHAND_CUBE_EDGE_M: float = 0.064
+INHAND_OBJECT_SCALES: tuple[float, ...] = (0.9375, 1.0, 1.0625)
+INHAND_CACHE_CERTIFICATION: dict[str, object] = {
+    "schema": "dex-forge-inhand-cache-replay-cert-v1",
+    "generation_episode_s": 20.0,
+    "replays_per_row": 4,
+    "domain_rand_enabled": True,
+    "support_threshold_n": 0.05,
+    "require_no_fall": True,
+}
+
+# Historical name retained as an import-compatible alias.  New code and cache
+# manifests use ``INHAND_OBJECT_SCALES`` because the production task is cube-only.
+HORA_CYLINDER_SCALES: tuple[float, ...] = INHAND_OBJECT_SCALES
 
 # Canonical pregrasp = palm-up fingertip cage with the palm longitudinal axis
 # raised INHAND_LONG_AXIS_TILT_DEG above the ground plane (fingertips above
@@ -66,9 +65,11 @@ HORA_CYLINDER_SCALES: tuple[float, ...] = (
 # flexion led by the MCP joints (no hook grasp: not MCP-extended/PIP-flexed;
 # no flat fingers; no fist), thumb opposing with its tip pad from the side
 # (not swept across the palm centre, no adduction, no excessive IP flexion) —
-# and never rests on the palm.  Validated by physics settling in
-# tools/render_task_configs.py renders.  The grasp-gen perturbs this pose
-# (+-0.25 rad) and filters the settled states into the cache.
+# and never rests on the palm.  This is only the operator-load search seed: the
+# deployable startup/home posture is selected from the versioned physics cache.
+# Each production row survives a released 20 s fingertip-only hold and then four
+# independent full-domain-randomisation replays from zero velocity.  The grasp
+# generator perturbs this pose (+-0.15 rad) and rejects all non-tip support.
 INHAND_PREGRASP_POSITIONS: dict[str, tuple[float, ...]] = {
     "index": (-0.0130, 0.5800, 0.5700),
     "middle": (-0.0132, 0.5300, 0.5200),
@@ -243,8 +244,15 @@ def _make_robot_cfg() -> ArticulationCfg:
         actuators={
             "fingers": ImplicitActuatorCfg(
                 joint_names_expr=[".*"],
+                # The exact HORA/Allegro P=3, |tau|<=0.5 N m controller failed
+                # this task's physical-palm reset gate (5.54% > 1%): it cannot
+                # hold the much larger 64 mm G20 cube clear of the palm.  Keep
+                # the G20's certified P/effort scale, but remove the 10x excess
+                # damping relative to HORA so cyclic finger motion is not
+                # needlessly resisted.
+                effort_limit_sim=1.0,
                 stiffness=6.0,
-                damping=1.0,
+                damping=0.1,
                 armature=0.001,
             )
         },
@@ -252,23 +260,21 @@ def _make_robot_cfg() -> ArticulationCfg:
 
 
 # ---------------------------------------------------------------------------
-# Object prototypes.  The released HORA config (AllegroHandHora.yaml) trains
-# on a SINGLE cube ("block", sampleProb [1.0]) and generalises zero-shot at
-# deployment; the cyl+cub+sph mix (sampleProb 0.35/0.20/0.45) belongs to the
-# touch-based follow-up work.  The main task now trains cuboid-only to match
-# original HORA (object_kind="cuboid", 2026-07-16 decision — the 3-shape mix's
-# spheres were the dominant failure mode at every stage).  The full shape
+# Object prototypes.  The local Wonik HORA fork defaults to a
+# cylinder/cuboid/sphere mix, while the original paper primarily reports
+# cylinders.  This deployment task deliberately trains cuboid-only because the
+# user's physical object is a 60/64/68 mm cube; it is not a claim of shape-level
+# parity with HORA.  The full shape
 # machinery is retained: switch object_kind back to "mixed" to restore the mix.
 # The deterministic MultiAssetSpawner (random_choice=False) gives every env a
 # fixed, known (scale, shape, prototype).
 MIX_CYLINDER_LENGTHS: tuple[float, ...] = (0.064, 0.080, 0.096)            # 3
-MIX_CUBOID_SIZES: tuple[tuple[float, float, float], ...] = (              # 2
-    (0.064, 0.064, 0.080),
-    (0.072, 0.072, 0.064),
+MIX_CUBOID_SIZES: tuple[tuple[float, float, float], ...] = (              # 1
+    (INHAND_CUBE_EDGE_M, INHAND_CUBE_EDGE_M, INHAND_CUBE_EDGE_M),
 )
 MIX_SPHERE_RADII: tuple[float, ...] = (0.034, 0.038, 0.042, 0.046)         # 4
 MIX_BLOCK_SIZE: int = len(MIX_CYLINDER_LENGTHS) + len(MIX_CUBOID_SIZES) + len(MIX_SPHERE_RADII)
-OBJECT_MASS: float = 0.05
+OBJECT_MASS: float = 0.10
 
 
 def _shape_common() -> dict:
@@ -389,6 +395,8 @@ def _make_object_cfg(
 class InhandCurriculumPhaseCfg:
     step_start: int = 0
     reward_turn_weight: float = 1.0
+    strict_contact_bonus: float = 0.4
+    partial_contact_bonus: float = 0.1
     upright_termination_threshold: float = 0.0
     episode_length_s: float = 20.0
 
@@ -396,9 +404,12 @@ class InhandCurriculumPhaseCfg:
 @configclass
 class InhandDomainRandCfg:
     enabled: bool = True
-    mass_range: tuple[float, float] = (0.01, 0.25)
-    com_range: tuple[float, float] = (-0.01, 0.01)
-    friction_range: tuple[float, float] = (0.3, 3.0)
+    # The physical 64 mm PLA cube has not been weighed yet.  Cover the user's
+    # stated tens-of-grams through roughly 200 g envelope without extending to
+    # the old 10 g/250 g tails that describe a different object family.
+    mass_range: tuple[float, float] = (0.03, 0.20)
+    com_range: tuple[float, float] = (-0.008, 0.008)
+    friction_range: tuple[float, float] = (0.4, 2.5)
     pd_gain_range: tuple[float, float] = (0.967, 1.033)
     joint_noise_scale: float = 0.02
     force_scale: float = 2.0
@@ -415,9 +426,22 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
 
     latent_conditioned: bool = True
     asymmetric_obs: bool = False
-    privileged_obs_dim: int = 9
+    # Actor = 3 proprio frames (3 x [scaled q16, target16]) plus the original
+    # HORA 9-D teacher tail: object position xyz and six episode-constant
+    # extrinsics.  Object orientation and linear/angular velocity remain out of
+    # the actor latent.  The asymmetric critic independently gets the full 19-D
+    # free-object state.
+    privileged_obs_dim: int = 19
     history_obs_dim: int = 32
     prop_hist_len: int = 30
+    actor_frame_count: int = 3
+    actor_extrinsics_dim: int = 9
+    slow_extrinsics_only: bool = True
+    observation_semantics_version: str = (
+        "linker-g20-inhand-cube-stack3-hora-pos-extrinsics-v2"
+    )
+    # Compatibility alias used by the original in-hand env.  It is checked
+    # against ``actor_frame_count`` in __post_init__; neither may silently drift.
     num_obs_frames: int = 3
 
     decimation: int = 6
@@ -445,10 +469,40 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     action_delta_scale: float = 1.0 / 24.0
     action_clip: float = 1.0
     joint_target_margin: float = 0.0
+    # Keep integrated targets inside a reset-grasp-relative working window so
+    # the policy must learn a drive/release/return cycle instead of making one
+    # irreversible push and parking at the URDF limit.
+    joint_motion_range: float = 0.0
+    w_target_bound: float = 0.0
+    absolute_action_targets: bool = False
+    # Preserve the certified cache grasp while the policy history fills, then
+    # blend in actions rather than applying a discontinuous command at reset.
+    reset_action_hold_steps: int = 5
+    reset_action_ramp_steps: int = 10
 
     rot_axis: tuple[float, float, float] = INHAND_ROT_AXIS
+    # HORA-safe objective: preserve HORA's signed, clipped rotation signal and
+    # exact reward scale while keeping this task's explicit fall/palm constraints.
+    # Rotation is deliberately NOT multiplied by contact/upright/height gates:
+    # those gates taught the 40M pilot stable contact and posture but suppressed
+    # the early rotation gradient and produced an oscillatory local optimum.
     rotate_reward_scale: float = 1.0
+    rotate_reward_scale_final: float = 1.0
+    reverse_reward_ratio: float = 1.0
     angvel_clip: tuple[float, float] = (-0.5, 0.5)
+    gate_rotation_reward: bool = False
+    # Retained as diagnostics and for explicit ablations.  The HORA-safe
+    # default does not multiply true rotation by these gates.
+    turn_upright_gate_std: float = 0.20
+    turn_height_margin_m: float = 0.020
+    # Dense, direction-aware finger-drive shaping.  A contacting fingertip is
+    # rewarded for moving with the cube surface in the requested rotation
+    # direction; it can return without penalty after releasing contact.
+    # Disabled in the HORA baseline.  The bounded pilot overrode this to 50,
+    # making local fingertip motion worth up to five times the maximum true
+    # forward-rotation reward without improving net turns.
+    drive_reward_scale: float = 0.0
+    drive_speed_ref: float = 0.020
     # One-off reward at the fall-termination step.  HORA has no fall penalty
     # (its flat-palm grasps rarely fall); with the tilted fingertip cage,
     # three training runs converged to a spin-fast-and-drop equilibrium
@@ -461,17 +515,21 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     # mildly profitable.  -25 prices a fall at roughly half a typical
     # episode's rotation income.  Total reward is NOT comparable across this
     # change; judge runs by the probe's rotate-reward/step and fall%.
-    fall_penalty: float = -25.0
-    # Per-step bonus while the object is held.  Its original job was to keep
-    # the reward stream net-positive so the policy never learns reward suicide
-    # (terminating early beats living with penalties-only income).  Sized
-    # 2026-07-16 so idle-holding is roughly reward-NEUTRAL: measured penalty
-    # income is ~-0.12/step, so 0.1 leaves "sit still and collect" worth ~0
-    # while rotation (up to +0.5/step) is the only positive income — the old
-    # 0.2 made idle holding +0.08/step, a comfortable local optimum that
-    # competed with learning to rotate.  Falling stays strictly worse via
-    # fall_penalty.
-    hold_bonus: float = 0.1
+    fall_penalty: float = -1000.0
+    # Deployment permits finger-side contact but rejects physical palm support.
+    # Penalize the exact evaluation threshold densely during training.
+    palm_support_force_threshold: float = 0.05
+    palm_support_penalty_scale: float = -10.0
+    # Diagnostic margin retained for evaluation; disabled in the HORA-safe
+    # objective because the terminal fall cost already prices a drop.
+    drop_margin_m: float = 0.020
+    drop_margin_penalty_scale: float = 0.0
+    # Downward-motion and tilt diagnostics remain logged but are not rewarded.
+    downward_velocity_penalty_scale: float = 0.0
+    upright_tilt_penalty_scale: float = 0.0
+    tilt_velocity_penalty_scale: float = 0.0
+    # Match HORA's four regularizers.  The fall and physical-palm penalties
+    # below remain task-specific safety terms.
     linvel_penalty_scale: float = -0.3
     pose_penalty_scale: float = -0.3
     torque_penalty_scale: float = -0.1
@@ -487,13 +545,13 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     )
     robot_cfg: ArticulationCfg = field(default_factory=_make_robot_cfg)
 
-    object_scales: tuple[float, ...] = HORA_CYLINDER_SCALES
+    object_scales: tuple[float, ...] = INHAND_OBJECT_SCALES
     object_lengths: tuple[float, ...] = HORA_CYLINDER_LENGTHS
     # "mixed" = cylinders+cuboids+spheres (main task); grasp-gen overrides to a
     # single shape.  object_cfg + object_asset_{scale,shape}_idx are (re)built
     # in __post_init__.
-    # "cuboid" = HORA-faithful single-shape training (the released HORA config
-    # trains on one block).  "mixed" restores the cyl+cub+sph grid.
+    # "cuboid" = the user's physical cube family.  "mixed" restores the local
+    # Wonik HORA fork's cylinder/cuboid/sphere grid.
     object_kind: str = "cuboid"
     object_cfg: RigidObjectCfg = None
     object_asset_scale_idx: list[int] = None
@@ -501,41 +559,45 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     object_asset_proto_idx: list[int] = None
 
     grasp_cache_dir: str = str(ASSET_ROOT / "grasp_cache")
-    grasp_cache_name: str = "linker_l20"
+    grasp_cache_name: str = "linker_l20_bottomup_cube64_v2"
+    grasp_orientation: str = "bottom-up-tilted-45deg-v2-replay-certified"
+    grasp_cache_certification: dict[str, object] = field(
+        default_factory=lambda: copy.deepcopy(INHAND_CACHE_CERTIFICATION)
+    )
+    # This is the identity of the complete production cache bank.  Evaluation
+    # may pin ``object_scales`` to only the nominal bucket, but that must not
+    # create a second, deceptively compatible manifest identity.
+    grasp_manifest_scales: tuple[float, ...] = INHAND_OBJECT_SCALES
     load_grasp_cache: bool = True
-    # Training variants that have no safe canonical fallback can make the
-    # per-(scale, shape, prototype) cache set a startup requirement.  The
-    # original task retains its historical fallback behaviour.
-    require_complete_grasp_cache: bool = False
+    # Both production orientations require a complete, version-matched cache.
+    # A canonical fallback made the old bottom-up task appear runnable while it
+    # was actually replaying no validated reset distribution at all.
+    require_complete_grasp_cache: bool = True
 
     domain_rand: InhandDomainRandCfg = field(default_factory=InhandDomainRandCfg)
-    # Hold-first curriculum (one epoch = 65,536 global env steps at 8192 envs
-    # x horizon 8).  With full rotation reward from step 0 the policy trades
-    # every hold away for max-rate spinning before it ever learns a stable
-    # gait (HoldFrac collapses to 0 by ~200 epochs); learning to HOLD under
-    # the fall penalty first, then ramping the rotation weight, routes around
-    # that local optimum.
-    # Single phase, full HORA rotation reward from step 0 (2026-07-16).  The
-    # hold-first curriculum predates the current grasp caches: it existed so a
-    # policy with fragile resets could learn to hold before rotation tempted it
-    # into spin-and-drop.  The regenerated caches hold ~80% of zero-action
-    # episodes to timeout under full DR, so holding now comes free from the
-    # reset state — and the old schedule spent its first 131M steps at reduced
-    # rotation weight, letting the hold bonus dominate what the policy learnt.
-    # The spin-and-drop guards stay active in all phases: fall_penalty,
-    # gamma=0.995 (agent yaml) and the (reduced) hold_bonus.  If the exploit
-    # signature reappears (RotateReward spiking while EpLen collapses in the
-    # first ~500 epochs), reintroduce a SHORT hold-first phase (~8M steps).
+    # One phase, with true signed rotation present from the first rollout.  The
+    # previous hold-first schedule spent 8M steps explicitly optimizing a
+    # static grasp and gave a 40M pilot only 12M steps at its final objective.
     curriculum_phases: list[InhandCurriculumPhaseCfg] = field(
         default_factory=lambda: [
-            InhandCurriculumPhaseCfg(step_start=0, reward_turn_weight=1.0),
+            InhandCurriculumPhaseCfg(
+                step_start=0,
+                reward_turn_weight=1.0,
+                strict_contact_bonus=0.0,
+                partial_contact_bonus=0.0,
+            )
         ]
     )
 
-    enable_fingertip_sensors: bool = False
-    # Extra contact sensor over every NON-distal hand link (palm, metacarpals,
-    # proximal/middle phalanges) used by the grasp-gen fingertip-only filter.
-    enable_nontip_sensors: bool = False
+    # Reward authorization must use the same physical object-force signal as
+    # oracle evaluation.  A geometric distal-origin proxy was explicitly
+    # rejected after a 40M pilot learned to coast with only 5.82% true contact.
+    enable_fingertip_sensors: bool = True
+    enable_palm_sensor: bool = True
+    # Exact sensors over every non-distal link.  Training recognizes legal
+    # finger-side/proximal/middle contact when authorizing manipulation reward,
+    # while the physical palm remains a separate hard rejection signal.
+    enable_nontip_sensors: bool = True
     grasp_gen_obj_init_pos: tuple[float, float, float] = INHAND_OBJECT_INIT_POS
     grasp_gen_obj_init_rot: tuple[float, float, float, float] = (
         1.0,
@@ -543,7 +605,7 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
         0.0,
         0.0,
     )
-    grasp_gen_pose_noise: float = 0.25
+    grasp_gen_pose_noise: float = 0.15
     # Human-like opposition grip: the thumb fingertip must press the object and
     # at least this many of the other four fingertips must also be in contact.
     require_thumb_contact: bool = True
@@ -554,11 +616,32 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
     nontip_force_eps: float = 1.0e-4
     # Ignore the acceptance criteria for the first few grasp-gen steps so the
     # dropped object may transiently graze non-distal links while settling.
-    grasp_gen_grace_steps: int = 5
+    grasp_gen_grace_steps: int = 10
+    # During cache generation only, keep the operator-loaded object at its seed
+    # pose for a few control steps so the position drives can establish squeeze
+    # preload.  It is then fully released; a row is harvested only if the free
+    # object passes the strict fingertip-only gate through episode timeout.
+    # Without this closing phase a 100 g, 64 mm cube falls several centimetres
+    # before the first acceptance check even for a valid geometric cage.
+    grasp_gen_object_hold_steps: int = 10
+    grasp_gen_object_min_hold_steps: int = 2
+    # Cache rows must remain fingertip-only for a complete production-length
+    # zero-action episode before harvest.  The old 2.5 s dwell certified only
+    # the initial settling transient; replaying those rows for the 20 s main
+    # episode exposed delayed proximal/palm support.
+    grasp_gen_validation_episode_s: float = 20.0
+    # Start flexion DOFs this far more open than their randomized squeeze
+    # targets.  Roll/yaw opposition joints stay at the fitted cage values.
+    grasp_gen_initial_opening_rad: float = 0.06
     # Grasp-gen acceptance needs the object this far ABOVE the fall threshold:
     # without it the harvest keeps mid-slide states sitting barely above the
     # threshold, which then fall immediately when used as training resets.
     grasp_gen_accept_z_margin: float = 0.02
+    # Harvested measured joints and their squeeze targets must both retain
+    # room from the current hand's semantic/URDF limits.  Random-noise samples
+    # that get clipped to a stop can look stable in simulation but are not a
+    # deployable real-hand pre-grasp.
+    grasp_gen_joint_limit_margin: float = 0.04
     # Fingertip-to-object-CENTRE sanity bound for grasp acceptance.  The L20
     # ``*_distal`` body origins sit ~0.10 m from the object centre at contact (the
     # origin is at the proximal end of the distal link, not the pad), so HORA's
@@ -579,20 +662,33 @@ class LinkerL20InhandRotationEnvCfg(DirectRLEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.num_obs_frames != self.actor_frame_count:
+            raise ValueError(
+                "num_obs_frames and actor_frame_count must describe the same "
+                "in-hand actor observation contract"
+            )
         if self.object_cfg is None or self.object_asset_scale_idx is None:
             self._rebuild_object()
         self.observation_space = gym.spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.num_obs_frames * self.history_obs_dim + self.privileged_obs_dim,),
+            shape=(
+                self.actor_frame_count * self.history_obs_dim
+                + self.actor_extrinsics_dim,
+            ),
             dtype=np.float32,
         )
 
 
 @configclass
 class LinkerL20InhandGraspGenEnvCfg(LinkerL20InhandRotationEnvCfg):
-    cache_scale: float = 0.8
-    cache_shape: str = "cylinder"
+    cache_scale: float = 1.0
+    cache_shape: str = "cuboid"
+    # Optional batched physics-search candidates.  Production harvesting leaves
+    # these empty and perturbs the configured canonical seed.  Search tools can
+    # assign one absolute q16/object-position pair per stable env-id bucket.
+    grasp_gen_joint_candidates: tuple[tuple[float, ...], ...] = ()
+    grasp_gen_object_pos_candidates: tuple[tuple[float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
         # Grasp-cache generation runs on ONE shape's training prototypes at a
@@ -604,16 +700,16 @@ class LinkerL20InhandGraspGenEnvCfg(LinkerL20InhandRotationEnvCfg):
         self.object_asset_shape_idx = None
         self.object_asset_proto_idx = None
         super().__post_init__()  # builds the single-shape grid + indices
-        self.episode_length_s = 2.5
+        self.episode_length_s = float(self.grasp_gen_validation_episode_s)
         self.curriculum_phases = [
             InhandCurriculumPhaseCfg(
                 step_start=0,
                 reward_turn_weight=1.0,
                 upright_termination_threshold=0.0,
-                episode_length_s=2.5,
+                episode_length_s=float(self.grasp_gen_validation_episode_s),
             )
         ]
-        # HORA generates grasps at NOMINAL dynamics (mass 0.05, friction 1.0,
+        # HORA generates grasps at NOMINAL dynamics (here mass 0.10, friction 1.0,
         # no randomisation) and replays them under training DR.  Generating
         # under randomised mass/friction skews the cache toward states that
         # only hold for that draw (e.g. feather-weight objects).
@@ -625,9 +721,26 @@ class LinkerL20InhandGraspGenEnvCfg(LinkerL20InhandRotationEnvCfg):
         self.enable_fingertip_sensors = True
         self.enable_nontip_sensors = True
         self.grasp_gen_obj_init_pos = INHAND_OBJECT_INIT_POS
-        self.grasp_gen_pose_noise = 0.25
+        self.grasp_gen_pose_noise = 0.15
         self.require_thumb_contact = True
         self.min_other_finger_contacts = 2
         self.forbid_nontip_contact = True
-        self.grasp_gen_grace_steps = 5
+        self.grasp_gen_grace_steps = 10
+        self.grasp_gen_object_hold_steps = 10
+        self.grasp_gen_object_min_hold_steps = 2
+        self.grasp_gen_initial_opening_rad = 0.06
+        self.grasp_gen_joint_limit_margin = 0.04
         self.tip_dist_max = 0.13
+        if bool(self.grasp_gen_joint_candidates) != bool(
+            self.grasp_gen_object_pos_candidates
+        ):
+            raise ValueError(
+                "grasp search requires both joint and object-position candidates"
+            )
+        if self.grasp_gen_joint_candidates:
+            if len(self.grasp_gen_joint_candidates) != len(
+                self.grasp_gen_object_pos_candidates
+            ):
+                raise ValueError("grasp search candidate arrays must have equal length")
+            if any(len(row) != 16 for row in self.grasp_gen_joint_candidates):
+                raise ValueError("every grasp search joint candidate must be q16")

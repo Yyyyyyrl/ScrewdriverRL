@@ -106,6 +106,25 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--fixed_inhand_cube_mm",
+    type=int,
+    choices=(64,),
+    default=None,
+    help=(
+        "Pin a free-object in-hand task to the nominal 64 mm cube cache bucket. "
+        "The versioned full cache manifest is still verified."
+    ),
+)
+parser.add_argument(
+    "--fixed_object_mass_g",
+    type=float,
+    default=None,
+    help=(
+        "Pin free-object mass to a measured bench value in grams while keeping "
+        "the remaining bench randomisation active."
+    ),
+)
+parser.add_argument(
     "--joint_motion_range",
     type=float,
     default=None,
@@ -225,9 +244,9 @@ parser.add_argument(
 parser.add_argument(
     "--success_turns",
     type=float,
-    default=3.0,
-    help="An episode counts as a success if it did NOT fall over (timed out upright) "
-    "and accumulated at least this many net forward turns.",
+    default=None,
+    help="Success threshold in upright net forward turns. Defaults to 1 for "
+    "free-object in-hand tasks and 3 for mounted screwdriver tasks.",
 )
 parser.add_argument(
     "--deploy_eval",
@@ -532,6 +551,9 @@ def _apply_fixed_root_bias(env_cfg) -> None:
 def main() -> None:
     env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
     env_cfg.seed = args.seed
+    is_free_inhand = "Inhand-Rotation" in args.task
+    if args.success_turns is None:
+        args.success_turns = 1.0 if is_free_inhand else 3.0
     if args.topdown_posture_search is not None:
         from screwdriver_rl.utils.linker_topdown_candidate_override import (
             apply_candidate,
@@ -617,6 +639,7 @@ def main() -> None:
                 "dynamics randomisation unchanged",
                 flush=True,
             )
+
         else:
             expected_radius_m = 0.5 * diameter_mm / 1000.0
             actual_radius_m = getattr(
@@ -661,18 +684,56 @@ def main() -> None:
                 flush=True,
             )
 
+    if args.fixed_inhand_cube_mm is not None:
+        if not is_free_inhand or not hasattr(env_cfg, "_rebuild_object"):
+            raise ValueError(
+                "--fixed_inhand_cube_mm requires an Isaac-LinkerL20-Inhand-Rotation task"
+            )
+        init_pos = tuple(env_cfg.object_cfg.init_state.pos)
+        init_rot = tuple(env_cfg.object_cfg.init_state.rot)
+        env_cfg.object_kind = "cuboid"
+        env_cfg.object_scales = (1.0,)
+        env_cfg._rebuild_object()
+        env_cfg.object_cfg.init_state.pos = init_pos
+        env_cfg.object_cfg.init_state.rot = init_rot
+        print(
+            "[eval] Free object: FIXED nominal 64 mm cube cache bucket; "
+            "dynamics randomisation unchanged",
+            flush=True,
+        )
+
     if args.no_domain_rand and hasattr(env_cfg, "domain_rand"):
         env_cfg.domain_rand.enabled = False
         print("[eval] Domain randomisation + observation noise: DISABLED", flush=True)
     if args.bench_dr and hasattr(env_cfg, "domain_rand"):
         dr = env_cfg.domain_rand
-        dr.screwdriver_load_torque_range = (0.5, 4.0)
-        dr.contact_friction_range = (0.8, 1.6)
-        dr.rotation_damping_range = (0.8, 1.25)
-        dr.tilt_damping_range = (0.8, 1.25)
-        print("[eval] BENCH DR: dynamics narrowed to rig-realistic "
-              "(load 0.5-4.0x, friction 0.8-1.6, damping 0.8-1.25); "
-              "placement noise left at the trained spread", flush=True)
+        if is_free_inhand:
+            dr.friction_range = (0.6, 1.6)
+            dr.com_range = (-0.004, 0.004)
+            dr.force_scale = min(float(dr.force_scale), 1.0)
+            dr.random_force_prob = min(float(dr.random_force_prob), 0.10)
+            print(
+                "[eval] BENCH DR (free cube): mass envelope retained until the "
+                "physical cube is weighed; friction 0.6-1.6, COM ±4 mm, "
+                "disturbance force/probability narrowed",
+                flush=True,
+            )
+        else:
+            dr.screwdriver_load_torque_range = (0.5, 4.0)
+            dr.contact_friction_range = (0.8, 1.6)
+            dr.rotation_damping_range = (0.8, 1.25)
+            dr.tilt_damping_range = (0.8, 1.25)
+            print("[eval] BENCH DR: dynamics narrowed to rig-realistic "
+                  "(load 0.5-4.0x, friction 0.8-1.6, damping 0.8-1.25); "
+                  "placement noise left at the trained spread", flush=True)
+    if args.fixed_object_mass_g is not None:
+        if not is_free_inhand or not hasattr(env_cfg, "domain_rand"):
+            raise ValueError("--fixed_object_mass_g requires a free in-hand task")
+        if not 10.0 <= float(args.fixed_object_mass_g) <= 500.0:
+            raise ValueError("--fixed_object_mass_g must be in [10, 500]")
+        mass_kg = float(args.fixed_object_mass_g) / 1000.0
+        env_cfg.domain_rand.mass_range = (mass_kg, mass_kg)
+        print(f"[eval] Free-object mass: FIXED {args.fixed_object_mass_g:g} g", flush=True)
     if args.fixed_start and hasattr(env_cfg, "randomize_obj_start"):
         env_cfg.randomize_obj_start = False
         print("[eval] Screwdriver start angle: FIXED", flush=True)
@@ -685,6 +746,13 @@ def main() -> None:
         # asymmetric_obs is on). The actor obs dim (policy) is unchanged.
         env_cfg.asymmetric_obs = True
         env_cfg.state_space = env_cfg.privileged_obs_dim
+
+    # Training keeps sensors off for throughput.  Evaluation enables both
+    # fingertip and non-fingertip object-contact sensors so the no-palm-support
+    # gate is measured rather than silently reported as zero.
+    if is_free_inhand:
+        env_cfg.enable_fingertip_sensors = True
+        env_cfg.enable_nontip_sensors = True
 
     env = gym.make(args.task, cfg=env_cfg, render_mode=None)
     base_env = env.unwrapped
@@ -847,6 +915,13 @@ def main() -> None:
         "eval_contact_gate", "eval_binary_gate", "eval_motion_auth",
         "eval_total_reward", "eval_turn_reward",
         "eval_contact_authority_reward",
+        # free-object stability / direction-aware shaping
+        "eval_drive_reward", "eval_drive_velocity",
+        "eval_turn_reward_gate", "eval_turn_upright_gate",
+        "eval_turn_height_gate", "eval_upright_tilt_cost",
+        "eval_tilt_velocity_cost", "eval_drop_margin_cost",
+        "eval_downward_velocity_cost", "eval_palm_support_cost",
+        "eval_target_bound_cost",
         # force-based contact (LinkerL20)
         "eval_drive_count", "eval_in_window", "eval_contact_force",
         "eval_index_cap_force", "eval_idle_count", "eval_wrong_surface_force",
@@ -1188,7 +1263,21 @@ def main() -> None:
     print(line("MotionAuth", "eval_motion_auth"))
     # Force-based (LinkerL20) vs distance/pad-based (Allegro) contact diagnostics.
     force_based = not math.isnan(stats["eval_in_window"].result()[0])
-    if force_based:
+    if is_free_inhand:
+        # Free-cube tasks expose direct tip-object and non-tip-object sensors,
+        # but not the mounted screwdriver's drive-window metrics.  Keep the
+        # no-palm evidence visible in the console as well as the JSON report.
+        print(line("ContactForce N", "eval_contact_force", "{:.3f}"))
+        print(line("WrongSurf N", "eval_wrong_surface_force", "{:.3f}"))
+        if wrong_surface_summary is not None:
+            print(
+                f"      └ wrong p50 {wrong_surface_summary['p50_n']:.3f}  "
+                f"p90 {wrong_surface_summary['p90_n']:.3f}  "
+                f"p99 {wrong_surface_summary['p99_n']:.3f}  "
+                f"max {wrong_surface_summary['max_n']:.3f} N  |  "
+                f"{100.0 * wrong_surface_summary['fraction_above_0_05_n']:.1f}% > 0.05 N"
+            )
+    elif force_based:
         print(line("DriveCount", "eval_drive_count", "{:.2f}"))
         print(line("InWindow", "eval_in_window"))
         print(line("ContactForce N", "eval_contact_force", "{:.3f}"))

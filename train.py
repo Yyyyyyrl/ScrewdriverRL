@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -273,6 +274,88 @@ parser.add_argument(
     help="[Stage 1] Optional Phase-0 one-shot fall-penalty override.",
 )
 parser.add_argument(
+    "--fall_penalty",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional task-wide terminal fall penalty. This is intended "
+        "for explicit, checkpointed safety-curriculum continuations; final "
+        "production training must restore the configured deployment value."
+    ),
+)
+parser.add_argument(
+    "--palm_support_penalty_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional dense physical-palm support penalty. The hard "
+        "0.05 N evaluation gate is unchanged."
+    ),
+)
+parser.add_argument(
+    "--drop_margin_penalty_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional dense pre-fall height-margin penalty. Must be "
+        "non-positive; zero disables it."
+    ),
+)
+parser.add_argument(
+    "--downward_velocity_penalty_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional dense downward object-velocity penalty. Must be "
+        "non-positive; zero disables it."
+    ),
+)
+parser.add_argument(
+    "--upright_tilt_penalty_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional additive squared object-tilt penalty. Must be "
+        "non-positive; zero disables it."
+    ),
+)
+parser.add_argument(
+    "--tilt_velocity_penalty_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional absolute object-tilt-rate penalty. Must be "
+        "non-positive; zero disables it."
+    ),
+)
+parser.add_argument(
+    "--pose_penalty_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional initial-grasp pose-deviation penalty. Must be "
+        "non-positive; zero disables it."
+    ),
+)
+parser.add_argument(
+    "--drive_reward_scale",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional direction-aware contacting-finger drive reward "
+        "scale. Must be non-negative; zero disables it."
+    ),
+)
+parser.add_argument(
+    "--turn_upright_gate_std",
+    type=float,
+    default=None,
+    help=(
+        "[Stage 1] Optional smooth upright-gate width in radians for rotation "
+        "and finger-drive rewards. Must be positive."
+    ),
+)
+parser.add_argument(
     "--save_interval_steps",
     type=int,
     default=2_000_000,
@@ -454,11 +537,46 @@ def _load_agent_cfg(num_envs: int, rl_device: str, seed: int, train_dir: str) ->
     cfg_path = _resolve_agent_cfg_path(args.task)
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
-    cfg["params"]["config"]["num_actors"] = num_envs
-    cfg["params"]["config"]["device"] = rl_device
-    cfg["params"]["config"]["device_name"] = rl_device
+    params = cfg["params"]
+    train_cfg = params["config"]
+    # The free-object YAML historically placed central_value_config beside
+    # ``config``.  RL-Games only reads it *inside* params.config and otherwise
+    # silently trains the actor's ordinary value head.  Normalize that campaign
+    # layout before applying overrides so asymmetric training is real, not just
+    # advertised by the environment's critic observation space.  Keep this
+    # migration scoped to the two refactored free-object tasks; other campaigns
+    # must make their own checkpoint-compatibility decision.
+    free_object_task = "Inhand-Rotation" in str(args.task)
+    legacy_central = params.get("central_value_config")
+    nested_central = train_cfg.get("central_value_config")
+    if free_object_task and legacy_central is not None and nested_central is not None:
+        raise ValueError(
+            "central_value_config is defined at both params and params.config"
+        )
+    if free_object_task and legacy_central is not None:
+        params.pop("central_value_config")
+        train_cfg["central_value_config"] = legacy_central
+        nested_central = legacy_central
+    if free_object_task and nested_central is None:
+        raise ValueError(
+            "Stage-1 requires params.config.central_value_config; without it "
+            "RL-Games silently disables the asymmetric critic"
+        )
+    if free_object_task:
+        print(
+            "[train] Central critic: enabled via "
+            "params.config.central_value_config",
+            flush=True,
+        )
+    else:
+        # Preserve the legacy override behaviour for non-free-object configs.
+        nested_central = nested_central or legacy_central
+
+    train_cfg["num_actors"] = num_envs
+    train_cfg["device"] = rl_device
+    train_cfg["device_name"] = rl_device
     cfg["params"]["seed"] = seed
-    cfg["params"]["config"]["train_dir"] = train_dir
+    train_cfg["train_dir"] = train_dir
     if args.max_epochs is not None:
         cfg["params"]["config"]["max_epochs"] = args.max_epochs
     if args.ppo_score_to_win is not None:
@@ -508,8 +626,8 @@ def _load_agent_cfg(num_envs: int, rl_device: str, seed: int, train_dir: str) ->
         )
 
     optim_configs = (
-        cfg["params"]["config"],
-        cfg["params"].get("central_value_config"),
+        train_cfg,
+        nested_central,
     )
     for optim_cfg in optim_configs:
         if not optim_cfg:
@@ -557,7 +675,7 @@ def _load_agent_cfg(num_envs: int, rl_device: str, seed: int, train_dir: str) ->
             mb -= 1
         return max(mb, 1)
 
-    for path in (cfg["params"]["config"], cfg["params"].get("central_value_config")):
+    for path in (train_cfg, nested_central):
         if not path or "minibatch_size" not in path:
             continue
         fitted = _fit_minibatch(path["minibatch_size"])
@@ -621,10 +739,11 @@ def _register_rl_games(env, agent_cfg: dict) -> None:
 def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | None:
     """Capture the actor + obs normaliser + deployment config for the deploy bundle.
 
-    Returns a dict consumed by ``ProprioAdaptTrainer`` to write ``deploy.pth``,
-    or ``None`` if the actor model could not be read (in which case Stage 2 still
-    saves the adapter-only checkpoint).  Reuses ``DeployPolicy``'s actor-state
-    canonicaliser so the bundle loads into the env-free deploy actor 1:1.
+    Returns a dict consumed by ``ProprioAdaptTrainer`` to write ``deploy.pth``.
+    Older tasks may return ``None`` and retain their adapter-only behavior;
+    free-object tasks treat that as fatal in ``run_stage2``.  Reuses
+    ``DeployPolicy``'s actor-state canonicaliser so the bundle loads into the
+    env-free deploy actor 1:1.
     """
     try:
         from screwdriver_rl.deploy.policy import (
@@ -694,6 +813,27 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
                     "nominal geometry variant is absent from the environment batch"
                 )
             deployment_row = int(deployment_rows[0].item())
+        elif getattr(base_env, "_env_scale", None) is not None:
+            scale_values = base_env._env_scale.detach()
+            nominal_rows = torch.nonzero(
+                torch.isclose(
+                    scale_values,
+                    torch.ones_like(scale_values),
+                    atol=1.0e-6,
+                    rtol=0.0,
+                ),
+                as_tuple=False,
+            ).flatten()
+            if nominal_rows.numel() == 0:
+                raise ValueError(
+                    "free-object deployment requires a nominal scale=1.0 environment"
+                )
+            deployment_row = int(nominal_rows[0].item())
+            deployment_bucket = int(
+                base_env._env_scale_idx[deployment_row].detach().cpu().item()
+            )
+            scale = float(scale_values[deployment_row].detach().cpu().item())
+            deployment_scale = [scale, scale]
 
         def _row(attr):
             t = getattr(base_env, attr, None)
@@ -718,6 +858,13 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
             startup_reset_targets = (
                 torch.cat(reset_parts).detach().cpu().tolist()
             )
+
+        deployment_grasp = None
+        deployment_grasp_fn = getattr(base_env, "deployment_grasp_targets", None)
+        if callable(deployment_grasp_fn):
+            deployment_grasp = deployment_grasp_fn()
+            startup_reset_targets = deployment_grasp["startup_reset_targets"]
+            home = deployment_grasp["home_targets"]
 
         # Serialize the exact proprioception contract used by the live task.
         # ProprioAdaptTrainer validates this against the adaptation history and
@@ -748,10 +895,56 @@ def _build_deploy_meta(player, agent_cfg: dict, env_cfg, base_env) -> dict | Non
             "deployment_geometry_bucket": deployment_bucket,
             "deployment_geometry_scale": deployment_scale,
         }
+        if deployment_grasp is not None:
+            from screwdriver_rl.utils.inhand_grasp_cache_manifest import (
+                manifest_path,
+                sha256_file,
+            )
+
+            cache_manifest = manifest_path(
+                Path(env_cfg.grasp_cache_dir), env_cfg.grasp_cache_name
+            )
+            config.update(
+                {
+                    "startup_reset_hardware_lower": _row("_finger_lower"),
+                    "startup_reset_hardware_upper": _row("_finger_upper"),
+                    "deployment_object_kind": "cuboid",
+                    "deployment_object_size_mm": [64.0, 64.0, 64.0],
+                    "deployment_object_mass_range_g": [30.0, 200.0],
+                    "deployment_hand_root_position_m": [
+                        float(value)
+                        for value in env_cfg.robot_cfg.init_state.pos
+                    ],
+                    "deployment_hand_root_quaternion_wxyz": [
+                        float(value)
+                        for value in env_cfg.robot_cfg.init_state.rot
+                    ],
+                    "deployment_object_seed_position_m": [
+                        float(value)
+                        for value in env_cfg.object_cfg.init_state.pos
+                    ],
+                    "deployment_grasp_orientation": str(
+                        env_cfg.grasp_orientation
+                    ),
+                    "deployment_grasp_cache": deployment_grasp,
+                    "deployment_grasp_manifest_sha256": sha256_file(
+                        cache_manifest
+                    ),
+                }
+            )
         if latent_dim == 0:  # legacy euler-bridge bundle
             config["euler_dim"] = max(0, obs_dim - 2 * action_dim) or 3
         return {"actor": actor_state, "actor_arch": actor_arch, "config": config}
-    except Exception as exc:  # never let bundling abort Stage-2 training
+    except Exception as exc:
+        # A free-object campaign has no useful terminal artifact without its
+        # deterministic operator-load grasp, cache provenance and actor bundle.
+        # Fail before spending the Stage-2 budget on an adapter-only result.
+        if "Inhand-Rotation" in str(getattr(args, "task", "")):
+            raise RuntimeError(
+                "free-object Stage-2 cannot assemble a deployable bundle"
+            ) from exc
+        # Preserve legacy behavior for older tasks that intentionally train an
+        # adapter-only checkpoint.
         print(f"[Stage 2] WARNING: could not assemble deploy bundle ({exc}); "
               f"saving adapter-only checkpoint.", flush=True)
         return None
@@ -872,10 +1065,10 @@ def _assert_checkpoint_matches_task(ckpt_path: str, env_cfg) -> None:
     w = model.get("a2c_network.env_mlp.0.weight") if isinstance(model, dict) else None
     if w is None:
         return  # legacy (non-latent) checkpoint — nothing to compare
-    # The actor's env_mlp input is the ACTOR's extrinsics tail, which under the
-    # HORA-faithful split (slow_extrinsics_only) is actor_extrinsics_dim, not the
-    # full privileged_obs_dim (that width is the asymmetric critic's, not the
-    # actor's latent encoder's).
+    # The actor's env_mlp input is the ACTOR-specific HORA tail (object position
+    # plus slow physical properties for the free-cube task), whose width is
+    # actor_extrinsics_dim.  It is not the full privileged_obs_dim: orientation
+    # and velocities remain exclusive to the asymmetric critic.
     if getattr(env_cfg, "slow_extrinsics_only", False):
         task_priv = int(env_cfg.actor_extrinsics_dim)
     else:
@@ -971,6 +1164,10 @@ def run_stage2(env_cfg, log_dir: str) -> None:
     # so Stage 2 writes a HORA-style deploy.pth, not just the adapter.  All the
     # pieces already live in the restored player / env; see docs/3-deployment.md.
     deploy_meta = _build_deploy_meta(player, agent_cfg, env_cfg, env.unwrapped)
+    if "Inhand-Rotation" in args.task and deploy_meta is None:
+        raise RuntimeError(
+            "free-object Stage-2 requires a self-contained deployable bundle"
+        )
 
     # HORA-faithful latent mode: the adapter regresses the teacher latent
     # ``tanh(env_mlp(normalize(priv)))`` the Stage-1 actor consumed, and (for
@@ -1236,6 +1433,91 @@ def main() -> None:
             phase0.reward_fall_weight = float(args.phase0_fall_weight)
             print(
                 f"[Stage 1] Phase-0 fall-weight override: {phase0.reward_fall_weight:g}",
+                flush=True,
+            )
+        if args.fall_penalty is not None:
+            if args.fall_penalty >= 0.0:
+                raise ValueError("--fall_penalty must be negative")
+            env_cfg.fall_penalty = float(args.fall_penalty)
+            print(
+                f"[Stage 1] Terminal fall-penalty override: {env_cfg.fall_penalty:g}",
+                flush=True,
+            )
+        if args.palm_support_penalty_scale is not None:
+            if args.palm_support_penalty_scale >= 0.0:
+                raise ValueError("--palm_support_penalty_scale must be negative")
+            env_cfg.palm_support_penalty_scale = float(
+                args.palm_support_penalty_scale
+            )
+            print(
+                "[Stage 1] Palm-support penalty override: "
+                f"{env_cfg.palm_support_penalty_scale:g}",
+                flush=True,
+            )
+        if args.drop_margin_penalty_scale is not None:
+            if args.drop_margin_penalty_scale > 0.0:
+                raise ValueError("--drop_margin_penalty_scale must be non-positive")
+            env_cfg.drop_margin_penalty_scale = float(
+                args.drop_margin_penalty_scale
+            )
+            print(
+                "[Stage 1] Pre-fall height-margin penalty override: "
+                f"{env_cfg.drop_margin_penalty_scale:g}",
+                flush=True,
+            )
+        if args.downward_velocity_penalty_scale is not None:
+            if args.downward_velocity_penalty_scale > 0.0:
+                raise ValueError(
+                    "--downward_velocity_penalty_scale must be non-positive"
+                )
+            env_cfg.downward_velocity_penalty_scale = float(
+                args.downward_velocity_penalty_scale
+            )
+            print(
+                "[Stage 1] Downward-velocity penalty override: "
+                f"{env_cfg.downward_velocity_penalty_scale:g}",
+                flush=True,
+            )
+        for arg_name, cfg_name, label in (
+            (
+                "upright_tilt_penalty_scale",
+                "upright_tilt_penalty_scale",
+                "Upright-tilt penalty",
+            ),
+            (
+                "tilt_velocity_penalty_scale",
+                "tilt_velocity_penalty_scale",
+                "Tilt-velocity penalty",
+            ),
+            (
+                "pose_penalty_scale",
+                "pose_penalty_scale",
+                "Initial-grasp pose penalty",
+            ),
+        ):
+            value = getattr(args, arg_name)
+            if value is None:
+                continue
+            if value > 0.0:
+                raise ValueError(f"--{arg_name} must be non-positive")
+            setattr(env_cfg, cfg_name, float(value))
+            print(f"[Stage 1] {label} override: {value:g}", flush=True)
+        if args.drive_reward_scale is not None:
+            if args.drive_reward_scale < 0.0:
+                raise ValueError("--drive_reward_scale must be non-negative")
+            env_cfg.drive_reward_scale = float(args.drive_reward_scale)
+            print(
+                "[Stage 1] Direction-aware drive reward override: "
+                f"{env_cfg.drive_reward_scale:g}",
+                flush=True,
+            )
+        if args.turn_upright_gate_std is not None:
+            if args.turn_upright_gate_std <= 0.0:
+                raise ValueError("--turn_upright_gate_std must be positive")
+            env_cfg.turn_upright_gate_std = float(args.turn_upright_gate_std)
+            print(
+                "[Stage 1] Turn upright-gate width override: "
+                f"{env_cfg.turn_upright_gate_std:g} rad",
                 flush=True,
             )
     log_dir = args.output or os.path.join("runs", args.task)

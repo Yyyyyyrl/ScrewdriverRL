@@ -13,7 +13,7 @@ controller and maps its 16-D joint targets onto LinkerHand L20/G20 hardware:
   - :mod:`screwdriver_rl.deploy.hw_utils` — stdlib-only helpers (ramp generation,
     state validation, SDK sys.path bootstrap).
   - :mod:`screwdriver_rl.deploy.deploy_linker` — the live node (lazy ROS/SDK
-    imports): ramp-to-pregrasp startup, 10 Hz control loop with watchdog,
+    imports): ramp-to-pregrasp startup, bundle-rate control loop with watchdog,
     hold/release shutdown, CSV recording, offline ``--dry-run``.
   - :mod:`screwdriver_rl.deploy.hand_check` — first-power-on & calibration
     utility (info / echo / ramp / wiggle / pose / roundtrip).

@@ -411,6 +411,9 @@ def test_latent_network_forward_shapes():
         assert out["values"].shape == (5, 1)
         first = [m for m in model.a2c_network.actor_mlp if isinstance(m, torch.nn.Linear)][0]
         assert first.in_features == 32 + 8, "actor_mlp must consume [proprio, latent]"
+        assert isinstance(model.a2c_network.env_mlp[-1], torch.nn.ELU), (
+            "HORA applies ELU after the final privileged-latent projection"
+        )
         # The privileged tail (and thus env_mlp input) is derived, not hardcoded.
         assert model.a2c_network.priv_dim == priv, f"priv_dim must be {priv} for obs {obs_dim}"
 

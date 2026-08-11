@@ -1,13 +1,27 @@
 # ScrewdriverRL
 
-Isaac Lab training environment for **continuous in-hand screwdriver rotation** with a dexterous robot hand.  The policy must spin the screwdriver around its own axial direction while keeping it upright, using fingertip contacts only.
+Isaac Lab environments for **continuous screwdriver and free-object in-hand
+rotation** with a dexterous robot hand.  The production free-object tasks rotate
+an operator-loaded 64 mm PLA cube without palm support. Fingertip and finger-side
+contacts are permitted; physical palm support is a deployment rejection condition.
 
 Training follows a two-stage **RMA** (Rapid Motor Adaptation) recipe on top of RL-Games PPO:
 
-- **Stage 1 — Teacher.** An asymmetric actor-critic where the actor sees the policy observation and the critic additionally sees a privileged observation (exact screwdriver pose/velocity, friction, fingertip distances). The deployment policy is the actor alone.
-- **Stage 2 — Adaptation.** A small temporal-conv network learns to predict the privileged observation from a history of proprioception, so the policy can run without privileged sensors. See [`docs/2-stage-training.md`](docs/2-stage-training.md).
+- **Stage 1 — Teacher.** An asymmetric actor-critic where the actor encodes its
+  permitted extrinsics into a latent and the critic sees the full privileged
+  state.
+- **Stage 2 — Adaptation.** A temporal-conv network predicts the teacher latent
+  from proprioceptive history.  Deployment is the frozen actor plus this
+  adapter, with no simulator-only object state. See
+  [`docs/2-stage-training.md`](docs/2-stage-training.md).
 
-The task logic is **hand-agnostic** (shared base env + reward), and each hand is a thin subclass. Two hands are configured today: the **Allegro** (right) hand and the **Linker Hand L20** (left).
+The current 64 mm free-cube campaign and its fail-closed deployment gates are
+specified in
+[`docs/handoff-inhand-cube-full-pipeline-20260808.md`](docs/handoff-inhand-cube-full-pipeline-20260808.md).
+
+The task logic is **hand-agnostic** (shared base env + reward), and each hand is
+a thin subclass. Two hands are configured today: the **Allegro** (right) hand
+and the current calibrated **Linker G20/L20** left-hand model.
 
 ---
 
@@ -20,8 +34,8 @@ Every entry script (`train.py`, `play.py`, `eval.py`, `calibrate_pad.py`, `rende
 | `Isaac-Allegro-Screwdriver-Rotation-Direct-v0` | Allegro (right) | index, middle, thumb (3) | 12 | 27 / 17 | −z (CCW from above) | on |
 | `Isaac-LinkerL20-Screwdriver-Rotation-Direct-v0` | Linker Hand L20 (left) | index, middle, ring, pinky, thumb (5) | 16 | 35 / 19 | +z (mirror of Allegro) | on (pair-filtered) |
 | `Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0` | Linker Hand L20 (left, top-down grasp) | index, middle, ring, pinky, thumb (5) | 16 | 35 / 19 | +z (mirror of Allegro) | on (pair-filtered) |
-| `Isaac-LinkerL20-Inhand-Rotation` | Linker Hand L20 (left, palm-up) | index, middle, ring, pinky, thumb (5) | 16 | 105 / 9 privileged | −palm normal | on (pair-filtered) |
-| `Isaac-LinkerL20-Inhand-Rotation-Topdown` | Linker Hand L20 (left, palm-down) | index, middle, ring, pinky, thumb (5) | 16 | 105 / 9 privileged | −z (gravity axis) | on (pair-filtered) |
+| `Isaac-LinkerL20-Inhand-Rotation` | Linker G20 (left, bottom-up tilted fingertip cage) | index, middle, ring, pinky, thumb (5) | 16 | 102 / 19 privileged | −z (gravity axis) | on (pair-filtered) |
+| `Isaac-LinkerL20-Inhand-Rotation-Topdown` | Linker G20 (left, top-down tilted fingertip cage) | index, middle, ring, pinky, thumb (5) | 16 | 102 / 19 privileged | −z (gravity axis) | on (pair-filtered) |
 
 `train.py`/`play.py`/`eval.py`/`calibrate_pad.py` **default to the Allegro task** if `--task` is omitted.
 
@@ -67,6 +81,9 @@ python train.py --task Isaac-LinkerL20-Screwdriver-Rotation-Top-Grasp-Direct-v0 
 # Linker Hand L20 free-object rotation — top-down fingertip-only grasp
 python train.py --task Isaac-LinkerL20-Inhand-Rotation-Topdown --stage 1 --num_envs 2048 --headless
 
+# Linker Hand G20 free-object rotation — bottom-up fingertip-only grasp
+python train.py --task Isaac-LinkerL20-Inhand-Rotation --stage 1 --num_envs 2048 --headless
+
 # Resume from a checkpoint
 python train.py --task <id> --stage 1 --headless \
   --checkpoint runs/<id>/<run-name>/nn/<name>.pth
@@ -95,7 +112,9 @@ python train.py --task <id> --stage 2 --headless \
 | `--video` | off | Record training videos (`--video_interval` controls frequency). |
 | `--adapt_iters` / `--adapt_rollout_steps` | 500 / 512 | [Stage 2] Adaptation training schedule. |
 
-> **Minibatch note:** the agent config uses `minibatch_size: 8192`, which needs `num_envs × horizon_length(32) ≥ 8192` (i.e. `num_envs ≥ 256`). For smaller runs `train.py` shrinks the minibatch to fit.
+> **Minibatch note:** the free-cube agent uses horizon 8 and minibatch 16,384.
+> `train.py` shrinks the minibatch for small smoke runs; the full campaign
+> should use a sufficiently large environment count.
 
 > **Throughput:** env-step throughput scales with `--num_envs`. On a 32 GB GPU the Linker fits **~16384 envs (~15.5 GB)** with `convex_hull` colliders; use a high count for fast training (the default 2048 is conservative). Allegro scales similarly.
 
@@ -107,7 +126,8 @@ runs/<task>/                       # (override with --output DIR)
 │   ├── nn/                        #   checkpoints (.pth)
 │   └── summaries/                 #   tensorboard
 └── stage2_nn/
-    └── proprio_adapt.pth          # Stage 2 adaptation network
+    ├── proprio_adapt.pth          # Stage 2 adaptation network
+    └── deploy.pth                 # self-contained deployable policy
 ```
 
 ---
@@ -116,26 +136,37 @@ runs/<task>/                       # (override with --output DIR)
 
 All take `--task <id>` and run in `env_isaac`. Isaac boots in ~2–3 min; run headless when you don't need the viewport.
 
-### Top-down in-hand grasp caches
+### Free-cube in-hand grasp caches
 
-`Isaac-LinkerL20-Inhand-Rotation-Topdown` requires a complete set of
-physics-harvested caches before training. Generate every scale and shape on an
-Isaac Lab GPU machine:
+Both free-object tasks require complete, versioned, replay-certified cache
+banks before training. Generate an oversized source bank, then certify it in
+the main task. For example, the nominal top-down bucket is:
 
 ```bash
-for shape in cylinder cuboid sphere; do
-  for scale in 0.70 0.72 0.74 0.76 0.78 0.80 0.82 0.84 0.86; do
-    python tools/gen_inhand_grasp_cache.py \
-      --task Isaac-LinkerL20-Inhand-GraspGen-Topdown \
-      --shape "$shape" --scale "$scale" \
-      --num_envs 8192 --num_states 12500 --headless
-  done
-done
+SRC=/tmp/dex_forge_inhand_topdown_v2_source
+python tools/gen_inhand_grasp_cache.py \
+  --task Isaac-LinkerL20-Inhand-GraspGen-Topdown \
+  --shape cuboid --scale 1.0 --num_envs 8192 --num_states 22000 \
+  --seed 20260808 --out "$SRC" --headless
+python tools/certify_inhand_grasp_cache.py \
+  --task Isaac-LinkerL20-Inhand-Rotation-Topdown \
+  --cache_dir "$SRC" --scale 1.0 --num_envs 8192 --replays 4 \
+  --target_rows 12500 \
+  --output_cache assets/grasp_cache/linker_l20_topdown_cube64_v2_grasp_cub0_s1.npy \
+  --seed 20260808 --headless
+python tools/validate_inhand_grasp_cache.py
 ```
 
-The generator writes `linker_l20_topdown_grasp_*.npy`. The training task fails
-fast if any per-scale, per-shape, or per-prototype file is absent, so an
-incomplete or unvalidated reset distribution cannot silently enter training.
+Repeat for 0.9375/1.0625 and for bottom-up. The exact six-bucket commands,
+source budgets, reset gate, and observed yields are in the campaign handoff
+linked above. Run only one Isaac process at a time.
+
+The generator writes uncertified bottom-up/top-down source banks. Production
+rows must then pass `tools/certify_inhand_grasp_cache.py`: four independent,
+full-domain-randomisation replays from zero velocity, each lasting the complete
+20 s task episode, with immediate rejection for any non-tip support above
+0.05 N or any fall. The resulting SHA-256 manifest records that certification;
+training fails fast if any bucket, certification identity, or digest is wrong.
 
 ### `play.py` — viewport playback / quick stats
 Loads a Stage 1 checkpoint and runs the deterministic policy.

@@ -12,6 +12,9 @@ import yaml
 _ROOT = Path(__file__).resolve().parents[1]
 _URDF = _ROOT / "assets" / "linker_hand_l20" / "linkerhand_l20_left.urdf"
 _CFG = _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_rotation_env_cfg.py"
+_TOPDOWN_CFG = (
+    _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_rotation_topdown_env_cfg.py"
+)
 _ENV = _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_rotation_env.py"
 _REGISTRY = _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "__init__.py"
 _YAML = _ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "agents" / "rl_games_inhand_ppo_cfg.yaml"
@@ -97,26 +100,50 @@ def _joints(root):
 def test_obs_dimensions_follow_hora_contract():
     n_independent = len(EXPECTED_INDEPENDENT)
     history_dim = 2 * n_independent
-    policy_dim = 3 * history_dim + 9
+    actor_extrinsics_dim = 9
+    privileged_dim = 19
+    policy_dim = 3 * history_dim + actor_extrinsics_dim
 
     assert n_independent == 16
     assert history_dim == 32
+    assert actor_extrinsics_dim == 9
+    assert privileged_dim == 19
     assert policy_dim == 105
 
 
+def test_actor_teacher_tail_matches_local_hora_position_plus_slow6():
+    source = _ENV.read_text()
+    body = source.split("def _compute_actor_extrinsics", 1)[1].split(
+        "def _read_tip_object_forces", 1
+    )[0]
+
+    assert "self.object.data.root_pos_w - self.scene.env_origins" in body
+    for token in (
+        "obj_pos_local",
+        "self._env_scale.unsqueeze(-1)",
+        "self._env_mass.unsqueeze(-1)",
+        "self._env_friction.unsqueeze(-1)",
+        "self._env_com",
+    ):
+        assert token in body
+    assert "root_quat_w" not in body
+    assert "root_lin_vel_w" not in body
+    assert "root_ang_vel_w" not in body
+
+
 def test_asset_grid_is_scale_major(cfg_tree):
-    scales = _literal(cfg_tree, "HORA_CYLINDER_SCALES")
-    assert len(scales) == 9
-    # 9 buckets, 0.02 apart, centred on 1.0 (the L20 is larger than the Allegro
-    # that HORA's original 0.70-0.86 range was tuned for).
-    assert scales == pytest.approx(tuple(0.92 + 0.02 * i for i in range(9)))
+    scales = _literal(cfg_tree, "INHAND_OBJECT_SCALES")
+    assert len(scales) == 3
+    # The deployment cube is 64 mm; train over the same 60/64/68 mm geometry
+    # buckets used by the mounted campaign.
+    assert scales == pytest.approx((0.9375, 1.0, 1.0625))
     assert scales[len(scales) // 2] == pytest.approx(1.0)
 
     # Each scale spawns a fixed block of shapes; the grid is scale-major so
     # asset i -> scale block i // block_size (this is exactly how the env maps
     # env_id -> scale for the per-scale grasp-cache lookup).
     n_cyl = len(_literal(cfg_tree, "MIX_CYLINDER_LENGTHS"))
-    n_cub = len(_literal(cfg_tree, "MIX_CUBOID_SIZES"))
+    n_cub = 1
     n_sph = len(_literal(cfg_tree, "MIX_SPHERE_RADII"))
     block = n_cyl + n_cub + n_sph
     total = len(scales) * block
@@ -135,10 +162,8 @@ def test_object_mix_is_hora_block_only_with_mixed_fallback(cfg_tree):
     assert 'object_kind: str = "cuboid"' in cfg_source
 
     # Cuboid prototypes exist and are block-like (no dimension > 1.5x another).
-    cuboids = _literal(cfg_tree, "MIX_CUBOID_SIZES")
-    assert len(cuboids) >= 1
-    for size in cuboids:
-        assert max(size) / min(size) <= 1.5, f"cuboid {size} too elongated for a HORA block"
+    assert _literal(cfg_tree, "INHAND_CUBE_EDGE_M") == pytest.approx(0.064)
+    assert "(INHAND_CUBE_EDGE_M, INHAND_CUBE_EDGE_M, INHAND_CUBE_EDGE_M)" in cfg_source
 
     # The mixed fallback keeps all three shapes buildable.
     assert len(_literal(cfg_tree, "MIX_CYLINDER_LENGTHS")) >= 1
@@ -321,10 +346,27 @@ def test_inhand_yaml_sanity():
     assert net["priv_mlp_units"] == [256, 128]
     assert net["mlp"]["units"] == [512, 256, 128]
     assert train["reward_shaper"]["scale_value"] == pytest.approx(0.01)
-    assert train["gamma"] == pytest.approx(0.995)
+    assert train["gamma"] == pytest.approx(0.99)
     assert train["horizon_length"] == 8
-    assert train["minibatch_size"] == 16384
-    assert "central_value_config" not in params
+    assert train["minibatch_size"] == 32768
+    central = params["central_value_config"]
+    assert central["network"]["central_value"] is True
+    assert central["minibatch_size"] == 16384
+    assert central["learning_rate"] == pytest.approx(1e-4)
+    assert central["normalize_input"] is True
+    assert central["clip_value"] is True
+
+
+def test_train_normalizes_central_critic_to_rl_games_runtime_path():
+    source = (_ROOT / "train.py").read_text()
+    for token in (
+        'free_object_task = "Inhand-Rotation" in str(args.task)',
+        'params.pop("central_value_config")',
+        'train_cfg["central_value_config"] = legacy_central',
+        '"params.config.central_value_config"',
+        '"RL-Games silently disables the asymmetric critic"',
+    ):
+        assert token in source
 
 
 def test_inhand_task_registration_points_train_play_eval_to_new_cfgs():
@@ -337,6 +379,11 @@ def test_inhand_task_registration_points_train_play_eval_to_new_cfgs():
     assert 'id="Isaac-LinkerL20-Inhand-GraspGen"' in source
     assert "inhand_grasp_gen_env:LinkerL20InhandGraspGenEnv" in source
     assert "inhand_rotation_env_cfg:LinkerL20InhandGraspGenEnvCfg" in source
+
+
+def test_topdown_retains_its_replay_certified_damping():
+    source = _TOPDOWN_CFG.read_text()
+    assert 'self.robot_cfg.actuators["fingers"].damping = 1.0' in source
 
 
 def test_inhand_ground_spawn_is_local():
@@ -364,28 +411,77 @@ def test_train_stage2_play_eval_observation_contracts(env_tree):
     assert sum(len(v) for v in obs_dim.values()) == 16
 
 
-def test_rotation_first_reward_is_wired():
-    """The default schedule is a SINGLE phase with full HORA rotation reward
-    from step 0 (2026-07-16): the regenerated grasp caches hold ~80% of
-    zero-action episodes to timeout, so a hold-first phase only lets the hold
-    bonus dominate what the policy learns.  The curriculum machinery (phase
-    selection + turn-weight gating) must stay wired for reintroduction, and
-    the anti-spin-and-drop guards (fall penalty, near-neutral hold bonus)
-    must stay active."""
+def test_hora_safe_reward_and_no_hold_only_curriculum_are_wired():
+    """True rotation starts immediately; fall/palm remain explicit safety costs."""
     source = _ENV.read_text()
-    # Phase selection + rotation-reward gating machinery retained.
+    # Phase machinery remains available, but the default objective is one phase.
     assert "for phase in phases:" in source
     assert "if self._global_steps >= phase.step_start:" in source
     assert "CURRICULUM TRANSITION" in source
     assert "self._curriculum_phase.reward_turn_weight" in source
 
     cfg_source = _CFG.read_text()
-    assert "InhandCurriculumPhaseCfg(step_start=0, reward_turn_weight=1.0)" in cfg_source
-    assert "reward_turn_weight=0.0" not in cfg_source, "hold-only phase reintroduced?"
-    # Guards: falling must stay strictly worse than living; idle holding must
-    # not be a comfortable positive-income optimum (bonus ~ penalty income).
-    assert "fall_penalty: float = -25.0" in cfg_source
-    assert "hold_bonus: float = 0.1" in cfg_source
+    assert "step_start=0," in cfg_source
+    assert "reward_turn_weight=1.0," in cfg_source
+    assert "fall_penalty: float = -1000.0" in cfg_source
+    assert "strict_contact_bonus=0.0" in cfg_source
+    assert "partial_contact_bonus=0.0" in cfg_source
+    assert "rotate_reward_scale: float = 1.0" in cfg_source
+    assert "rotate_reward_scale_final: float = 1.0" in cfg_source
+    assert "reverse_reward_ratio: float = 1.0" in cfg_source
+    assert "gate_rotation_reward: bool = False" in cfg_source
+    assert "turn_upright_gate_std: float = 0.20" in cfg_source
+    assert "turn_height_margin_m: float = 0.020" in cfg_source
+    assert "drive_reward_scale: float = 0.0" in cfg_source
+    assert "drive_speed_ref: float = 0.020" in cfg_source
+    assert "palm_support_penalty_scale: float = -10.0" in cfg_source
+    assert "drop_margin_m: float = 0.020" in cfg_source
+    assert "drop_margin_penalty_scale: float = 0.0" in cfg_source
+    assert "downward_velocity_penalty_scale: float = 0.0" in cfg_source
+    assert "upright_tilt_penalty_scale: float = 0.0" in cfg_source
+    assert "tilt_velocity_penalty_scale: float = 0.0" in cfg_source
+    assert "linvel_penalty_scale: float = -0.3" in cfg_source
+    assert "pose_penalty_scale: float = -0.3" in cfg_source
+    assert "torque_penalty_scale: float = -0.1" in cfg_source
+    assert "work_penalty_scale: float = -2.0" in cfg_source
+    # Exact HORA P/effort was rejected by the palm gate for the larger G20
+    # cube.  Preserve the certified G20 holding authority while matching
+    # HORA's lower damping, which is the isolated cyclic-motion variable.
+    assert "effort_limit_sim=1.0" in cfg_source
+    assert "stiffness=6.0" in cfg_source
+    assert "damping=0.1" in cfg_source
+    assert "enable_fingertip_sensors: bool = True" in cfg_source
+    assert "enable_palm_sensor: bool = True" in cfg_source
+    assert "enable_nontip_sensors: bool = True" in cfg_source
+
+    reward_start = source.index("    def _get_rewards(")
+    reward_body = source[reward_start:source.index("    def _get_dones(", reward_start)]
+    assert "hold_gate = contact_gate & ~palm_support & ~fall" in reward_body
+    assert "rotation_credit_gate" in reward_body
+    assert "else torch.ones_like(turn_reward_gate)" in reward_body
+    assert "stability_gate = turn_upright_gate * turn_height_gate" in reward_body
+    assert "eval_stability_gate" in reward_body
+    assert "desired_tangent" in reward_body
+    assert "drive_velocity" in reward_body
+    assert "+ drive_reward" in reward_body
+    assert "eval_drive_reward" in reward_body
+    assert "self.cfg.reverse_reward_ratio" in reward_body
+    assert "self.cfg.rotate_reward_scale_final" in reward_body
+    assert "contact_authority_reward" in reward_body
+    assert "self._curriculum_phase.strict_contact_bonus" in reward_body
+    assert "self._curriculum_phase.partial_contact_bonus" in reward_body
+    assert "self.cfg.palm_support_penalty_scale" in reward_body
+    assert "self.cfg.drop_margin_penalty_scale" in reward_body
+    assert "self.cfg.downward_velocity_penalty_scale" in reward_body
+    assert "eval_drop_margin_cost" in reward_body
+    assert "eval_downward_velocity_cost" in reward_body
+    assert "self.cfg.upright_tilt_penalty_scale" in reward_body
+    assert "self.cfg.tilt_velocity_penalty_scale" in reward_body
+    assert "eval_upright_tilt_cost" in reward_body
+    assert "eval_tilt_velocity_cost" in reward_body
+    assert "tip_dist <= float(self.cfg.tip_dist_max)" in reward_body
+    assert "contact_gate = contact_count >= 2.0" in reward_body
+    assert "body.startswith(f\"{finger}_\")" in reward_body
 
 
 def test_hora_reward_terms_and_eval_extras_are_present():
@@ -399,7 +495,7 @@ def test_hora_reward_terms_and_eval_extras_are_present():
         "torque_penalty_scale",
         "work_penalty_scale",
         "fall_penalty",
-        "hold_bonus",
+        "rotation_credit_gate",
         "eval_rotate_reward",
         "eval_obj_z",
         "eval_fall_frac",
@@ -423,9 +519,9 @@ def test_reset_keeps_direct_env_reset_before_state_and_target_writes():
 
 
 def test_domain_randomization_ranges_and_physics_writes(cfg_tree):
-    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "mass_range") == (0.01, 0.25)
-    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "com_range") == (-0.01, 0.01)
-    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "friction_range") == (0.3, 3.0)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "mass_range") == (0.03, 0.20)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "com_range") == (-0.008, 0.008)
+    assert _class_literal(cfg_tree, "InhandDomainRandCfg", "friction_range") == (0.4, 2.5)
     assert _class_literal(cfg_tree, "InhandDomainRandCfg", "pd_gain_range") == (0.967, 1.033)
     assert _class_literal(cfg_tree, "InhandDomainRandCfg", "joint_noise_scale") == pytest.approx(0.02)
     assert _class_literal(cfg_tree, "InhandDomainRandCfg", "force_scale") == pytest.approx(2.0)
@@ -447,12 +543,13 @@ def test_domain_randomization_ranges_and_physics_writes(cfg_tree):
 
 
 def test_grasp_gen_cfg_and_done_contract(cfg_tree):
-    assert _class_literal(cfg_tree, "LinkerL20InhandGraspGenEnvCfg", "cache_scale") == pytest.approx(0.8)
-    assert _class_literal(cfg_tree, "LinkerL20InhandGraspGenEnvCfg", "cache_shape") == "cylinder"
+    assert _class_literal(cfg_tree, "LinkerL20InhandGraspGenEnvCfg", "cache_scale") == pytest.approx(1.0)
+    assert _class_literal(cfg_tree, "LinkerL20InhandGraspGenEnvCfg", "cache_shape") == "cuboid"
 
     cfg_source = _CFG.read_text()
     for token in (
-        "self.episode_length_s = 2.5",
+            "self.episode_length_s = float(self.grasp_gen_validation_episode_s)",
+            "grasp_gen_validation_episode_s: float = 20.0",
         # HORA generates grasps at NOMINAL dynamics; DR stays off in grasp-gen.
         "self.domain_rand.enabled = False",
         "self.domain_rand.random_force_prob = 0.0",
@@ -462,22 +559,39 @@ def test_grasp_gen_cfg_and_done_contract(cfg_tree):
         "self.enable_fingertip_sensors = True",
         "self.enable_nontip_sensors = True",
         "self.grasp_gen_obj_init_pos = INHAND_OBJECT_INIT_POS",
-        "self.grasp_gen_pose_noise = 0.25",
+        "self.grasp_gen_pose_noise = 0.15",
         "self.require_thumb_contact = True",
         "self.min_other_finger_contacts = 2",
         "self.forbid_nontip_contact = True",
-        "self.grasp_gen_grace_steps = 5",
+        "self.grasp_gen_grace_steps = 10",
+        "self.grasp_gen_object_hold_steps = 10",
+        "self.grasp_gen_object_min_hold_steps = 2",
+        "self.grasp_gen_initial_opening_rad = 0.06",
+        "self.grasp_gen_joint_limit_margin = 0.04",
         "self.tip_dist_max = 0.13",
     ):
         assert token in cfg_source
 
     source = (_ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_grasp_gen_env.py").read_text()
+    base_source = _ENV.read_text()
     done_start = source.index("    def _get_dones(")
     done_body = source[done_start:source.index("    def _reset_idx(", done_start)]
-    assert "terminated = ~acceptance & ~in_grace" in done_body
-    assert "self.cfg.grasp_gen_grace_steps" in done_body
+    assert "terminated = ~hard_safe & ~waiting_for_cage" in done_body
+    assert "self.cfg.grasp_gen_object_min_hold_steps" in done_body
     assert "self.episode_length_buf >= self.max_episode_length - 1" in done_body
     assert "self._last_timed_out = timed_out.detach().clone()" in done_body
+    assert _class_literal(
+        cfg_tree,
+        "LinkerL20InhandRotationEnvCfg",
+        "grasp_gen_object_hold_steps",
+    ) == 10
+    assert _class_literal(
+        cfg_tree, "LinkerL20InhandRotationEnvCfg", "grasp_gen_grace_steps"
+    ) == 10
+    assert "self.episode_length_buf < int(self.cfg.grasp_gen_object_hold_steps)" in source
+    assert "self._grasp_object_seed_pose[hold_ids]" in source
+    assert "initial_q[:, flexion_cols]" in source
+    assert "self._grasp_released |= can_release" in source
 
     reset_start = source.index("    def _reset_idx(")
     reset_body = source[reset_start:source.index("    def _compute_acceptance(", reset_start)]
@@ -487,21 +601,23 @@ def test_grasp_gen_cfg_and_done_contract(cfg_tree):
 
 def test_grasp_gen_source_contracts():
     source = (_ROOT / "screwdriver_rl" / "tasks" / "linker_l20" / "inhand_grasp_gen_env.py").read_text()
+    base_source = _ENV.read_text()
     for token in (
         "_compute_acceptance",
         "_read_tip_object_forces",
         "_read_nontip_object_forces",
-        "force_matrix_w",
         "tip_dist_max",
         "require_thumb_contact",
         "min_other_finger_contacts",
         "forbid_nontip_contact",
         "nontip_force_eps",
         "grasp_gen_accept_z_margin",
+        "eval_grasp_joint_safe",
         "save_if_full",
         "np.save",
     ):
         assert token in source
+    assert "force_matrix_w" in base_source
 
     env_source = _ENV.read_text()
     for token in ("NONTIP_BODY_NAMES", "enable_nontip_sensors", "contact_nontip"):
@@ -521,5 +637,8 @@ def test_grasp_gen_source_contracts():
         "per-finger stats",
         "thumb contact mean",
         "nontip force mean",
+        "new_manifest",
+        "record_cache_entry",
+        "write_manifest",
     ):
         assert token in tool_source

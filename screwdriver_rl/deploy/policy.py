@@ -192,15 +192,19 @@ class DeployPolicy:
         self.cfg = cfg
 
         task_name = str(cfg.get("task", ""))
-        if "screwdriver-rotation-topdown" in task_name.lower():
+        fixed_wrist_task = (
+            "topdown" in task_name.lower()
+            or "inhand-rotation" in task_name.lower()
+        )
+        if fixed_wrist_task:
             if cfg.get("startup_reset_targets") is None:
                 raise RuntimeError(
-                    "top-down deploy bundle is missing startup_reset_targets"
+                    "fixed-wrist deploy bundle is missing startup_reset_targets"
                 )
             scale = cfg.get("deployment_geometry_scale")
             if scale is None:
                 raise RuntimeError(
-                    "top-down deploy bundle is missing deployment_geometry_scale"
+                    "fixed-wrist deploy bundle is missing deployment_geometry_scale"
                 )
             scale_tensor = torch.as_tensor(scale, dtype=torch.float32)
             if scale_tensor.shape != (2,) or not bool(
@@ -212,7 +216,7 @@ class DeployPolicy:
                 )
             ):
                 raise RuntimeError(
-                    "top-down deployment requires nominal geometry scale [1.0, 1.0]"
+                    "fixed-wrist deployment requires nominal geometry scale [1.0, 1.0]"
                 )
 
         codec_value = cfg.get("proprio_codec")

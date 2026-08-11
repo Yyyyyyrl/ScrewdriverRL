@@ -232,12 +232,16 @@ def export_policy_package(
     if missing_config:
         raise PolicyPackageExportError(f"bundle config is missing {missing_config}")
     task_id = str(config["task"])
+    fixed_wrist_task = (
+        "topdown" in task_id.lower()
+        or "inhand-rotation" in task_id.lower()
+    )
     if (
-        "screwdriver-rotation-topdown" in task_id.lower()
+        fixed_wrist_task
         and config.get("startup_reset_targets") is None
     ):
         raise PolicyPackageExportError(
-            "top-down bundle is missing collision-safe startup_reset_targets"
+            "fixed-wrist bundle is missing collision-safe startup_reset_targets"
         )
     observation_semantics_version = config["observation_semantics_version"]
     if (
@@ -413,6 +417,32 @@ def export_policy_package(
             "supported_runtime_api": deepcopy(metadata["supported_runtime_api"]),
             "trust": {"mode": "unsigned-local", "signature": None},
         }
+        if config.get("deployment_object_kind") is not None:
+            manifest["deployment_object"] = {
+                "kind": config["deployment_object_kind"],
+                "size_mm": deepcopy(config.get("deployment_object_size_mm")),
+                "training_mass_range_g": deepcopy(
+                    config.get("deployment_object_mass_range_g")
+                ),
+                "grasp_orientation": config.get(
+                    "deployment_grasp_orientation"
+                ),
+                "hand_root_position_m": deepcopy(
+                    config.get("deployment_hand_root_position_m")
+                ),
+                "hand_root_quaternion_wxyz": deepcopy(
+                    config.get("deployment_hand_root_quaternion_wxyz")
+                ),
+                "object_seed_position_m": deepcopy(
+                    config.get("deployment_object_seed_position_m")
+                ),
+                "grasp_cache": deepcopy(config.get("deployment_grasp_cache")),
+                "grasp_manifest_sha256": config.get(
+                    "deployment_grasp_manifest_sha256"
+                ),
+                "operator_loaded": True,
+                "palm_support_allowed": False,
+            }
         digest = package_content_digest(manifest)
         manifest["package_id"] = f"sha256:{digest}"
         manifest["package_digest"] = digest
