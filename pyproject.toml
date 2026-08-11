@@ -1,20 +1,53 @@
 [build-system]
 requires = ["setuptools>=61.0"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "screwdriver_rl"
+# The distribution is named after the repository, but the import package is still
+# `screwdriver_rl` -- renaming it would break every doc, tool and checkpoint path.
+name = "dex-forge"
 version = "0.1.0"
-description = "Dexterous in-hand screwdriver rotation tasks for Isaac Lab"
+description = "Dexterous in-hand manipulation tasks (screwdriver rotation, free-cube rotation) for Isaac Lab"
 requires-python = ">=3.10"
+
+# Deliberately minimal. Isaac Lab, Isaac Sim and rl-games are NOT listed: they are
+# installed into the conda environment out-of-band and pip cannot resolve them.
+# See QUICKSTART.md.
 dependencies = [
     "torch>=2.0",
     "gymnasium",
 ]
 
+[project.optional-dependencies]
+dev = ["ruff", "black", "pytest"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["screwdriver_rl*"]
 
-[project.optional-dependencies]
-dev = ["ruff", "black"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Most of the suite is pure-torch and runs on a laptop. The two markers below tag
+# the tests that are not: tests/conftest.py skips them when the dependency is
+# absent, so `pytest` is green anywhere.
+markers = [
+    "requires_isaac: needs a working Isaac Lab / Isaac Sim installation",
+    "requires_hardware: needs a physical LinkerHand on the CAN bus",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+# Conservative on purpose: this is a research codebase with long numeric functions,
+# so complexity and line-length nits would drown out real findings.
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # long lines are pervasive in reward/geometry math
+    "E741",  # single-letter names (l, I) are idiomatic in the kinematics code
+]
+
+[tool.black]
+line-length = 110
+target-version = ["py310"]
